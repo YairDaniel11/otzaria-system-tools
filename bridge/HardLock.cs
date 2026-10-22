@@ -1285,6 +1285,7 @@ public class HardLockService : ServiceBase
             }
             EnforcePolicies(active);
             EnforceUsb(active && blockUsb);
+            BootHardening.Enforce(active); // BOOTHARDENING: SafeBoot/WinRE/bcdedit בזמן נעילה, והחזרה בשחרור (לא זורקת)
             if (active) EnsureBridgeInSessions();
         }
         catch (Exception ex) { HardLock.SvcLog("tick: " + ex.Message); }
