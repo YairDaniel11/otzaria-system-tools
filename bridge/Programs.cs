@@ -20,14 +20,19 @@ public static class Programs
     private const string AutoKey = "kiosk.autoTorahPrograms";
     private const string KeywordsKey = "kiosk.autoTorahKeywords";
     internal const int MaxPrograms = 20;
-    private const int GraceSeconds = 30;
+    private const int GraceSeconds = 30;   // [w3] רק ל-GrantForegroundGrace (Hello/סייר), לא ל-Activate
 
     // מעטפות ומנהלי מערכת שאסור להוסיף לרשימה (עוקף את הנעילה)
+    // הזיהוי הוא לפי זהות (ProcessName, שם הקובץ ו-OriginalFilename מה-VersionInfo) — ר' IsBlockedProc / AppTrust.IsBlockedIdentity
     private static readonly HashSet<string> Blocked = new(StringComparer.OrdinalIgnoreCase)
     {
         "explorer", "cmd", "powershell", "pwsh", "wscript", "cscript", "mshta", "regedit",
         "taskmgr", "mmc", "control", "conhost", "wt", "rundll32", "msiexec",
-        "powershell_ise", "windowsterminal", "openconsole", "wsl", "bash"
+        "powershell_ise", "windowsterminal", "openconsole", "wsl", "bash",
+        // [w3] הרחבה: כלי LOLBin, ניהול מערכת, נגישות וחלונות הגדרות
+        "wmic", "forfiles", "pcalua", "msbuild", "csc", "installutil", "regsvr32", "certutil", "bitsadmin", "dism",
+        "schtasks", "sc", "net", "net1", "reg", "curl", "ftp", "eventvwr", "mstsc", "SystemSettings", "ApplicationFrameHost",
+        "osk", "narrator", "magnify", "utilman", "notepad", "mspaint",
     };
 
     // בעיה #14 סעיף 6: נכתבים בחוט בקשה (Activate) ונקראים בחוט השומר (ShouldYieldTo וכו') —
@@ -45,6 +50,10 @@ public static class Programs
         public string Path = "";
         public string[] Procs = Array.Empty<string>();
         public bool Auto;
+        // [w3] נעיצת זהות (נקבעת בעת Add, נבדקת בכל Launch ובהתאמת תהליך): מפרסם Authenticode ו/או SHA-256
+        public string Sha256 = "";
+        public string Signer = "";
+        public bool Pinned => AppTrust.HasPin(Sha256, Signer);
     }
 
     // מילות מפתח לזיהוי תוכנות תורניות בשמות התוכנות המותקנות (אפשר להרחיב ב-kiosk.autoTorahKeywords)
@@ -100,7 +109,9 @@ public static class Programs
                 string[] procs = o["procs"] is JsonArray a
                     ? a.Select(x => x?.ToString() ?? "").Where(x => x.Length > 0).ToArray()
                     : Array.Empty<string>();
-                list.Add(new Entry { Id = id, Name = name ?? id, Path = path, Procs = procs });
+                string sha = ((string)o["sha256"] ?? "").Trim().ToLowerInvariant(), signer = ((string)o["signer"] ?? "").Trim();
+                if (sha.Length != 0 && !Regex.IsMatch(sha, "^[0-9a-f]{64}$")) sha = "";
+                list.Add(new Entry { Id = id, Name = name ?? id, Path = path, Procs = procs, Sha256 = sha, Signer = signer });
             }
             catch { }
         }
@@ -113,6 +124,8 @@ public static class Programs
         ["name"] = e.Name,
         ["path"] = e.Path,
         ["procs"] = new JsonArray(e.Procs.Select(p => (JsonNode)p).ToArray()),
+        ["sha256"] = e.Sha256 ?? "",
+        ["signer"] = e.Signer ?? "",
     }).ToArray());
 
     /// <summary>
@@ -154,6 +167,7 @@ public static class Programs
             exists = IsShellApp(e.Path) || File.Exists(e.Path),
             running = ExistingWindow(e) != IntPtr.Zero,
             auto = e.Auto,
+            pinned = e.Pinned,   // [w3] false = רשומה ישנה בלי נעיצה: תותר רק אם הקובץ במיקום קבוע לא-כתיב; אחרת יש להסיר ולהוסיף מחדש
         }).ToArray()
     };
 
@@ -199,7 +213,17 @@ public static class Programs
     {
         bool shellApp = IsShellApp(e.Path);
         if (!shellApp && !File.Exists(e.Path)) throw BridgeException.NotFound("הקובץ לא נמצא: " + e.Path);
-        GraceUntil = DateTime.UtcNow.AddSeconds(GraceSeconds);
+        // [w3] אימות מחדש מול הנעיצה בכל Launch (קובץ שהוחלף/נפרץ לא מופעל). בלי חלון חסד: הזיהוי הוא לפי
+        // עץ התהליכים של מה שנפתח (PID+זמן יצירה) ולפי נתיב+נעיצה, לא "כל מה שבחזית ב-30 השניות הקרובות"
+        if (!shellApp)
+        {
+            AppTrust.Invalidate(e.Path);
+            if (!AppTrust.LaunchAllowed(e.Path, e.Sha256, e.Signer, AppTrust.Env))
+            {
+                Config.Log("programs launch חסום: הקובץ אינו תואם לנעיצה/למיקום מהימן: " + e.Path);
+                throw BridgeException.Forbidden("הקובץ שונה מאז שהתוכנה נוספה (או אינו מאומת). יש להסיר ולהוסיף אותה מחדש בסיסמה");
+            }
+        }
         IntPtr h = ExistingWindow(e);
         if (h != IntPtr.Zero)
         {
@@ -208,13 +232,14 @@ public static class Programs
             return true;
         }
         LastLaunchAt = DateTime.UtcNow;
+        _lastLaunchEntry = e;
         using (var started = Process.Start(new ProcessStartInfo(e.Path)
         {
             UseShellExecute = true,
             WorkingDirectory = shellApp ? null : System.IO.Path.GetDirectoryName(e.Path),
         }))
         {
-            if (started != null) RememberLaunched(started.Id);
+            if (started != null) RememberLaunched(started);
         }
         Task.Run(() => Focus(e));
         return false;
@@ -296,7 +321,8 @@ public static class Programs
                 throw BridgeException.BadRequest("יש להזין נתיב מלא לקובץ הפעלה (exe)");
             if (!File.Exists(path)) throw BridgeException.NotFound("הקובץ לא נמצא: " + path);
             string stem = System.IO.Path.GetFileNameWithoutExtension(path);
-            if (Blocked.Contains(stem)) throw BridgeException.Forbidden("אי אפשר להוסיף את התוכנה הזו לרשימה");
+            if (Blocked.Contains(stem) || AppTrust.IsBlockedIdentity(null, null, AppTrust.GetOriginalName(path), Blocked))
+                throw BridgeException.Forbidden("אי אפשר להוסיף את התוכנה הזו לרשימה");
         }
         else if (string.IsNullOrWhiteSpace(b.Str("procs")))
             throw BridgeException.BadRequest("לאפליקציית חנות חובה לציין שם תהליך (בשדה „תהליכים נוספים”), כדי שהחלון שלה יזוהה כתוכנה מותרת");
@@ -315,12 +341,16 @@ public static class Programs
         if (Load().Any(x => x.Path.Equals(path, StringComparison.OrdinalIgnoreCase)))
             throw BridgeException.Exists("התוכנה כבר ברשימה");
 
+        // [w3] נעיצת הזהות בעת ההוספה (בסיסמה): מפרסם חתום אם יש + SHA-256
+        var pin = shellApp ? ("", "") : AppTrust.CreatePin(path);
         list.Add(new Entry
         {
             Id = Convert.ToHexString(RandomNumberGenerator.GetBytes(4)).ToLowerInvariant(),
             Name = name,
             Path = path,
             Procs = procs.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+            Sha256 = pin.Item1,
+            Signer = pin.Item2,
         });
         Save(list, b.Str("password"));
         return ListResult();
@@ -344,7 +374,8 @@ public static class Programs
         var found = new List<object>();
         string word = AppPath("WINWORD.EXE");
         if (word != null) found.Add(new { name = "Word", path = word, procs = "WINWORD" });
-        foreach (var (name, path, procs) in KnownTorah())
+        // [w3] Detect הוא הצעה בלבד לבעל הסיסמה (Add מבצע נעיצה): כאן נשאר החיפוש הרחב; אל הרשימה האוטומטית הוא לא נכנס
+        foreach (var (name, path, procs) in KnownTorah(trustedOnly: false))
             found.Add(new { name, path, procs = string.Join(", ", procs) });
         foreach (var (name, path, procs) in KnownUtilities())
             found.Add(new { name, path, procs = string.Join(", ", procs) });
@@ -457,26 +488,38 @@ public static class Programs
         new("הנקדן — אוצריא", new[] { "הנקדן - אוצריא - V1.0.exe" }, new[] { "הנקדן - אוצריא - V1.0" }, () => Portable("הנקדן*.exe")),
     };
 
-    private static List<(string name, string path, string[] procs)> _knownCache;
-    private static DateTime _knownAt = DateTime.MinValue;
+    private static List<(string name, string path, string[] procs)> _knownCache, _knownCacheTrusted;
+    private static DateTime _knownAt = DateTime.MinValue, _knownAtTrusted = DateTime.MinValue;
 
-    /// <summary>לכל תוכנה מוכרת: קודם הנתיבים הידועים, ואם לא נמצאה — חיפוש לפי שם הקובץ בכוננים (עד עומק 4).
-    /// התוצאה נשמרת ל-10 דקות כדי לא לסרוק שוב בכל פתיחה</summary>
-    private static List<(string name, string path, string[] procs)> KnownTorah()
+    /// <summary>
+    /// לכל תוכנה מוכרת: קודם הנתיבים הידועים, ואם לא נמצאה — חיפוש לפי שם הקובץ בכוננים (עד עומק 4).
+    /// התוצאה נשמרת ל-10 דקות כדי לא לסרוק שוב בכל פתיחה.
+    /// [w3] trustedOnly (הזיהוי האוטומטי = מקור אמון): רק מועמדים במיקום קבוע לא-כתיב (Program Files/אוצריא + ACL),
+    /// בלי Search, בלי Portable (שולחן עבודה/הורדות/שורשי כוננים/USB) ובלי AppData. false = להצעה בלבד ב-Detect.
+    /// </summary>
+    private static List<(string name, string path, string[] procs)> KnownTorah(bool trustedOnly = true)
     {
         lock (AutoGate)
         {
-            if (_knownCache != null && (DateTime.UtcNow - _knownAt).TotalMinutes < 10) return _knownCache;
+            var cache = trustedOnly ? _knownCacheTrusted : _knownCache;
+            var at = trustedOnly ? _knownAtTrusted : _knownAt;
+            if (cache != null && (DateTime.UtcNow - at).TotalMinutes < 10) return cache;
             var res = new List<(string, string, string[])>();
             foreach (var k in KnownList)
             {
                 string hit = null;
-                try { hit = k.Candidates().FirstOrDefault(File.Exists); } catch { }
-                hit ??= Search(k.Exes);
+                try
+                {
+                    hit = trustedOnly
+                        ? k.Candidates().FirstOrDefault(c => File.Exists(c) && AppTrust.IsTrustedLocation(c))
+                        : k.Candidates().FirstOrDefault(File.Exists);
+                }
+                catch { }
+                if (!trustedOnly) hit ??= Search(k.Exes);
                 if (hit != null) res.Add((k.Name, hit, k.Procs));
             }
-            _knownCache = res;
-            _knownAt = DateTime.UtcNow;
+            if (trustedOnly) { _knownCacheTrusted = res; _knownAtTrusted = DateTime.UtcNow; }
+            else { _knownCache = res; _knownAt = DateTime.UtcNow; }
             return res;
         }
     }
@@ -516,9 +559,9 @@ public static class Programs
         return null;
     }
 
-    private static string AppPath(string exe)
+    private static string AppPath(string exe, bool trustedOnly = false)
     {
-        foreach (var hive in new[] { RegistryHive.LocalMachine, RegistryHive.CurrentUser })
+        foreach (var hive in TrustedHives(trustedOnly))
             foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
             {
                 try
@@ -526,7 +569,7 @@ public static class Programs
                     using var bk = RegistryKey.OpenBaseKey(hive, view);
                     using var k = bk.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\" + exe);
                     string v = (k?.GetValue(null) as string)?.Trim().Trim('"');
-                    if (!string.IsNullOrEmpty(v) && File.Exists(v)) return v;
+                    if (!string.IsNullOrEmpty(v) && File.Exists(v) && (!trustedOnly || AppTrust.IsTrustedLocation(v))) return v;
                 }
                 catch { }
             }
@@ -534,6 +577,17 @@ public static class Programs
     }
 
     // ---------- זיהוי אוטומטי של תוכנות תורניות ----------
+
+    /// <summary>
+    /// [w3] כוורי רישום שמותר לסמוך עליהם כמקור לזיהוי אוטומטי: HKLM בלבד. HKCU (Uninstall, App Paths) כתיב
+    /// למשתמש הרגיל — הוא היה יכול להזריק "זית"/"אוצר" שמצביע ל-exe שלו ולקבל הרשאת חזית
+    /// </summary>
+    internal static RegistryHive[] TrustedHives(bool trustedOnly) =>
+        trustedOnly ? new[] { RegistryHive.LocalMachine } : new[] { RegistryHive.LocalMachine, RegistryHive.CurrentUser };
+
+    /// <summary>[w3] האם נתיב שנמצא בזיהוי האוטומטי ראוי להתקבל (מיקום קבוע לא-כתיב, לא חסום)</summary>
+    internal static bool AutoCandidateOk(string path, AppTrust.ITrustEnv env) =>
+        !string.IsNullOrEmpty(path) && !Blocked.Contains(System.IO.Path.GetFileNameWithoutExtension(path)) && env.IsTrustedLocation(path);
 
     private static List<Entry> DetectAuto()
     {
@@ -543,12 +597,12 @@ public static class Programs
             var found = new List<Entry>();
             try
             {
-                string word = AppPath("WINWORD.EXE");
+                string word = AppPath("WINWORD.EXE", trustedOnly: true);
                 if (word != null) AddAuto(found, "Word", word, new[] { "WINWORD" });
-                foreach (var (kn, kp, kprocs) in KnownTorah()) AddAuto(found, kn, kp, kprocs);
+                foreach (var (kn, kp, kprocs) in KnownTorah(trustedOnly: true)) AddAuto(found, kn, kp, kprocs);
 
                 var keywords = TorahKeywords.Concat(Keywords).Select(k => k.ToLowerInvariant()).ToArray();
-                foreach (var hive in new[] { RegistryHive.LocalMachine, RegistryHive.CurrentUser })
+                foreach (var hive in TrustedHives(true))
                     foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
                     {
                         try
@@ -579,7 +633,7 @@ public static class Programs
 
     private static void AddAuto(List<Entry> list, string name, string path, string[] procs)
     {
-        if (Blocked.Contains(System.IO.Path.GetFileNameWithoutExtension(path))) return;
+        if (!AutoCandidateOk(path, AppTrust.Env)) return;   // [w3] גם נתיב שמגיע מהרישום חייב להיות במיקום קבוע לא-כתיב
         if (list.Any(x => x.Path.Equals(path, StringComparison.OrdinalIgnoreCase))) return;
         string hash = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(path.ToLowerInvariant()))).Substring(0, 8).ToLowerInvariant();
         list.Add(new Entry { Id = "auto-" + hash, Name = name, Path = path, Procs = procs, Auto = true });
@@ -615,20 +669,30 @@ public static class Programs
 
     // ---------- שילוב עם השומר של הנעילה ----------
 
-    // תהליכים שנפתחו דרך הגשר (מזהה → זמן פתיחה). נשמרים 10 דקות, כדי לזהות גם תהליכי בן
-    // של מפעיל שכבר נסגר (למשל תוכנה שמפעילה תהליך אחר שמציג את החלון).
-    private static readonly Dictionary<int, DateTime> Launched = new();
+    // תהליכים שנפתחו דרך הגשר: מזהה + זמן יצירה (מונע PID reuse) + תוקף 10 דקות שנאכף בכל בדיקה (AppTrust.LaunchedSet).
+    // נשמרים 10 דקות, כדי לזהות גם תהליכי בן של מפעיל שכבר נסגר (למשל תוכנה שמפעילה תהליך אחר שמציג את החלון).
+    private static readonly AppTrust.LaunchedSet Launched = new();
     private static readonly Dictionary<int, (int parent, DateTime at)> ParentCache = new();
     private static readonly object PidGate = new();
+    private static Entry _lastLaunchEntry;   // לבדיקת מפרסם של תהליכים חדשים שאחרי הפתיחה (IsNewAfterLaunch)
 
-    private static void RememberLaunched(int pid)
+    private static void RememberLaunched(Process started)
     {
-        lock (PidGate)
+        DateTime start;
+        try { start = started.StartTime.ToUniversalTime(); }
+        catch { return; }   // אין זמן יצירה = אי אפשר לאמת זהות אחר כך (fail-closed: לא רושמים)
+        Launched.Remember(started.Id, start, DateTime.UtcNow);
+    }
+
+    private static AppTrust.ProcInfo Probe(int pid)
+    {
+        try
         {
-            foreach (int k in Launched.Where(x => DateTime.UtcNow - x.Value > TimeSpan.FromMinutes(10)).Select(x => x.Key).ToList())
-                Launched.Remove(k);
-            Launched[pid] = DateTime.UtcNow;
+            using var p = Process.GetProcessById(pid);
+            try { return new AppTrust.ProcInfo(true, p.StartTime.ToUniversalTime()); }
+            catch { return new AppTrust.ProcInfo(true, null); }   // חי אבל אין גישה לזמן (מוגבה)
         }
+        catch { return new AppTrust.ProcInfo(false, null); }
     }
 
     private static int ParentOf(int pid)
@@ -647,16 +711,8 @@ public static class Programs
         return parent;
     }
 
-    /// <summary>האם התהליך נפתח דרך הגשר, או שהוא תהליך בן (עד 6 דורות) של תהליך שנפתח כך</summary>
-    private static bool IsLaunchedTree(int pid)
-    {
-        for (int i = 0; i < 6 && pid > 4; i++)
-        {
-            lock (PidGate) if (Launched.ContainsKey(pid)) return true;
-            pid = ParentOf(pid);
-        }
-        return false;
-    }
+    /// <summary>האם התהליך נפתח דרך הגשר, או שהוא תהליך בן (עד 6 דורות) של תהליך שנפתח כך. תוקף 10 דקות, והשוואת זמן יצירה (PID reuse)</summary>
+    private static bool IsLaunchedTree(int pid) => Launched.IsTree(pid, Probe, ParentOf, DateTime.UtcNow);
 
     /// <summary>תיקיות רחבות מדי כדי להתיר את כל מה שבהן (Windows, Program Files, תיקיית משתמש...)</summary>
     private static bool BroadDir(string dir)
@@ -701,19 +757,21 @@ public static class Programs
         catch { return false; }
     }
 
-    /// <summary>האם התהליך הוא תוכנה מהרשימה: לפי שם תהליך, קובץ הפעלה מלא, או תיקיית ההתקנה (לא רחבה)</summary>
+    /// <summary>
+    /// האם התהליך הוא תוכנה מהרשימה. [w3] לא לפי שם תהליך בלבד: נדרש נתיב קובץ ההפעלה, והוא חייב להתאים לרשומה
+    /// (נתיב מלא + נעיצת מפרסם/SHA-256, או מיקום קבוע לא-כתיב); תהליכי עזר — רק במיקום כזה או חתומים באותו מפרסם.
+    /// תהליך שאין גישה לנתיב שלו (מוגבה) אינו תואם (fail-closed).
+    /// </summary>
     private static bool MatchesList(Process p, IEnumerable<Entry> list)
     {
-        string fg = p.ProcessName.ToLowerInvariant();
-        if (list.Any(e => ProcNames(e).Contains(fg))) return true;
         string exe = null;
         try { exe = p.MainModule?.FileName; } catch { /* תהליך מוגבה או ללא גישה */ }
         if (string.IsNullOrEmpty(exe)) return false;
         foreach (var e in list)
         {
-            if (exe.Equals(e.Path, StringComparison.OrdinalIgnoreCase)) return true;
             string dir = System.IO.Path.GetDirectoryName(e.Path);
-            if (!BroadDir(dir) && exe.StartsWith(dir.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) return true;
+            if (AppTrust.MatchExe(exe, e.Path, BroadDir(dir) ? null : dir, ProcNames(e), e.Sha256, e.Signer, AppTrust.Env) != AppTrust.MatchKind.None)
+                return true;
         }
         return false;
     }
@@ -723,7 +781,7 @@ public static class Programs
     {
         if (p.Id == Environment.ProcessId) return true;
         string n = p.ProcessName;
-        if (Blocked.Contains(n)) return true;
+        if (IsBlockedProc(p)) return true;
         string otz = System.IO.Path.GetFileNameWithoutExtension(Kiosk.OtzariaPath() ?? "otzaria");
         return n.Equals(otz, StringComparison.OrdinalIgnoreCase);
     }
@@ -737,16 +795,29 @@ public static class Programs
 
     // מעטפות פקודה, מסופים ומארחי סקריפטים: חלון כזה בחזית בזמן נעילה נסגר בידי השומר.
     // הגשר מפעיל בעצמו cmd/powershell לפקודות עזר, אבל תמיד בלי חלון (CreateNoWindow), ולכן הם אף פעם לא בחזית
-    private static readonly HashSet<string> ShellHosts = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "cmd", "powershell", "pwsh", "powershell_ise", "wscript", "cscript", "mshta",
-        "conhost", "openconsole", "wt", "windowsterminal", "wsl", "bash",
-    };
+    // [w3] כל Blocked נסגר כשהוא בחזית, חוץ מ: explorer (נהרג ב-Watch בנפרד ויש חלון צילום), msiexec (מתקינים),
+    // ApplicationFrameHost (מארח כל אפליקציות ה-UWP המותרות, הריגתו סוגרת גם אותן — נחסם רק כ"לא מותר" בחזית)
+    private static readonly HashSet<string> ShellHosts = new(
+        Blocked.Where(x => !x.Equals("explorer", StringComparison.OrdinalIgnoreCase) &&
+                           !x.Equals("msiexec", StringComparison.OrdinalIgnoreCase) &&
+                           !x.Equals("ApplicationFrameHost", StringComparison.OrdinalIgnoreCase)),
+        StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>האם התהליך הוא מעטפת פקודה/מסוף/מארח סקריפטים</summary>
+    /// <summary>[w3] זהות חסומה לפי שם תהליך + שם הקובץ + OriginalFilename (שינוי שם cmd/powershell לא עוקף)</summary>
+    internal static bool IsBlockedProc(Process p) => IdentityIn(p, Blocked);
+
+    private static bool IdentityIn(Process p, ISet<string> set)
+    {
+        string n = "", exe = null;
+        try { n = p.ProcessName; } catch { return false; }
+        try { exe = p.MainModule?.FileName; } catch { /* מוגבה: נשארים עם שם התהליך */ }
+        return AppTrust.IsBlockedIdentity(n, exe, AppTrust.GetOriginalName(exe), set);
+    }
+
+    /// <summary>האם התהליך הוא מעטפת פקודה/מסוף/מארח סקריפטים (לפי זהות, לא לפי שם בלבד)</summary>
     public static bool IsShellHost(Process p)
     {
-        try { return ShellHosts.Contains(p.ProcessName); }
+        try { return IdentityIn(p, ShellHosts); }
         catch { return false; }
     }
 
@@ -760,7 +831,7 @@ public static class Programs
         try
         {
             using var p = Process.GetProcessById((int)foregroundPid);
-            if (p.Id != Environment.ProcessId && Blocked.Contains(p.ProcessName)) return false;
+            if (p.Id != Environment.ProcessId && IsBlockedProc(p)) return false;
         }
         catch { /* תהליך שנסגר: ההחלטה נשארת ל-ShouldYieldTo */ }
         return ShouldYieldTo(foregroundPid);
@@ -776,12 +847,24 @@ public static class Programs
 
     /// <summary>
     /// תהליך שהתחיל בין 3 שניות לפני הפתיחה דרך הגשר לבין 90 שניות אחריה. הורחב פעם ל-10 דקות והוחזר:
-    /// זה לא פתר את בעיית כלי החיתוך, והרחבה כזו מתירה כל תהליך שנפתח אחרי תוכנה מותרת (דפדפן מקישור וכו')
+    /// זה לא פתר את בעיית כלי החיתוך, והרחבה כזו מתירה כל תהליך שנפתח אחרי תוכנה מותרת (דפדפן מקישור וכו').
+    /// [w3] בנוסף: קובץ ההפעלה שלו חייב להיות במיקום קבוע לא-כתיב או חתום באותו מפרסם של התוכנה שנפתחה.
+    /// </summary>
     private static bool IsNewAfterLaunch(Process p)
     {
         if (!StartedAfterLaunch(p)) return false;
-        try { return p.StartTime.ToUniversalTime() <= LastLaunchAt.AddSeconds(90); }
+        try { if (p.StartTime.ToUniversalTime() > LastLaunchAt.AddSeconds(90)) return false; }
         catch { return false; }
+        string exe = null;
+        try { exe = p.MainModule?.FileName; } catch { }
+        if (string.IsNullOrEmpty(exe)) return false;
+        if (AppTrust.Env.IsTrustedLocation(exe)) return true;
+        var le = _lastLaunchEntry;
+        if (le == null) return false;
+        if (le.Path != null && exe.Equals(le.Path, StringComparison.OrdinalIgnoreCase)) return AppTrust.LaunchAllowed(exe, le.Sha256, le.Signer, AppTrust.Env);
+        if (string.IsNullOrEmpty(le.Signer)) return false;
+        var s = AppTrust.Env.Sig(exe);
+        return s.Valid && string.Equals(s.Subject, le.Signer, StringComparison.OrdinalIgnoreCase);
     }
 
     private delegate bool EnumWindowsProc(IntPtr h, IntPtr l);

@@ -876,7 +876,11 @@ public class HardLockService : ServiceBase
                         if (!Programs.IsValidProcName(n)) return Err("bad_request", "שם תהליך אינו תקין: " + n);
                         procs.Add(n);
                     }
-                clean.Add(new JsonObject { ["id"] = id, ["name"] = name.Length > 0 ? name : id, ["path"] = path, ["procs"] = procs });
+                // [w3] נעיצת זהות (SHA-256 / מפרסם Authenticode) חייבת לשרוד את אחסון המדיניות בשירות
+                string sha = (o["sha256"]?.ToString() ?? "").Trim().ToLowerInvariant(), signer = (o["signer"]?.ToString() ?? "").Trim();
+                if (sha.Length != 0 && !System.Text.RegularExpressions.Regex.IsMatch(sha, "^[0-9a-f]{64}$")) return Err("bad_request", "SHA-256 אינו תקין: " + name);
+                if (signer.Length > 400) return Err("bad_request", "שם מפרסם ארוך מדי: " + name);
+                clean.Add(new JsonObject { ["id"] = id, ["name"] = name.Length > 0 ? name : id, ["path"] = path, ["procs"] = procs, ["sha256"] = sha, ["signer"] = signer });
             }
             res["programs"] = clean;
         }
