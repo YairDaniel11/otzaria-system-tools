@@ -649,7 +649,7 @@
 
   var SECTION_NAMES = {
     audio: 'שמע', display: 'מסך', energy: 'חשמל וסוללה', keyboard: 'מקלדת', mouse: 'עכבר ומשטח מגע',
-    printer: 'מדפסות', time: 'שעה ותאריך', wifi: 'רשת אלחוטית', bluetooth: 'בלוטות׳', airplane: 'מצב טיסה', usb: 'התקני USB'
+    printer: 'מדפסות', time: 'שעה ותאריך', wifi: 'רשת אלחוטית', bluetooth: 'בלוטות׳', airplane: 'מצב טיסה', usb: 'התקני USB', power: 'הפעלה מחדש וכיבוי'
   };
 
   /* זמנים ידועים שאפשר להציג בשומר המסך (ת"ז מתאימות ל-bridge/Zmanim.cs KnownZmanim).

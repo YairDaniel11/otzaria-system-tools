@@ -813,7 +813,7 @@ public class HardLockService : ServiceBase
         // עצירה יזומה של השירות (sc stop): אף אחד אחר כבר לא יאכוף, ו-HKEY_USERS של המשתמשים נשאר עם
         // DisableTaskMgr/DisableRegistryTools (וחסימת USB) - מנהל המשימות ועורך הרישום חסומים בלי שום נעילה.
         // מנקים בעצירה. הנעילה השמורה (active) לא משתנה, ולכן כשהשירות יעלה שוב ה-Tick הראשון יאכוף מחדש
-        try { EnforcePolicies(false); EnforceUsb(false); }
+        try { EnforcePolicies(false); EnforceUsb(false); BootHardening.Enforce(false); } // BOOTHARDENING: מחזיר SafeBoot/WinRE ומאפס _lastActive
         catch (Exception ex) { HardLock.SvcLog("stop cleanup: " + ex.Message); }
         HardLock.SvcLog("service: נעצר");
     }
@@ -1631,6 +1631,7 @@ public class HardLockService : ServiceBase
             Thread.Sleep(500);
             EnforcePolicies(false);
             EnforceUsb(false);
+            BootHardening.Enforce(false); // BOOTHARDENING: אחרת SafeBoot/WinRE נשארים נעולים אחרי הסרה
             HardLock.SvcLog("service: הסרה");
             HardLock.UnregisterMachineRun();
             Config.Run("sc.exe", "delete " + HardLock.ServiceName, 10000);

@@ -174,7 +174,7 @@
         active: false, secondsLeft: 0, until: '', service: false, serviceOutdated: false },
       schedule: { enabled: false, start: '20:00', end: '02:00', warn: true },
       openSections: ['audio', 'display', 'energy', 'keyboard', 'mouse', 'printer'],
-      allSections: ['audio', 'display', 'energy', 'keyboard', 'mouse', 'printer', 'time', 'wifi', 'bluetooth', 'airplane', 'usb']
+      allSections: ['audio', 'display', 'energy', 'keyboard', 'mouse', 'printer', 'time', 'wifi', 'bluetooth', 'airplane', 'usb', 'power']
     },
     programs: [],
     autoTorah: false,

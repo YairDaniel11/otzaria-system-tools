@@ -93,7 +93,7 @@ public static partial class Kiosk
 
     /// <summary>כל ההגדרות שאפשר לפתוח או לחסום בנעילה. רשת, בלוטות', מצב טיסה, USB ושעה חסומים כברירת מחדל</summary>
     public static readonly string[] AllSections =
-        { "audio", "display", "energy", "keyboard", "mouse", "printer", "time", "wifi", "bluetooth", "airplane", "usb" };
+        { "audio", "display", "energy", "keyboard", "mouse", "printer", "time", "wifi", "bluetooth", "airplane", "usb", "power" };
     private static readonly string[] DefaultOpenSections = { "audio", "display", "energy", "keyboard", "mouse", "printer" };
 
     public static string[] OpenSections =>
@@ -1333,7 +1333,7 @@ public static partial class Kiosk
             using var p = Process.GetProcessById((int)fgPid);
             if (p.SessionId != session || !Programs.IsShellHost(p)) return;
             string n = p.ProcessName;
-            p.Kill();
+            if (!AppTrust.KillLogged(p, "shell")) return;
             LogThrottled("shell:" + n, "watchdog: חלון " + n + " נסגר (מעטפות ומארחי סקריפטים חסומים בנעילה)", 60);
         }
         catch { /* נסגר כבר או ללא הרשאה */ }
