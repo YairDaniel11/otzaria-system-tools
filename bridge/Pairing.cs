@@ -27,6 +27,33 @@ public static class Pairing
         Server.Route("/pair/revoke", Revoke);
     }
 
+    /// <summary>
+    /// אתגר-תגובה לתוסף (תואם לאחור, תוסף ישן מתעלם): התוסף שולח nonce אקראי ב-X-Otzaria-Challenge ל-/health, והגשר מחזיר לכל צימוד
+    /// HMAC-SHA256(מפתח = SHA-256 hex של הטוקן, הודעה = nonce). התוסף מחשב את אותו דבר מהטוקן שלו ובודק לפני שהוא שולח טוקן/סיסמה.
+    /// WHY: גשר מזויף על פורט נמוך (47917) לא מכיר את הגיבוב, ולכן לא יכול להוכיח — והתוסף לא מוסר לו טוקן וסיסמה. הגשר שומר רק גיבוב,
+    /// והגיבוב עצמו אינו נחשף (רק HMAC). ללא שינוי בתוסף הקיים ההגנה אינה פעילה — נדרש עדכון קטן בצד התוסף
+    /// </summary>
+    public static Dictionary<string, string> Proofs(string nonce)
+    {
+        var res = new Dictionary<string, string>();
+        if (string.IsNullOrEmpty(nonce) || nonce.Length is < 16 or > 128) return res;
+        lock (Gate)
+            foreach (var c in Clients().OfType<JsonObject>())
+            {
+                string id = c["id"]?.ToString(), hash = c["hash"]?.ToString();
+                if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(hash)) continue;
+                res[id] = ProofFor(hash, nonce);
+            }
+        return res;
+    }
+
+    /// <summary>ההוכחה לגיבוב נתון (hex באותיות גדולות כפי ששמור) — התוסף מחשב את אותו דבר עם SHA-256 hex של הטוקן שלו</summary>
+    public static string ProofFor(string tokenSha256Hex, string nonce)
+    {
+        byte[] key = Encoding.ASCII.GetBytes(tokenSha256Hex.ToUpperInvariant());
+        return Convert.ToHexString(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(nonce))).ToLowerInvariant();
+    }
+
     private static string Sha(string token) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token ?? "")));
 

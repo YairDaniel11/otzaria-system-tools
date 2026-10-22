@@ -18,6 +18,13 @@ public static class Program
 
     [DllImport("kernel32.dll")] private static extern bool AttachConsole(int pid);
 
+    /// <summary>
+    /// יציאה כשה-mutex תפוס. גשר שהשירות הפעיל לא יוצא: השירות כבר קבע (לפי נתיב) שאין גשר אמיתי בסשן, ולכן mutex תפוס הוא
+    /// תהליך זר שתפס את השם מראש (mutex squat) ולא מופע לגיטימי. WHY: אחרת כל תהליך משתמש היה מונע מהגשר לעלות בנעילה.
+    /// מופע כפול של גשר שהמשתמש הפעיל — עדיין יוצא כמו קודם
+    /// </summary>
+    internal static bool ShouldExitOnMutex(bool first, bool fromService) => !first && !fromService;
+
     [STAThread]
     public static int Main(string[] args)
     {
@@ -74,8 +81,10 @@ public static class Program
             // לפני הכול: אם אין נעילה פעילה — שולחן העבודה חייב לעלות (בעיה #8)
             Kiosk.BootGuard();
 
+            InstallTrust.CaptureSelf(); // גיבוב ה-exe הרץ נתפס עכשיו (לאימות התקנה מוגברת מאוחרת), לפני שמשתמש יספיק להחליף את הקובץ
+
             using var mutex = new Mutex(true, @"Local\OtzariaBridge", out bool first);
-            if (!first) return 0;
+            if (ShouldExitOnMutex(first, Has("--from-service"))) return 0;
 
             Application.SetHighDpiMode(HighDpiMode.SystemAware);
             Application.EnableVisualStyles();
