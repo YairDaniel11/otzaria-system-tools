@@ -58,12 +58,19 @@ public static class PackB
         string dest = Full(b.Req("dest"));
         if (!dest.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) dest += ".zip";
         FsApi.EnsureNotProtected(dest);
+        FsApi.EnsureWriteTargetAllowed(dest);
         dest = Unique(dest);
+        var secret = FsApi.SecretRoots();   // WHY: דחיסת אב של Config.Dir (%LOCALAPPDATA%) לא תכלול את config.json
+        bool strict = Kiosk.IsActive || FxPolicy.IsRestricted;
         using (var zip = ZipFile.Open(dest, ZipArchiveMode.Create))
         {
             foreach (string s in sources)
             {
-                if (File.Exists(s)) zip.CreateEntryFromFile(s, Path.GetFileName(s), CompressionLevel.Optimal);
+                if (File.Exists(s))
+                {
+                    FsApi.EnsureNoHardlink(s);
+                    zip.CreateEntryFromFile(s, Path.GetFileName(s), CompressionLevel.Optimal);
+                }
                 else if (Directory.Exists(s))
                 {
                     string root = Path.GetFileName(s.TrimEnd('\\', '/'));
@@ -72,6 +79,8 @@ public static class PackB
                     foreach (var f in Directory.EnumerateFiles(s, "*", opt))
                     {
                         if (string.Equals(f, dest, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (FsApi.IsSecretItem(f, secret)) continue;
+                        if (strict && PathPolicy.HardLinkCount(f) > 1) continue;
                         string rel = Path.Combine(root, Path.GetRelativePath(s, f)).Replace('\\', '/');
                         try { zip.CreateEntryFromFile(f, rel, CompressionLevel.Optimal); any = true; } catch { }
                     }
@@ -96,10 +105,12 @@ public static class PackB
         int count = 0;
         using (var zip = ZipFile.OpenRead(src))
         {
+            // WHY: בדיקה מראש של כל הרשומות, ודחיית כל הארכיב (fail-closed) לפני שנכתב בייט: פריסה לאב של Startup,
+            // zip-slip, נתיב מוחלט/ADS, או רשומה מריצה בנעילה
+            CheckZipEntries(zip.Entries.Select(x => x.FullName), dest);
             foreach (var e in zip.Entries)
             {
                 string target = Path.GetFullPath(Path.Combine(dest, e.FullName));
-                // הגנה מ-Zip Slip: אין יציאה מתיקיית היעד
                 if (!target.StartsWith(root, StringComparison.OrdinalIgnoreCase)) continue;
                 if (e.FullName.EndsWith('/') || e.FullName.EndsWith('\\')) { Directory.CreateDirectory(target); continue; }
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
@@ -108,6 +119,31 @@ public static class PackB
             }
         }
         return new { path = dest, files = count };
+    }
+
+    /// <summary>שם רשומה בטוח: יחסי, בלי "..", בלי כונן/ADS (:), בלי נתיב מוחלט/UNC</summary>
+    internal static bool IsSafeEntryName(string name)
+    {
+        if (string.IsNullOrEmpty(name) || name.Contains(':') || name.Contains('\0')) return false;
+        string n = name.Replace('\\', '/');
+        if (n.StartsWith('/')) return false;
+        return !n.Split('/').Any(seg => seg == "..");
+    }
+
+    /// <summary>זורק Forbidden אם רשומה כלשהי אינה בטוחה או מגיעה לאזור מוגן/סודי/מריץ. נקרא לפני כל חילוץ</summary>
+    internal static void CheckZipEntries(IEnumerable<string> names, string dest)
+    {
+        var secret = FsApi.SecretRoots();
+        foreach (string name in names)
+        {
+            if (!IsSafeEntryName(name)) throw BridgeException.Forbidden("הארכיב מכיל נתיב לא בטוח: " + name);
+            string target = Path.GetFullPath(Path.Combine(dest, name.Replace('/', '\\')));
+            if (FsGuard.IsUnderAny(target, secret) || FsGuard.IsUnderAny(PathPolicy.LongName(target), secret))
+                throw BridgeException.Forbidden("הארכיב מכיל רשומה באזור מוגן: " + name);
+            FsApi.EnsureNotProtected(target);
+            FxPolicy.EnsurePathAllowed(target);
+            if (!(name.EndsWith('/') || name.EndsWith('\\'))) FsApi.EnsureWriteTargetAllowed(target);
+        }
     }
 
     private static string Unique(string p)

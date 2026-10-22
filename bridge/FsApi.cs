@@ -73,21 +73,25 @@ public static class FsApi
     private static bool Exists(string p) => File.Exists(p) || Directory.Exists(p);
 
     /// <summary>אזורים מוגנים: מחיקה, העברה ושינוי שם אסורים</summary>
-    internal static void EnsureNotProtected(string p)
+    internal static void EnsureNotProtected(string p, bool tree = false)
     {
+        // tree: שינוי שם/העברה/מחיקה. WHY (סבב 4): פעולה על אב של אזור מוגן (%LOCALAPPDATA%, Roaming\Microsoft\Windows)
+        // מזיזה את המוגן עצמו, לכן חסום גם כשהנתיב הוא אב. ליצירה/כתיבה בתוך אב (קובץ בתיקיית הבית) נשאר מותר.
         // ביקורת #30 ממצא 3: השוואת מחרוזות לבדה עקיפה דרך \\?\, שמות 8.3 וצמתים.
         // בודקים גם את הנתיב כפי שנכתב וגם את הנתיב הסופי שמערכת הקבצים מחזירה.
         if (p.StartsWith(@"\\?\") || p.StartsWith(@"\\.\") || p.StartsWith(@"\??\"))
             throw BridgeException.Forbidden("נתיב מסוג התקן אינו נתמך");
-        EnsureNotProtectedCore(p);
+        if (FsGuard.IsBlockedUnc(Path.GetFullPath(p), true, Environment.MachineName))
+            throw BridgeException.Forbidden("נתיב רשת (UNC) אינו נתמך בפעולה זו");
+        EnsureNotProtectedCore(p, tree);
         string canon = CanonicalPath(p);
-        if (!string.Equals(canon, Path.GetFullPath(p), StringComparison.OrdinalIgnoreCase)) EnsureNotProtectedCore(canon);
+        if (!string.Equals(canon, Path.GetFullPath(p), StringComparison.OrdinalIgnoreCase)) EnsureNotProtectedCore(canon, tree);
     }
 
     /// <summary>הנתיב הסופי (שמות ארוכים, צמתים וקישורים מפוענחים) של הנתיב או של ההורה הקיים הקרוב. הלוגיקה ב-PathPolicy</summary>
     internal static string CanonicalPath(string p) => PathPolicy.Canonical(p, strict: false);
 
-    private static void EnsureNotProtectedCore(string p)
+    private static void EnsureNotProtectedCore(string p, bool tree = false)
     {
         string full = Path.GetFullPath(p).TrimEnd('\\');
         string root = Path.GetPathRoot(full)?.TrimEnd('\\') ?? "";
@@ -105,6 +109,11 @@ public static class FsApi
         // הרצה אוטומטית והתקנה כמשתמש רגיל: Startup (משתמש+מערכת), תפריט התחלה, Tasks, %LOCALAPPDATA%\Programs.
         // WHY: כתיבה לשם שווה הרצת קוד בכניסה הבאה, מחוץ לכל מדיניות הקבצים והתוכנות.
         guarded.AddRange(FsGuard.AutoRunRoots());
+        if (tree)
+        {
+            var anc = guarded.Concat(SecretRoots()).ToList();
+            if (FsGuard.IsAncestorOfAny(full, anc)) throw BridgeException.Forbidden("אזור מוגן: הנתיב מכיל אזור מוגן");
+        }
         foreach (string g in guarded.Where(x => !string.IsNullOrEmpty(x)))
         {
             string gg = g.TrimEnd('\\');
@@ -128,6 +137,9 @@ public static class FsApi
     {
         if (p.StartsWith(@"\\?\") || p.StartsWith(@"\\.\") || p.StartsWith(@"\??\"))
             throw BridgeException.Forbidden("נתיב מסוג התקן אינו נתמך");
+        // UNC עצמי (\\localhost\c$) עוקף את כל בדיקות הנתיב: נדחה תמיד; כל UNC אחר בנעילה/הגבלה
+        if (FsGuard.IsBlockedUnc(Path.GetFullPath(p), Kiosk.IsActive || FxPolicy.IsRestricted, Environment.MachineName))
+            throw BridgeException.Forbidden("נתיב רשת (UNC) חסום");
         var roots = SecretRoots();
         string full = PathPolicy.LongName(Path.GetFullPath(p));
         if (FsGuard.IsUnderAny(full, roots)) throw BridgeException.Forbidden("אזור מוגן: נתוני הגשר");
@@ -155,7 +167,8 @@ public static class FsApi
     internal static void EnsureWriteTargetAllowed(string dest)
     {
         if (!Kiosk.IsActive) return;
-        if (FsGuard.IsDangerousExt(dest) && !FxPolicy.IsInApprovedRoots(dest))
+        // רשימה לבנה (סבב 4): כל סיומת שאינה מסמך/תמונה/טקסט/מדיה/ארכיב חסומה, לא רק רשימה שחורה
+        if (FsGuard.IsWriteBlockedExt(dest) && !FxPolicy.IsInApprovedRoots(dest))
             throw BridgeException.Forbidden("בזמן נעילה אסור ליצור או לשנות קובץ מסוג " + FsGuard.StdExt(dest) + " מחוץ לתיקיות שאושרו");
     }
 
@@ -336,7 +349,7 @@ public static class FsApi
         if (newName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || newName is "." or "..")
             throw BridgeException.BadRequest("שם לא חוקי: " + newName);
         if (!Exists(path)) throw BridgeException.NotFound("לא נמצא: " + path);
-        EnsureNotProtected(path);
+        EnsureNotProtected(path, tree: true);
 
         string dest = Path.Combine(Path.GetDirectoryName(path)!, newName);
         FxPolicy.EnsurePathAllowed(dest);
@@ -378,7 +391,8 @@ public static class FsApi
             {
                 src = FullPath(raw);
                 if (!Exists(src)) throw BridgeException.NotFound("לא נמצא");
-                if (move) EnsureNotProtected(src);
+                if (move) EnsureNotProtected(src, tree: true);
+                if (File.Exists(src)) EnsureNoHardlink(src);   // קריאת המקור דרך שם נוסף לקובץ מוגן
 
                 string dest = Path.Combine(destDir, Path.GetFileName(src.TrimEnd('\\')));
                 EnsureNotProtected(dest);
@@ -433,13 +447,25 @@ public static class FsApi
         return move ? new { moved = done, skipped, failed } : new { copied = done, skipped, failed };
     }
 
+    /// <summary>פריט (קובץ/תיקייה) תחת שורש סודי, כפי שנכתב או בנתיב הסופי (קישור סימבולי)</summary>
+    internal static bool IsSecretItem(string path, List<string> secret)
+    {
+        if (FsGuard.IsUnderAny(path, secret)) return true;
+        string c = CanonicalPath(path);
+        return !string.Equals(c, path, StringComparison.OrdinalIgnoreCase) && FsGuard.IsUnderAny(c, secret);
+    }
+
     private static void CopyDir(string src, string dest, bool overwrite, int depth = 0)
     {
         // תקרת עומק כהגנה אחרונה מפני רקורסיה פתולוגית
         if (depth > 64) throw new IOException("עומק התיקיות עמוק מדי להעתקה: " + src);
         Directory.CreateDirectory(dest);
+        var secret = SecretRoots();   // WHY: העתקת אב של Config.Dir לא תעתיק את config.json
+        bool strict = Kiosk.IsActive || FxPolicy.IsRestricted;
         foreach (string f in Directory.GetFiles(src))
         {
+            if (IsSecretItem(f, secret)) continue;
+            if (strict && PathPolicy.HardLinkCount(f) > 1) continue;   // שם נוסף לקובץ מוגן
             string df = Path.Combine(dest, Path.GetFileName(f));
             EnsureWriteTargetAllowed(df);   // גם קבצים בתוך תיקייה: לא מעבירים .exe/.bat לתיקייה אחרת בנעילה
             File.Copy(f, df, overwrite);
@@ -449,6 +475,7 @@ public static class FsApi
             // דילוג על נקודות reparse (junction/symlink). junction שמצביע על תיקיית־אב יוצר לולאה
             // אינסופית → StackOverflowException שאי אפשר ללכוד והורג את כל התהליך (הגשר והמגש).
             if ((File.GetAttributes(d) & FileAttributes.ReparsePoint) != 0) continue;
+            if (IsSecretItem(d, secret)) continue;
             CopyDir(d, Path.Combine(dest, Path.GetFileName(d)), overwrite, depth + 1);
         }
     }
@@ -534,7 +561,7 @@ public static class FsApi
             {
                 p = FullPath(raw);
                 if (!Exists(p)) throw BridgeException.NotFound("לא נמצא");
-                EnsureNotProtected(p);
+                EnsureNotProtected(p, tree: true);
                 if (!permanent) Recycle(p);
                 else if (Directory.Exists(p)) Directory.Delete(p, true);
                 else
@@ -645,6 +672,7 @@ public static class FsApi
     {
         string path = FullPath(b.Req("path"));
         if (!Exists(path)) throw BridgeException.NotFound("לא נמצא: " + path);
+        EnsureNoHardlink(path);   // שם נוסף לקובץ מוגן נפתח באפליקציה חיצונית = קריאה
         if (FxPolicy.IsRestricted)
         {
             // פתיחת תיקייה או קיצור דרך מפעילה את סייר Windows עצמו, שאינו כפוף למדיניות
