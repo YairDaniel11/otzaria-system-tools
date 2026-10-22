@@ -210,7 +210,11 @@ public static class SysApi
     private static object Power(JsonElement b)
     {
         string action = b.Req("action");
-        // מותר גם במצב נעילה; הנעילה חוזרת בהפעלה הבאה של הגשר
+        // שינה/שנת-חורף/נעילת מסך מותרים בנעילה (הנעילה חוזרת בהפעלה הבאה של הגשר). הפעלה מחדש וכיבוי: רק בסיסמת
+        // הנעילה, או אם המנהל פתח במפורש את "power" ברשימת ההגדרות הפתוחות (kiosk.openSections).
+        // WHY: אתחול מחדש בלחיצה היה פתוח תמיד, ומשם הדרך ל-Safe Mode / WinRE / שינוי אתחול קצרה.
+        if (FsGuard.PowerNeedsAuth(action, Kiosk.IsActive, Kiosk.OpenSections))
+            Kiosk.RequirePassword(b.Str("password"));
         switch (action)
         {
             case "sleep":

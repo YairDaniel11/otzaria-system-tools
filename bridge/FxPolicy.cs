@@ -56,8 +56,38 @@ public static class FxPolicy
         return pol?.FxMode != null ? pol : null;
     }
 
-    private static string RawMode(HardLock.PolicySnapshot sp) => sp?.FxMode ?? Config.Get<string>(KMode, "off");
-    private static string[] RawRoots(HardLock.PolicySnapshot sp) => sp?.FxRoots ?? Config.GetList(KRoots);
+    /// <summary>
+    /// האם המנהל לא קבע מצב כלל (לא בשירות ולא ב-config.json). WHY: בנעילה פעילה ברירת המחדל "off" פתחה את כל הכוננים
+    /// בדיאלוגי Open/Save ובסייר; עכשיו ברירת המחדל בנעילה היא restricted. "off" מפורש של המנהל נשמר כפי שהוא.
+    /// </summary>
+    private static bool ModeDefaulted(HardLock.PolicySnapshot sp) =>
+        sp?.FxMode == null && string.IsNullOrEmpty(Config.Get<string>(KMode, null));
+
+    internal static string DefaultMode(bool kioskActive) => kioskActive ? "restricted" : "off";
+
+    /// <summary>תיקיות ברירת מחדל כשהמצב לא נקבע: תיקיות המשתמש המוכרות (בלי תיקיית הבית כולה, שמכילה AppData)</summary>
+    private static string[] DefaultRoots() =>
+        FsApi.KnownFolders().Where(k => k.id != "home").Select(k => k.path).ToArray();
+
+    private static string RawMode(HardLock.PolicySnapshot sp) =>
+        sp?.FxMode ?? Config.Get<string>(KMode, null) ?? DefaultMode(Kiosk.IsActive);
+    private static string[] RawRoots(HardLock.PolicySnapshot sp) =>
+        sp?.FxRoots ?? (ModeDefaulted(sp) && Kiosk.IsActive ? DefaultRoots() : Config.GetList(KRoots));
+
+    /// <summary>האם path בתוך תיקייה שהמנהל אישר במפורש (לא ברירות המחדל), במצב מוגבל. לבדיקת סיומות מריצות</summary>
+    internal static bool IsInApprovedRoots(string path)
+    {
+        try
+        {
+            var sp = ServicePolicy();
+            if (ModeDefaulted(sp)) return false;
+            var st = Current();
+            if (st.Effective != "restricted") return false;
+            string canon = PathPolicy.Resolve(path);
+            return st.Roots.Any(r => PathPolicy.IsUnder(canon, r));
+        }
+        catch { return false; }
+    }
     private static int RawMinutes(HardLock.PolicySnapshot sp) => sp?.FxUnlockMinutes ?? Config.Get(KMinutes, DefaultMinutes);
 
     /// <summary>הגירה לרכיב ההקשחה (בהתקנה/עדכון שלו): אם עוד אין לו מדיניות, מעבירים את הנוכחית מ-config.json</summary>
@@ -65,6 +95,7 @@ public static class FxPolicy
     {
         var pol = HardLock.Policy;
         if (pol == null || pol.FxMode != null) return;
+        if (ModeDefaulted(null)) return;   // ברירת מחדל לא נשמרת כהגדרה מפורשת של המנהל
         HardLock.SetFxPolicy(password, RawMode(null) ?? "off", RawRoots(null), Math.Clamp(RawMinutes(null), 1, MaxMinutes));
     }
 

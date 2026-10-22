@@ -26,7 +26,8 @@ public static class PackB
         if (string.IsNullOrWhiteSpace(p)) throw BridgeException.BadRequest("נתיב ריק");
         p = Environment.ExpandEnvironmentVariables(p.Trim());
         if (!Path.IsPathFullyQualified(p)) throw BridgeException.BadRequest("נדרש נתיב מלא: " + p);
-        string full = Path.GetFullPath(p);
+        string full = PathPolicy.LongName(Path.GetFullPath(p));
+        FsApi.EnsureNotReadable(full);   // W2: סודות הגשר חסומים גם לדחיסה/חילוץ/גודל תיקייה
         FxPolicy.EnsurePathAllowed(full);
         return full;
     }

@@ -28,7 +28,7 @@ public static class PathPolicy
         if (p.StartsWith(@"\\?\") || p.StartsWith(@"\\.\") || p.StartsWith(@"\??\") || p.StartsWith("//?/") || p.StartsWith("//./"))
             throw new ArgumentException("נתיב מסוג התקן אינו נתמך");
         if (!Path.IsPathFullyQualified(p)) throw new ArgumentException("נדרש נתיב מלא");
-        string full = Path.GetFullPath(p);
+        string full = LongName(Path.GetFullPath(p));
         if (full.StartsWith(@"\\?\") || full.StartsWith(@"\\.\")) throw new ArgumentException("נתיב מסוג התקן אינו נתמך");
         if (full.IndexOf(':', 2) >= 0) throw new ArgumentException("זרם נתונים חלופי (ADS) אינו נתמך");
         string root = Path.GetPathRoot(full) ?? "";
@@ -78,6 +78,77 @@ public static class PathPolicy
         catch { if (strict) throw new IOException("פענוח הנתיב נכשל"); return full; }
     }
 
+    /// <summary>
+    /// פענוח שמות קצרים (8.3, למשל PROGRA~1) לשם הארוך לפני כל בדיקת תחילית/סיומת.
+    /// WHY: אחרת "C:\PROGRA~1\x" או "FOO~1.EXE" עוקפים השוואת מחרוזות. לנתיב שאינו קיים מפענחים את ההורה הקיים
+    /// הקרוב ומצרפים את הזנב כפי שהוא. כשל = הנתיב כפי שהוא (ההגנה נשענת גם על Canonical).
+    /// </summary>
+    public static string LongName(string full)
+    {
+        if (full.IndexOf('~') < 0) return full;
+        try
+        {
+            string probe = full, tail = "";
+            while (!string.IsNullOrEmpty(probe) && (int)new FileInfo(probe).Attributes == -1)
+            {
+                tail = Path.Combine(Path.GetFileName(probe), tail);
+                probe = Path.GetDirectoryName(probe);
+            }
+            if (string.IsNullOrEmpty(probe)) return full;
+            var sb = new StringBuilder(32768);
+            uint n = GetLongPathNameW(probe, sb, (uint)sb.Capacity);
+            if (n == 0 || n >= sb.Capacity) return full;
+            string r = sb.ToString();
+            return tail.Length == 0 ? r : Path.Combine(r, tail.TrimEnd('\\'));
+        }
+        catch { return full; }
+    }
+
+    /// <summary>הנתיב הסופי של handle פתוח (אחרי פענוח קישורים), או null בכשל</summary>
+    public static string FinalPathOfHandle(Microsoft.Win32.SafeHandles.SafeFileHandle h)
+    {
+        var sb = new StringBuilder(32768);
+        uint n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, 0);
+        if (n == 0 || n >= sb.Capacity) return null;
+        string r = sb.ToString();
+        if (r.StartsWith(@"\\?\UNC\")) return @"\\" + r.Substring(8);
+        return r.StartsWith(@"\\?\") ? r.Substring(4) : r;
+    }
+
+    /// <summary>
+    /// פותח את הקובץ לקריאה ובודק את הנתיב הסופי של ה-handle עצמו (לא של השם), ואז מחזיר את ה-stream.
+    /// WHY (TOCTOU): בדיקת נתיב ואז פתיחה בשם משאירה חלון שבו מחליפים את הקובץ/התיקייה בקישור. כאן הבדיקה
+    /// מתבצעת על מה שנפתח בפועל. allow מקבל את הנתיב הסופי וזורק אם אסור; כשל = סגירה וזריקה.
+    /// </summary>
+    public static FileStream OpenVerifiedRead(string path, Action<string> allow)
+    {
+        var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        try
+        {
+            string fin = FinalPathOfHandle(fs.SafeFileHandle) ?? throw new IOException("פענוח הנתיב הסופי נכשל");
+            allow(fin);
+            return fs;
+        }
+        catch { fs.Dispose(); throw; }
+    }
+
+    /// <summary>מספר הקישורים הקשיחים (hardlink) לקובץ; 1 = רגיל. כשל = 1 (הבדיקה היא שכבה נוספת)</summary>
+    public static int HardLinkCount(string path)
+    {
+        try
+        {
+            using var h = CreateFileW(path, 0, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+            return h.IsInvalid ? 1 : HardLinkCountOfHandle(h);
+        }
+        catch { return 1; }
+    }
+
+    public static int HardLinkCountOfHandle(Microsoft.Win32.SafeHandles.SafeFileHandle h)
+    {
+        try { return GetFileInformationByHandle(h, out var info) ? (int)info.nNumberOfLinks : 1; }
+        catch { return 1; }
+    }
+
     /// <summary>האם path הוא root עצמו או נמצא מתחתיו. השוואה לא רגישה לרישיות, בטוחה לתחיליות אחים (C:\a מול C:\ab)</summary>
     public static bool IsUnder(string path, string root)
     {
@@ -106,6 +177,17 @@ public static class PathPolicy
         catch { return false; }
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint dwFileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ftCreationTime, ftLastAccessTime, ftLastWriteTime;
+        public uint dwVolumeSerialNumber, nFileSizeHigh, nFileSizeLow, nNumberOfLinks, nFileIndexHigh, nFileIndexLow;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle h, out ByHandleFileInformation info);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetLongPathNameW(string shortPath, StringBuilder buf, uint len);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

@@ -282,10 +282,11 @@ public static class Keyboard
             current,
             delay = (int)delay[0],
             speed = (int)speed[0],
-            stickyKeys = (sk[1] & StickyOn) != 0,
-            stickyHotkey = (sk[1] & StickyHotkey) != 0,
-            filterKeys = (fk[1] & 1) != 0,
-            toggleKeys = (tk[1] & 1) != 0,
+            // בנעילה לא חושפים הגדרות נגישות (קיצורי Sticky/Filter/Toggle): הם פותחים חלוני נגישות ומערכת
+            stickyKeys = Kiosk.IsActive ? (bool?)null : (sk[1] & StickyOn) != 0,
+            stickyHotkey = Kiosk.IsActive ? (bool?)null : (sk[1] & StickyHotkey) != 0,
+            filterKeys = Kiosk.IsActive ? (bool?)null : (fk[1] & 1) != 0,
+            toggleKeys = Kiosk.IsActive ? (bool?)null : (tk[1] & 1) != 0,
             capsLock = (GetKeyState(0x14) & 1) != 0,
             numLock = (GetKeyState(0x90) & 1) != 0,
         };
@@ -305,6 +306,10 @@ public static class Keyboard
         double? s = b.Num("speed");
         if (s.HasValue) Spi(SpiSetSpeed, (uint)Math.Clamp(Math.Round(s.Value), 0, 31), null, Persist);
 
+        // WHY: הפעלת מקשים דביקים/סינון מקשים בנעילה מקפיצה את חלון הנגישות של Windows (דרך החלון: עוקפים את הקיוסק)
+        if (Kiosk.IsActive && (b.BoolOpt("stickyKeys").HasValue || b.BoolOpt("stickyHotkey").HasValue ||
+                               b.BoolOpt("filterKeys").HasValue || b.BoolOpt("toggleKeys").HasValue))
+            throw BridgeException.Locked("הגדרות נגישות סגורות במצב נעילה");
         bool? sticky = b.BoolOpt("stickyKeys"), hotkey = b.BoolOpt("stickyHotkey");
         if (sticky.HasValue || hotkey.HasValue)
         {
