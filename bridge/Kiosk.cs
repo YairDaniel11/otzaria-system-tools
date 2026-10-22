@@ -756,6 +756,10 @@ public static partial class Kiosk
         string otz = OtzariaPath();
         if (string.IsNullOrEmpty(otz) || !File.Exists(otz))
             throw BridgeException.BadRequest("לא נמצאה תוכנת אוצריא. יש להגדיר otzariaPath בהגדרות הנעילה");
+        // WHY: אוצריא בתיקיה כתיבה למשתמש (למשל LocalAppData\Programs) ניתנת להחלפה בקובץ אחר, והנעילה היא שמפעילה אותה.
+        // בנעילה קשיחה מסרבים, אלא אם המפעיל אישר במפורש (acceptWritableOtzaria) - ואז הנעיצה (SHA256) מגנה מפני החלפה
+        if ((strict || HardLock.Available || HardLock.ServiceInstalled()) && !AppTrust.IsTrustedLocation(otz) && !b.Bool("acceptWritableOtzaria", false))
+            throw new BridgeException("otzaria_untrusted_location", "אוצריא מותקנת בתיקיה שמשתמש רגיל יכול לשנות (" + otz + "), ולכן אפשר להחליף אותה בתוכנה אחרת. התקינו אותה ב-Program Files, או אשרו במפורש (acceptWritableOtzaria) - הנעילה תנעץ את הקובץ הנוכחי ותסרב להפעיל קובץ ששונה.", 403);
 
         // הפעלה ידנית בסיסמה בזמן פתיחה זמנית מסיימת אותה (ברכיב ההקשחה — "enable" מנקה אותה שם)
         EndTempUnlockLocal("הנעילה הופעלה ידנית", relock: false);
@@ -763,6 +767,7 @@ public static partial class Kiosk
         Config.Set("kiosk.blockTaskManager", blockTm);
         Config.Set("kiosk.active", true);
         Config.Set("kiosk.activatedBy", "manual"); // נעילה ידנית לא תבוטל אוטומטית בסוף חלון התזמון
+        PinOtzaria(otz); // נעיצת SHA256 של אוצריא בהפעלה (מאומתת לפני כל הפעלה במיקום כתיב)
         Config.Save();
         try { Apply(); }
         catch
@@ -947,24 +952,83 @@ public static partial class Kiosk
         string configured = servicePath ?? Config.Get<string>("kiosk.otzariaPath", null);
         if (!string.IsNullOrEmpty(configured) && File.Exists(configured)) return configured;
 
-        try
-        {
-            foreach (var p in Process.GetProcessesByName("otzaria"))
-            {
-                string path = p.MainModule?.FileName;
-                if (!string.IsNullOrEmpty(path)) return path;
-            }
-        }
-        catch { }
-
+        // WHY: אין נפילה לנתיב של תהליך "otzaria" שרץ - כל תהליך בשם הזה (גם עותק זדוני בתיקיה כתיבה) היה הופך ל"אוצריא" המהימנה
         string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         string[] candidates =
         {
-            Path.Combine(local, "Programs", "otzaria", "otzaria.exe"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "otzaria", "otzaria.exe"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "otzaria", "otzaria.exe"),
+            Path.Combine(local, "Programs", "otzaria", "otzaria.exe"), // כתיב למשתמש: אחרון, ומאומת מול נעיצה (ר' CheckOtzariaForLaunch)
         };
         return candidates.FirstOrDefault(File.Exists);
+    }
+
+    // ---------- זהות אוצריא: נתיב + נעיצת SHA256, לא שם תהליך ----------
+
+    internal static bool SamePath(string a, string b)
+    {
+        if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
+        try { return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase); }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// החלטה טהורה (לבדיקות): האם מותר להפעיל את קובץ אוצריא.
+    /// מיקום מהימן (לא כתיב למשתמש) - תמיד. מיקום כתיב: רק אם יש נעיצה והיא תואמת; בלי נעיצה (נעילה ישנה) - מותר פעם אחת
+    /// ונעיצה נרשמת עכשיו (TOFU), כדי לא לנעול החוצה התקנה קיימת.
+    /// </summary>
+    internal enum LaunchVerdict { Allow, AllowAndPin, Refuse }
+    internal static LaunchVerdict DecideLaunch(bool trustedLocation, string pinned, string actual)
+    {
+        if (trustedLocation) return LaunchVerdict.Allow;
+        if (string.IsNullOrEmpty(actual)) return LaunchVerdict.Refuse;
+        if (string.IsNullOrEmpty(pinned)) return LaunchVerdict.AllowAndPin;
+        return string.Equals(pinned, actual, StringComparison.OrdinalIgnoreCase) ? LaunchVerdict.Allow : LaunchVerdict.Refuse;
+    }
+
+    private static string Sha256Of(string path)
+    {
+        try { using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read); return Convert.ToHexString(SHA256.HashData(fs)); }
+        catch { return null; }
+    }
+
+    /// <summary>נעיצת ה-SHA256 של אוצריא (בהפעלת הנעילה). נשמרת ב-config.json רק כשכבה נוספת: שמירה מוגנת אמיתית דורשת תמיכה בשירות (הצעה בדוח)</summary>
+    private static void PinOtzaria(string path)
+    {
+        string sha = Sha256Of(path);
+        if (sha == null) return;
+        Config.Set("kiosk.otzariaSha", sha);
+        Config.Set("kiosk.otzariaShaPath", Path.GetFullPath(path));
+    }
+
+    /// <summary>לפני כל Process.Start של אוצריא: אין הפעלה של קובץ שלא אומת</summary>
+    private static bool CheckOtzariaForLaunch(string path)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(path) || !File.Exists(path)) return false;
+            bool trusted = AppTrust.IsTrustedLocation(path);
+            string pinned = SamePath(Config.Get<string>("kiosk.otzariaShaPath", null), path) ? Config.Get<string>("kiosk.otzariaSha", null) : null;
+            string actual = trusted ? null : Sha256Of(path);
+            var v = DecideLaunch(trusted, pinned, actual);
+            if (v == LaunchVerdict.AllowAndPin) { PinOtzaria(path); try { Config.Save(); } catch { } }
+            if (v == LaunchVerdict.Refuse)
+                LogThrottled("otzUntrusted", "watchdog: קובץ אוצריא במיקום כתיב למשתמש ואינו תואם את הנעיצה - לא מופעל (הפעלת הנעילה מחדש בסיסמה תנעץ את הגרסה הנוכחית)", 120);
+            return v != LaunchVerdict.Refuse;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>תהליך אוצריא בסשן הזה לפי נתיב התמונה (QueryFullProcessImageName) ולא לפי שם בלבד</summary>
+    internal static Process FindOtzariaProcess(int session)
+    {
+        string path = OtzariaPath();
+        if (string.IsNullOrEmpty(path)) return null;
+        foreach (var p in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(path)))
+        {
+            try { if (p.SessionId == session && SamePath(ImagePath((uint)p.Id), path)) return p; } catch { }
+        }
+        return null;
     }
 
     // ---------- החלה ושחרור ----------
@@ -1159,15 +1223,68 @@ public static partial class Kiosk
         catch { }
     }
 
-    /// <summary>קוד שחזור משורת הפקודה: OtzariaBridge.exe --unlock CODE</summary>
+    // ---------- חירום ----------
+
+    private static string EmergencyMarkerPath => Path.Combine(Config.Dir, "emergency-release.req");
+    private static DateTime _markerBlockedUntil = DateTime.MinValue;
+    private static int _markerFails;
+
+    /// <summary>השירות מותקן והוא באמת מופסק לפי ה-SCM (לא סתם pipe שותק). בלי שירות מותקן: לא רלוונטי (false)</summary>
+    internal static bool ServiceStopped()
+    {
+        try
+        {
+            if (!HardLock.ServiceInstalled()) return false;
+            using var sc = new System.ServiceProcess.ServiceController(HardLock.ServiceName);
+            return sc.Status == System.ServiceProcess.ServiceControllerStatus.Stopped;
+        }
+        catch { return false; } // fail-closed
+    }
+
+    /// <summary>
+    /// אימות קוד שחזור לחירום. השירות הוא מקור האמת כשהוא מותקן; ה-hash המקומי (config.json, כתיב למשתמש) נחשב
+    /// רק כשאין שירות מותקן, או כשהשירות מופסק באמת ב-SCM. pipe שותק בשירות שרץ: ניסיונות חוזרים ואז סירוב
+    /// (מי שנתקע: עצירת השירות כמנהל, sc stop, ואז --unlock מקומי).
+    /// </summary>
+    internal static bool VerifyEmergencyCode(string code)
+    {
+        string norm = Secret.NormalizeRecovery(code);
+        bool LocalOk() => Matches(norm, "kiosk.recoveryHash", "kiosk.recoverySalt");
+        if (!HardLock.ServiceInstalled()) return LocalOk();
+        for (int i = 0; ; i++)
+        {
+            bool ok = false;
+            try { ok = HardLock.EmergencyDisable(code); } catch (Exception ex) { Config.Log("emergency: " + ex.Message); }
+            if (ok) return true;
+            if (ServiceStopped()) return LocalOk();
+            bool responding = false;
+            try { dynamic st = HardLock.Status(true); responding = st.running == true; } catch { }
+            if (responding || i >= 2) return false; // השירות ענה והקוד שגוי / לא עונה גם אחרי ניסיונות: נשארים נעולים
+            Thread.Sleep(1000);
+        }
+    }
+
+    /// <summary>
+    /// קוד שחזור משורת הפקודה: OtzariaBridge.exe --unlock CODE.
+    /// WHY: גשר מוקשח (DACL) לא ניתן להריגה ע"י תהליך המשתמש, וגשר שנשאר רץ מחזיק kiosk.active בזיכרון ונשאר נעול.
+    /// לכן מאותתים לו בקובץ סימון (עם הקוד, שהגשר מאמת בעצמו מול השירות/המקומי) והוא משחרר ויוצא; Kill רק כגיבוי לגשרים ישנים.
+    /// </summary>
     public static bool EmergencyUnlock(string code)
     {
-        if (!Matches(Secret.NormalizeRecovery(code), "kiosk.recoveryHash", "kiosk.recoverySalt")) return false;
+        if (!VerifyEmergencyCode(code)) return false;
         int self = Environment.ProcessId;
-        foreach (var p in Process.GetProcessesByName("OtzariaBridge"))
+        var others = Process.GetProcessesByName("OtzariaBridge").Where(p => p.Id != self).ToList();
+        if (others.Count > 0)
         {
-            if (p.Id == self) continue;
-            try { p.Kill(); p.WaitForExit(3000); } catch { }
+            string marker = EmergencyMarkerPath;
+            try { Directory.CreateDirectory(Config.Dir); File.WriteAllText(marker, code ?? ""); } catch (Exception ex) { Config.Log("emergency marker: " + ex.Message); }
+            var end = DateTime.UtcNow.AddSeconds(8);
+            while (DateTime.UtcNow < end && File.Exists(marker)) Thread.Sleep(200);
+            try { File.Delete(marker); } catch { } // לא משאירים קוד בקובץ
+            foreach (var p in others)
+            {
+                try { if (!p.WaitForExit(3000)) { p.Kill(); p.WaitForExit(3000); } } catch { }
+            }
         }
         Config.Reload();
         Config.Set("kiosk.active", false);
@@ -1179,18 +1296,35 @@ public static partial class Kiosk
         return true;
     }
 
+    /// <summary>נקרא מהשומר: קובץ סימון חירום (מ---unlock) עם קוד שהגשר מאמת בעצמו; קוד שגוי לא עושה כלום (5 כשלונות = דקת השהיה)</summary>
+    private static void PollEmergencyMarker()
+    {
+        try
+        {
+            string f = EmergencyMarkerPath;
+            if (!File.Exists(f)) return;
+            string code;
+            try { code = File.ReadAllText(f).Trim(); File.Delete(f); } catch { return; } // לא נמחק = לא מעבדים (בלי לולאה)
+            if (DateTime.UtcNow < _markerBlockedUntil) return;
+            if (code.Length == 0 || code.Length > 64) return;
+            if (EmergencyRelease(code))
+            {
+                Config.Log("kiosk: שחרור חירום מ---unlock (קובץ סימון מאומת) - הגשר יוצא");
+                Tray.ExitNow();
+            }
+            else if (++_markerFails >= 5) { _markerFails = 0; _markerBlockedUntil = DateTime.UtcNow.AddSeconds(60); }
+        }
+        catch (Exception ex) { Config.Log("emergency marker poll: " + ex.Message); }
+    }
+
     /// <summary>
-    /// קיצור חירום מהגשר הרץ (Ctrl+Alt+Shift+F12): מבטל את הנעילה כולה (גם את השירות) — אבל רק עם קוד השחזור.
+    /// קיצור חירום מהגשר הרץ (Ctrl+Alt+Shift+F12): מבטל את הנעילה כולה (גם את השירות) - אבל רק עם קוד השחזור.
     /// קיצור בלי שום אימות היה מאפשר לכל תלמיד לבטל את הנעילה, ולכן הקוד נדרש.
     /// </summary>
     public static bool EmergencyRelease(string code)
     {
-        // כשהשירות מותקן הוא מקור האמת לקוד השחזור (בחשבון Windows אחר אין hash מקומי בכלל) - פונים אליו קודם,
-        // ורק אם הוא לא אישר בודקים מול ה-hash המקומי. קודם נבדק רק המקומי, אז קוד נכון נדחה כשהדגל המקומי לא תאם
-        bool svcOk = false;
-        try { if (HardLock.Available || HardLock.ServiceActive) svcOk = HardLock.EmergencyDisable(code); }
-        catch (Exception ex) { Config.Log("emergency: " + ex.Message); }
-        if (!svcOk && !Matches(Secret.NormalizeRecovery(code), "kiosk.recoveryHash", "kiosk.recoverySalt")) return false;
+        // WHY: ה-hash המקומי נחשב רק כשהשירות לא מותקן או מופסק באמת (VerifyEmergencyCode); עריכת config.json לא משחררת
+        if (!VerifyEmergencyCode(code)) return false;
         EndTempUnlockLocal("ביטול חירום בקוד שחזור", relock: false);
         Release();
         Config.Log("kiosk: הנעילה בוטלה בקיצור חירום עם קוד שחזור");
@@ -1362,6 +1496,7 @@ public static partial class Kiosk
 
     private static void Watch()
     {
+        PollEmergencyMarker(); // לפני ה-gate: Release ממתין לסבב שומר רץ, ואסור שנחסום את עצמנו
         if (!IsActive || Interlocked.Exchange(ref _watchBusy, 1) == 1) return;
         try
         {
@@ -1392,8 +1527,7 @@ public static partial class Kiosk
                 }
 
             string path = OtzariaPath();
-            string name = string.IsNullOrEmpty(path) ? "otzaria" : Path.GetFileNameWithoutExtension(path);
-            var otz = Process.GetProcessesByName(name).FirstOrDefault(p => p.SessionId == session);
+            var otz = FindOtzariaProcess(session);
             if (otz == null)
             {
                 _otzRunningSince = DateTime.MinValue;
@@ -1401,7 +1535,12 @@ public static partial class Kiosk
                 {
                     // backoff: אם אוצריא קורסת בעלייה, הפעלה מחדש בכל 2 שניות יוצרת תהליך חדש בלי הפסקה (ומציפה את
                     // המחשב). ההמתנה בין ניסיונות גדלה 2,4,8,16,32,60 שניות, ומתאפסת אחרי ש-אוצריא רצה 20 שניות ברצף
-                    if (DateTime.UtcNow >= _otzNextLaunch)
+                    if (DateTime.UtcNow >= _otzNextLaunch && !CheckOtzariaForLaunch(path))
+                    {
+                        // קובץ לא מאומת: לא מפעילים, ושולחן העבודה לא נחשף (יציאה בסיסמה/קוד שחזור)
+                        if (!Overlay.RestVisible) Overlay.ShowRest(IntPtr.Zero, idle: true);
+                    }
+                    else if (DateTime.UtcNow >= _otzNextLaunch)
                     {
                         Process.Start(new ProcessStartInfo(path) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(path) });
                         _otzLaunches++;
@@ -1411,13 +1550,15 @@ public static partial class Kiosk
                     else if (_otzLaunches >= 3 && !Overlay.RestVisible) Overlay.ShowRest(IntPtr.Zero, idle: true); // בזמן ההמתנה לא מציגים שולחן עבודה
                 }
                 else if (!Overlay.RestVisible) Overlay.ShowRest(IntPtr.Zero, idle: true); // אין אוצריא: מסך סגור עם הודעה
+                // WHY: גם בלי אוצריא מסכים נוספים חייבים כיסוי; SyncCovers מוותר לבד כשמסך המנוחה מוצג
+                Overlay.SyncCovers(IntPtr.Zero);
                 return;
             }
             if (_otzRunningSince == DateTime.MinValue) _otzRunningSince = DateTime.UtcNow;
             else if ((DateTime.UtcNow - _otzRunningSince).TotalSeconds >= 20) { _otzLaunches = 0; _otzNextLaunch = DateTime.MinValue; }
 
             IntPtr hwnd = otz.MainWindowHandle;
-            if (hwnd == IntPtr.Zero) return;
+            if (hwnd == IntPtr.Zero) { Overlay.SyncCovers(IntPtr.Zero); return; } // חלון עוד לא נוצר: המסך הראשי נשאר, השאר מכוסים
 
             // אוצריא תמיד ממוקסמת: בלי מזעור, בלי חלון קטן, ובלי חור במקום שורת המשימות
             // אוצריא ממוזערת: מסך מנוחה עם סמל אוצריא, שעה ותאריך, במקום החזרה מיידית
@@ -1526,10 +1667,9 @@ public static partial class Kiosk
     {
         try
         {
-            using var p = Process.GetProcessById((int)pid);
+            // WHY: שם תהליך בלבד ניתן לזיוף (otzaria.exe בכל תיקיה); משווים את נתיב התמונה לנתיב המוגדר. בלי נתיב - לא אוצריא
             string path = OtzariaPath();
-            string name = string.IsNullOrEmpty(path) ? "otzaria" : Path.GetFileNameWithoutExtension(path);
-            return p.ProcessName.Equals(name, StringComparison.OrdinalIgnoreCase);
+            return !string.IsNullOrEmpty(path) && SamePath(ImagePath(pid), path);
         }
         catch { return false; }
     }
@@ -1540,9 +1680,7 @@ public static partial class Kiosk
         try
         {
             int session = Process.GetCurrentProcess().SessionId;
-            string path = OtzariaPath();
-            string name = string.IsNullOrEmpty(path) ? "otzaria" : Path.GetFileNameWithoutExtension(path);
-            var otz = Process.GetProcessesByName(name).FirstOrDefault(p => p.SessionId == session);
+            var otz = FindOtzariaProcess(session);
             if (otz != null && otz.MainWindowHandle != IntPtr.Zero) BringToFront(otz.MainWindowHandle);
         }
         catch (Exception ex) { Config.Log("return to otzaria: " + ex.Message); }
