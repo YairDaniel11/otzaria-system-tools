@@ -225,15 +225,38 @@ Intel Gen12 ומעלה (2022 ואילך) — לא רלוונטי לרוב המח
 - **חריגה מההגדרה "גרסת קובץ = תג":** תגית ה-Release בפורק (`v0.1.N`) היא מספור עצמאי ולא גרסת הגשר (3.x), ולכן "גרסת הקובץ" מושווית לגרסה החתומה ב-`BRIDGE_VERSION.txt`, והתגית נקשרת דרך השורה החתומה.
 - **הורדה והרצה:** לתיקיה מוגנת `%LOCALAPPDATA%\OtzariaBridge\update` (ללא ירושה: משתמש נוכחי, SYSTEM, מנהלים), לא ל-`%TEMP%`. הקובץ נשמר פתוח עם `FileShare.Read` בזמן האימות החוזר (hash + גרסה) ובזמן `Process.Start`, כך שאי אפשר להחליפו בין האימות להרצה.
 - **בחירת הוצאה:** לא draft ולא prerelease, והגבוהה לפי גרסת התגית. השדה `latest` שהקוד הקודם נשען עליו לא קיים ב-API של GitHub (הבחירה הייתה למעשה "הראשונה ברשימה").
-- **CI (`.github/workflows/build.yml`):** `dotnet test` חוסם לפני אריזה; Release רק מ-`main` או תגית `v*`, בג'וב נפרד (`release`) שרק הוא רואה את הסוד ומחזיק `contents: write`; actions מוצמדים ל-SHA; Inno Setup 6.4.3 מורד עם SHA256 מוצמד (לא `choco install` צף). בלי הסוד אין Release.
+- **CI (`.github/workflows/build.yml`):** `dotnet test` חוסם לפני אריזה; Release רק מ-`main` או תגית `v*` שה-commit שלה בהיסטוריית `main` (נבדק עם `merge-base --is-ancestor`), בג'וב נפרד (`release`) עם `environment: release` (דורש אישור reviewer) שרק הוא רואה את הסוד ומחזיק `contents: write`; סקריפט החתימה נטען תמיד מ-`main` (checkout עם `ref: refs/heads/main`) ולא מה-commit שהפעיל את ה-workflow; `ref_name` וגרסאות עוברים ל-pwsh דרך `env` (לא אינטרפולציית `${{ }}`), ושם תגית מאומת בתבנית `vX.Y.Z`; actions מוצמדים ל-SHA; Inno Setup 6.4.3 מורד עם SHA256 מוצמד (לא `choco install` צף). בלי הסוד אין Release.
 
 ## הגדרה ידנית (חד-פעמית)
 1. `pwsh tools\New-UpdateKey.ps1` (מייצר מפתחות מחוץ לריפו). מדפיס את הציבורי וכותב את הפרטי לקובץ מקומי.
 2. מדביקים את הציבורי ב-`UpdateApi.PublicKeySpkiBase64`, בונים ומשחררים גרסה (גרסאות שנבנו לפני כן לא יקבלו עדכונים חתומים).
 3. GitHub: Settings > Secrets and variables > Actions > New repository secret, שם `UPDATE_SIGNING_KEY`, ערך = תוכן קובץ הפרטי. מוחקים את הקובץ ושומרים גיבוי לא מקוון.
-4. החלפת מפתח: גרסת גשר חדשה חייבת להיות חתומה במפתח הישן ולהכיל את החדש; רק אז מחליפים את הסוד.
+4. **GitHub Environment (חובה, פעולה ידנית):** Settings > Environments > New environment בשם `release`: סמנו Required reviewers (אתם), Deployment branches and tags = Selected, והוסיפו `main` ו-`v*`. הזיזו את `UPDATE_SIGNING_KEY` מ-Repository secrets ל-Environment secrets של `release` (ומחקו את הישן). בלי זה ה-job ירוץ בלי אישור. הוסיפו Branch protection ל-`main` ו-Tag protection (Rulesets) ל-`v*`.
+5. **רוטציית מפתח:** `PublicKeySpkiBase64` יכול להכיל כמה מפתחות ציבוריים מופרדים ב-`;`. מעבר: משחררים גשר (חתום בישן) עם `ישן;חדש`, מחליפים את הסוד לחדש, ובגשר הבא משאירים רק את החדש. **ביטול:** קובץ ה-sums החתום יכול לכלול שורה `# keyver=N` (ברירת מחדל 1); הגשר דוחה הוצאה כש-`N < UpdateApi.MinKeyVersion`. אחרי דליפה: גשר חדש עם `MinKeyVersion` גבוה ומפתח חדש בלבד (גשרים ישנים לא יתעדכנו אוטומטית).
+6. `UpdateApi.Parse` מוגבל ל-6 ספרות למקטע ו-`TryParse`: תגית/קובץ גרסה עם מספר ענק מחזירים null במקום לזרוק.
 
 ## מגבלות ידועות
 - מי שגונב את הסוד `UPDATE_SIGNING_KEY` יכול לחתום עדכון זדוני. הסוד מוגבל לג'וב release על `main`/תגית; מומלץ להגן על `main` (branch protection) ולהגדיר סביבה (environment) עם אישור ידני.
 - ה-SHA256 המוצמד של Inno Setup חושב מהקובץ הרשמי ב-GitHub Releases של jrsoftware. כדאי לאמת אותו עצמאית פעם אחת.
 - `tools\Sign-Sums.ps1` ו-`tools\New-UpdateKey.ps1` דורשים PowerShell 7 (קיים ב-runner של GitHub). הפורמט תואם ל-.NET של הגשר (נבדק בבדיקות xunit עם מפתחות זמניים; הסקריפטים עצמם לא הורצו, אין pwsh 7 במחשב הפיתוח).
+
+# מצב אחרי ההקשחה (סבבים 1 ו-2)
+
+סיכום מה נאכף עכשיו (פירוט: `HARDLOCK.md`, `BOOT_HARDENING.md`):
+- **השירות (SYSTEM) מקור האמת:** סיסמה/גיבובים ב-`%ProgramData%\OtzariaBridge` עם DACL (SYSTEM+Admins בלבד), לא ב-`config.json`; ערוץ בקרה = named pipe מאומת; כשל = נשאר נעול (fail-closed).
+- **זהות לפי נתיב+חתימה/hash** ולא שם תהליך (גשר, רשימה לבנה, חסימת cmd); DACL על תהליך הגשר; Run ב-HKLM.
+- **מניעה:** מדיניות מערכת קבצים וסודות, סיומות מסוכנות, מעטפת ודיאלוגים (DialogGuard), Startup/Programs מוגנים.
+- **אתחול:** SafeBoot (השירות רץ גם ב-Safe Mode), WinRE כבוי, bcdedit; BitLocker/TPM/Secure Boot מדווחים; PIN ו-BIOS ידניים.
+- **שרשרת אספקה:** עדכון חתום (ECDSA), Release רק מ-main דרך environment עם אישור, בדיקות חוסמות.
+- **מגבלות פתוחות:** מנהל מקומי שיודע סיסמתו יכול לעצור את השירות; גישה פיזית בלי BitLocker+PIN/סיסמת BIOS; localhost נגיש לתוכנה מקומית (מצומצם ע"י צימוד); עדכון הגשר רץ בהרשאות משתמש, ותיקיית update בפרופיל המשתמש שהוא עצמו כותב אליה (הגנת TOCTOU נשענת על ידית פתוחה, לא על ACL מול המשתמש).
+
+# פריסה בטוחה: תוכנית בדיקה ידנית (על מחשב שאפשר להרוס)
+
+חובה לבצע על מכונה/VM ייעודיים לפני פריסה אמיתית. קודם: רשמו את קוד השחזור, ודאו גישה למדיה התקנה/סיסמת BIOS, וצלמו snapshot.
+
+1. **מסלולי חירום (קודם כל):** כמנהל, `OtzariaBridge.exe --unlock <קוד>` מבטל נעילה (גם בשירות). `--uninstall --password <סיסמה>` מסיר גם את השירות. אם הגשר לא עולה: `sc stop OtzariaBridgeService` ואז `--unlock`. בדקו כל אחד, וגם קוד שגוי (נדחה) ו-5 ניסיונות (חסימת דקה).
+2. **Safe Mode:** הפעילו נעילה, ודאו שקיים `HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\OtzariaBridgeService`; אתחלו ל-Safe Mode (`msconfig` > Boot > Safe boot). צפוי: השירות רץ ואוכף, ו-`--unlock <קוד>` פותח. אם הנעילה חוסמת: מסלול החירום משם.
+3. **DACL:** כמשתמש רגיל: `type %ProgramData%\OtzariaBridge\hardlock.json` צפוי Access Denied; `taskkill /f /im OtzariaBridge.exe` נכשל או הגשר חוזר תוך כ-20 שניות; עריכת `config.json` לא משנה סיסמה; ב-`icacls %LOCALAPPDATA%\OtzariaBridge\update` (אחרי ניסיון עדכון) אין ירושה, רק משתמש נוכחי, SYSTEM, Administrators.
+4. **Hello:** עם אימות דו-שלבי פעיל, פעולה מוגנת (שינוי הגדרה/ביטול נעילה) מציגה Hello; ביטול = סירוב; בלי Hello אין פעולה. בדקו גם מחשב בלי ביומטריה (מסלול סיסמה/קוד שחזור).
+5. **עדכון חתום:** (א) בנו Release מ-`main` דרך ה-workflow ואשרו ב-environment; ודאו שיש `SHA256SUMS.txt.sig`. (ב) הפעילו `/sys/update-install` מגרסה ישנה: צפוי עדכון. (ג) הוצאה בלי `.sig` או עם sums ששונה בבית אחד: צפוי "העדכון בוטל". (ד) דחיפת ענף/תגית מענף אחר לא מגיעה לשלב החתימה (נעצר באישור או ב-`merge-base`).
+6. **שחרור נעילה תקועה:** (א) `--unlock <קוד>`. (ב) קוד אבד: Safe Mode כמנהל, `sc config OtzariaBridgeService start= disabled`, אתחול רגיל, `--uninstall`, ומחיקת `%ProgramData%\OtzariaBridge`. (ג) מדיניות שנשארה: `reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System /v DisableTaskMgr /f` (וכן `DisableRegistryTools`). (ד) SafeBoot: `reg delete HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\OtzariaBridgeService /f` ואותו דבר תחת `Network`. (ה) החזרת WinRE: `reagentc /enable` ו-`bcdedit /set recoveryenabled Yes`.

@@ -27,6 +27,7 @@ public static class UpdateApi
     /// מפתח ציבורי (SPKI, base64) לאימות חתימת העדכונים. ריק = לא הוגדר מפתח, ואז כל עדכון נדחה (fail-closed).
     /// יוצרים אותו עם tools\New-UpdateKey.ps1 (הפרטי נשאר בסוד GitHub בשם UPDATE_SIGNING_KEY, לא בריפו).
     /// </summary>
+    /// <remarks>אפשר כמה מפתחות מופרדים ב-';' לרוטציה (ר' <see cref="VerifySignature"/>).</remarks>
     public const string PublicKeySpkiBase64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEueF+U0uAtzEeAKnBh6VyQVDYCJ9BGNXDxhtg5MIHk183wBGUkBr0XUAqwhF1nk1ExuhEXTnJxoTQljQkSPgSig==";
     public const string SumsAssetName = "SHA256SUMS.txt";
     public const string SigAssetName = "SHA256SUMS.txt.sig";
@@ -71,11 +72,29 @@ public static class UpdateApi
         notes = i.Notes,
     };
 
+    /// <summary>
+    /// WHY: int.Parse על מספר ענק (v99999999999.1) זרק OverflowException מתוך תשובת GitHub/קובץ חתום ופילח את
+    /// הבדיקה (DoS). עכשיו: עד 6 ספרות לכל מקטע, TryParse, וכל כשל = null.
+    /// </summary>
     public static Version Parse(string s)
     {
-        var m = Regex.Match(s ?? "", @"(\d+)\.(\d+)(?:\.(\d+))?");
+        var m = Regex.Match(s ?? "", @"(?<![\d.])(\d{1,6})\.(\d{1,6})(?:\.(\d{1,6}))?(?:\.\d{1,6})?(?!\.?\d)");
         if (!m.Success) return null;
-        return new Version(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value), m.Groups[3].Success ? int.Parse(m.Groups[3].Value) : 0);
+        if (!int.TryParse(m.Groups[1].Value, out int a) || !int.TryParse(m.Groups[2].Value, out int b)) return null;
+        int c = 0;
+        if (m.Groups[3].Success && !int.TryParse(m.Groups[3].Value, out c)) return null;
+        return new Version(a, b, c);
+    }
+
+    /// <summary>
+    /// גרסת המפתח החתומה ("# keyver=N", ברירת מחדל 1). הגשר דוחה הוצאה שגרסת המפתח שלה נמוכה מ-<see cref="MinKeyVersion"/>:
+    /// ביטול: מגדילים את MinKeyVersion בגשר חדש וחותמים ממפתח חדש. אחרי שמפתח דלף, הגשרים הישנים עדיין מוגנים רק אם עודכנו.
+    /// </summary>
+    public const int MinKeyVersion = 1;
+    public static int SignedKeyVersion(string sums)
+    {
+        var m = Regex.Match(sums ?? "", @"^#\s*keyver=(\d{1,6})\s*$", RegexOptions.Multiline);
+        return m.Success && int.TryParse(m.Groups[1].Value, out int v) ? v : 1;
     }
 
     /// <summary>הוצאה שנבחרה מתוך תשובת GitHub</summary>
@@ -125,10 +144,18 @@ public static class UpdateApi
         {
             if (data == null || string.IsNullOrWhiteSpace(sigText) || string.IsNullOrWhiteSpace(publicKeySpkiBase64)) return false;
             byte[] sig = Convert.FromBase64String(sigText.Trim());
-            using var ec = ECDsa.Create();
-            ec.ImportSubjectPublicKeyInfo(Convert.FromBase64String(publicKeySpkiBase64.Trim()), out _);
-            if (ec.KeySize != 256) return false;
-            return ec.VerifyData(data, sig, HashAlgorithmName.SHA256);
+            // רוטציה: מספר מפתחות מותרים מופרדים ב-';' (ישן + חדש בתקופת מעבר). מספיק אחד תקף.
+            foreach (var k in publicKeySpkiBase64.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                try
+                {
+                    using var ec = ECDsa.Create();
+                    ec.ImportSubjectPublicKeyInfo(Convert.FromBase64String(k), out _);
+                    if (ec.KeySize == 256 && ec.VerifyData(data, sig, HashAlgorithmName.SHA256)) return true;
+                }
+                catch { /* מפתח פגום ברשימה: ממשיכים לבא, לא פותחים */ }
+            }
+            return false;
         }
         catch { return false; }
     }
@@ -172,6 +199,7 @@ public static class UpdateApi
         if (!VerifySignature(sums, sigText, publicKeySpkiBase64)) throw Fail("חתימת קובץ האימות של ההוצאה חסרה או אינה תקפה.");
         string text = System.Text.Encoding.UTF8.GetString(sums);
         if (SignedTag(text) != tag) throw Fail("התגית החתומה אינה תואמת להוצאה.");
+        if (SignedKeyVersion(text) < MinKeyVersion) throw Fail("גרסת מפתח החתימה בוטלה.");
         string bvHash = FindHash(text, BridgeVersionAssetName);
         if (bvHash == null || bridgeVerFile == null || Convert.ToHexString(SHA256.HashData(bridgeVerFile)).ToLowerInvariant() != bvHash)
             throw Fail("קובץ הגרסה אינו תואם לחתום.");

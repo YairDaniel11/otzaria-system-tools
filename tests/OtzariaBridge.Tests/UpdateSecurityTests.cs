@@ -225,4 +225,47 @@ public class UpdateSecurityTests
         Assert.Null(UpdateApi.FindHash(s, "missing.exe"));
         Assert.Null(UpdateApi.SignedTag("no tag here"));
     }
+
+    [Theory]
+    [InlineData("v99999999999.1.0")]
+    [InlineData("1.99999999999")]
+    [InlineData("1.2.99999999999999999999")]
+    public void Parse_HugeNumber_ReturnsNullNoThrow(string v) => Assert.Null(UpdateApi.Parse(v));
+
+    [Fact]
+    public void SelectRelease_HugeTag_Skipped()
+        => Assert.Null(UpdateApi.SelectRelease("[{\"tag_name\":\"v99999999999.1.0\",\"assets\":[]}]"));
+
+    [Fact]
+    public void Rotation_EitherKeyInList_Verifies_UnlistedRejected()
+    {
+        var other = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        string otherPub = Convert.ToBase64String(other.ExportSubjectPublicKeyInfo());
+        var p = Make(signer: other);
+        Assert.Equal("4.0.0", Verify(p, pub: Pub + ";" + otherPub).Version.ToString(3));
+        Assert.Throws<BridgeException>(() => Verify(p, pub: Pub));
+        Assert.Throws<BridgeException>(() => Verify(p, pub: "garbage;" + Pub));
+    }
+
+    [Fact]
+    public void Rotation_GarbageEntryDoesNotBlockValidKey()
+        => Assert.Equal("4.0.0", Verify(Make(), pub: "!!!;" + Pub).Version.ToString(3));
+
+    [Fact]
+    public void KeyVersion_DefaultsToOne_AndParses()
+    {
+        Assert.Equal(1, UpdateApi.SignedKeyVersion("# tag=v1.0.1\n"));
+        Assert.Equal(7, UpdateApi.SignedKeyVersion("# tag=v1.0.1\n# keyver=7\n"));
+        Assert.Equal(1, UpdateApi.SignedKeyVersion("# keyver=99999999999\n"));
+    }
+
+    [Fact]
+    public void KeyVersion_BelowMin_Rejected()
+    {
+        // MinKeyVersion=1 כיום: keyver=0 חתום חייב להידחות
+        var p = Make();
+        string sums = "# tag=v0.1.5\n# keyver=0\n" + Hex(p.Exe) + "  OtzariaBridge.exe\n" + Hex(p.Bv) + "  BRIDGE_VERSION.txt\n";
+        var sb = Encoding.ASCII.GetBytes(sums);
+        Assert.Throws<BridgeException>(() => Verify(p, sums: sb, sig: Sign(sb)));
+    }
 }

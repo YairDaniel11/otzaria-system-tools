@@ -54,13 +54,22 @@ jobs:
       - name: גרסה לתגית ה-Release
         id: ver
         shell: pwsh
+        # WHY: ref_name/run_number עוברים דרך env ולא אינטרפולציה ישירה של ${{ }} בתוך הסקריפט
+        # (שם תגית כמו v1$(calc) היה מוזרק כקוד pwsh). בנוסף התגית מאומתת בתבנית קפדנית.
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           $base = (Get-Content RELEASE_VERSION.txt -Raw).Trim()
           $parts = $base -split '\.'
           $majorMinor = "$($parts[0]).$($parts[1])"
-          $full = "$majorMinor.${{ github.run_number }}"
+          $full = "$majorMinor.$($env:RUN_NUMBER)"
           # בהרצה מתגית v* משתמשים בתגית עצמה (אחרת ייווצר Release בתגית שונה מזו שנדחפה)
-          if ("${{ github.ref_type }}" -eq "tag") { $tag = "${{ github.ref_name }}"; $full = $tag.TrimStart('v') } else { $tag = "v$full" }
+          if ($env:REF_TYPE -eq "tag") {
+            if ($env:REF_NAME -notmatch '^v\d{1,4}\.\d{1,4}\.\d{1,6}$') { throw "שם תגית לא תקין: רק vX.Y.Z" }
+            $tag = $env:REF_NAME; $full = $tag.TrimStart('v')
+          } else { $tag = "v$full" }
           "version=$full" >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
@@ -76,8 +85,10 @@ jobs:
       # הזמני שב-runner, לא מחזירים commit לריפו (ר' הסבר אצל חישוב הגרסה למעלה)
       - name: אריזת התוספים כמשאב מוטמע
         shell: pwsh
+        env:
+          PV: ${{ steps.pluginver.outputs.version }}
         run: |
-          $pv = "${{ steps.pluginver.outputs.version }}"
+          $pv = $env:PV
           foreach ($f in @("file-explorer/manifest.json", "system-settings/manifest.json")) {
             (Get-Content $f -Raw) -replace '"version":\s*"[^"]*"', ('"version": "' + $pv + '"') | Set-Content $f -Encoding utf8NoBOM -NoNewline
           }
@@ -115,9 +126,11 @@ jobs:
       # יתאים תמיד למה שרואים בעמוד ה-Releases בגיטהאב.
       - name: בניית קובץ ההתקנה (Inno Setup)
         shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.ver.outputs.version }}
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
-            "/DAppVersion=${{ steps.ver.outputs.version }}" `
+            "/DAppVersion=$($env:APP_VERSION)" `
             "/DExePath=$PWD\out\OtzariaBridge.exe" `
             "installer\OtzariaBridge.iss"
           Get-ChildItem installer\Output
@@ -134,10 +147,12 @@ jobs:
       # וכוללת את BRIDGE_VERSION.txt, כך שגם הגרסה שהגשר משווה מולה חתומה.
       - name: SHA256 לאימות ההורדה
         shell: pwsh
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
           $setup = Get-ChildItem installer\Output\*.exe | Select-Object -First 1 -ExpandProperty FullName
           $files = @($setup, "out/OtzariaBridge.exe", "bridge/plugins/system-settings.otzplugin", "bridge/plugins/file-explorer.otzplugin", "BRIDGE_VERSION.txt")
-          $lines = @("# tag=${{ steps.ver.outputs.tag }}") + (foreach ($f in $files) { "{0}  {1}" -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), (Split-Path $f -Leaf) })
+          $lines = @("# tag=$($env:TAG)") + (foreach ($f in $files) { "{0}  {1}" -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), (Split-Path $f -Leaf) })
           $lines | Set-Content SHA256SUMS.txt -Encoding ascii
           Get-Content SHA256SUMS.txt
 
@@ -152,16 +167,34 @@ jobs:
             BRIDGE_VERSION.txt
           if-no-files-found: error
 
-  # Release: רק מ-main או מתגית v*, ובג'וב נפרד עם הרשאת כתיבה ועם סוד החתימה (לא זמין לענפים אחרים).
+  # Release: רק מ-main או מתגית v* שה-commit שלה נמצא בהיסטוריית main, בג'וב נפרד עם environment בשם
+  # "release" (ב-GitHub: Settings > Environments > release: Required reviewers + Deployment branches
+  # and tags = main ו-v*; סוד UPDATE_SIGNING_KEY מוגדר כ-Environment secret שם בלבד, לא כ-Repository secret).
+  # WHY: בלי זה כל כותב לריפו יכול לדחוף ענף/תגית עם סקריפט חתימה משלו ולהדליף את המפתח.
   release:
     needs: build
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
+    environment: release
     permissions:
       contents: write
     steps:
-      # סקריפט החתימה נלקח מהריפו (commit זהה לבנייה), הקבצים מה-artifact של ג'וב הבנייה
+      # סקריפט החתימה נלקח תמיד מ-main (ref מפורש), לא מה-commit שהפעיל את ה-workflow: ענף/תגית לא
+      # מהימנים לא יכולים להחליף אותו. fetch-depth 0 לבדיקת השושלת בשלב הבא.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+
+      # תגית חייבת להצביע על commit שכבר ב-main (נבדק אחרי ביקורת), אחרת נכשלים.
+      - name: אימות שה-commit ב-main
+        shell: pwsh
+        env:
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          git merge-base --is-ancestor $env:TRIGGER_SHA origin/main
+          if ($LASTEXITCODE -ne 0) { throw "ה-commit $($env:TRIGGER_SHA) אינו בהיסטוריית main - לא משחררים" }
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: OtzariaBridge-Setup

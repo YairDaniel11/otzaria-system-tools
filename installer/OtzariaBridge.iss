@@ -41,6 +41,10 @@ FinishedLabel=ההתקנה הושלמה. הגשר רץ ברקע (סמל במגש
 [Files]
 Source: "{#ExePath}"; DestDir: "{app}"; DestName: "OtzariaBridge.exe"; Flags: ignoreversion
 
+; ACL (הקשחה): ההתקנה פר-משתמש (בלי UAC), ולכן כאן אי אפשר לקבוע ACL על ProgramData או Program Files.
+; את %ProgramData%\OtzariaBridge (SYSTEM+Admins) ואת השירות מקימה ההתקנה המוקשחת (--install-service, HardLock.SecureDir, עם UAC).
+; תיקיית העדכון {localappdata}\OtzariaBridge\update נוצרת ומוגנת ב-ACL ללא ירושה ע"י UpdateApi.ProtectedDir בכל עדכון;
+; ה-installer לא יוצר אותה מראש כדי לא להשאיר אותה עם ACL יורש.
 [Run]
 Filename: "{app}\OtzariaBridge.exe"; Parameters: "--install --quiet"; StatusMsg: "מגדיר הפעלה אוטומטית ומתקין את התוספים באוצריא..."; Flags: waituntilterminated runhidden
 
