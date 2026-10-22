@@ -27,7 +27,7 @@ public static class UpdateApi
     /// מפתח ציבורי (SPKI, base64) לאימות חתימת העדכונים. ריק = לא הוגדר מפתח, ואז כל עדכון נדחה (fail-closed).
     /// יוצרים אותו עם tools\New-UpdateKey.ps1 (הפרטי נשאר בסוד GitHub בשם UPDATE_SIGNING_KEY, לא בריפו).
     /// </summary>
-    public const string PublicKeySpkiBase64 = "";
+    public const string PublicKeySpkiBase64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEueF+U0uAtzEeAKnBh6VyQVDYCJ9BGNXDxhtg5MIHk183wBGUkBr0XUAqwhF1nk1ExuhEXTnJxoTQljQkSPgSig==";
     public const string SumsAssetName = "SHA256SUMS.txt";
     public const string SigAssetName = "SHA256SUMS.txt.sig";
 
