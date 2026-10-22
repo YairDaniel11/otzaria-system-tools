@@ -32,7 +32,8 @@ public static class FsGuard
     public static readonly HashSet<string> WritableExt = new(StringComparer.OrdinalIgnoreCase)
     {
         ".txt", ".md", ".csv", ".tsv", ".json", ".xml", ".rtf", ".log", ".srt", ".vtt", ".lrc", ".tex", ".bib", ".rst",
-        ".doc", ".docx", ".dot", ".dotx", ".xls", ".xlsx", ".xlt", ".xltx", ".ppt", ".pptx", ".pps", ".ppsx", ".odt", ".ods", ".odp",
+        // WHY (U3): .dot/.xlt/.xls (בינאריים ישנים) יכולים לשאת מאקרו VBA/XLM ובתיקיית Startup/XLSTART/Templates של Office מורצים אוטומטית; לא נכתבים בנעילה מחוץ לתיקיות מאושרות
+        ".doc", ".docx", ".dotx", ".xlsx", ".xltx", ".ppt", ".pptx", ".pps", ".ppsx", ".odt", ".ods", ".odp",
         ".pdf", ".epub", ".djvu", ".mobi", ".html", ".htm",
         ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".tif", ".tiff", ".ico", ".heic",
         ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".wma", ".mp4", ".mkv", ".avi", ".mov", ".webm", ".wmv",
@@ -87,7 +88,8 @@ public static class FsGuard
     /// </summary>
     public static readonly HashSet<string> OpenableExt = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".txt", ".md", ".csv", ".tsv", ".json", ".rtf", ".log", ".srt", ".vtt", ".lrc", ".tex", ".bib", ".rst",
+        // WHY (U3): .csv/.tsv הוצאו: handler ברירת המחדל הוא Excel, שמריץ =cmd|... ופותח לפי תוכן (XLSM/ZIP בשם csv) בלי בדיקה
+        ".txt", ".md", ".json", ".rtf", ".log", ".srt", ".vtt", ".lrc", ".tex", ".bib", ".rst",
         ".doc", ".docx", ".dot", ".dotx", ".xls", ".xlsx", ".xlt", ".xltx", ".ppt", ".pptx", ".pps", ".ppsx", ".odt", ".ods", ".odp",
         ".pdf", ".epub", ".djvu", ".mobi",
         ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".ico", ".heic",
@@ -167,7 +169,27 @@ public static class FsGuard
             Path.Combine(F(Environment.SpecialFolder.Windows), "Tasks"),
             Path.Combine(F(Environment.SpecialFolder.LocalApplicationData), "Programs"),
         };
+        l.AddRange(OfficeAutoLoadRoots());
         return l.Where(x => !string.IsNullOrEmpty(x)).ToList();
+    }
+
+    /// <summary>
+    /// תיקיות ש-Office טוען מהן אוטומטית בהפעלה (תבניות/תוספים/מאקרו): Word\STARTUP, Excel\XLSTART, Templates (Normal.dotm), AddIns,
+    /// ו-%LOCALAPPDATA%\Microsoft\Office. WHY (U3): כתיבה אליהן = הרצת קוד בפתיחת Word/Excel הבאה, מחוץ לכל מדיניות הקבצים.
+    /// סיכון שבירה: תבניות אישיות (.dotx) ותוספים שהמשתמש שומר בעצמו לשם נחסמים בכתיבה דרך הגשר.
+    /// </summary>
+    public static List<string> OfficeAutoLoadRoots()
+    {
+        string ad = F(Environment.SpecialFolder.ApplicationData), la = F(Environment.SpecialFolder.LocalApplicationData);
+        var l = new List<string>
+        {
+            Path.Combine(ad, "Microsoft", "Word", "STARTUP"),
+            Path.Combine(ad, "Microsoft", "Excel", "XLSTART"),
+            Path.Combine(ad, "Microsoft", "Templates"),
+            Path.Combine(ad, "Microsoft", "AddIns"),
+            Path.Combine(la, "Microsoft", "Office"),
+        };
+        return l.Where(x => !string.IsNullOrEmpty(x) && !x.StartsWith("Microsoft")).ToList();
     }
 
     /// <summary>
@@ -240,7 +262,8 @@ public static class FsGuard
             {
                 case DocKind.Rtf: return InspectRtf(s);
                 case DocKind.Ole: return InspectOle(s);
-                case DocKind.Zip: return office ? InspectZip(s) : null;   // zip/epub רגילים אינם מסמך Office
+                // WHY (U3): לא נשענים על הסיומת. zip בשם .txt/.csv/.png עלול להיפתח כמסמך Office בתוכנה אחרת, ולכן נסרק; רק epub ו-zip (לא נפתחים ב-Office) פטורים
+                case DocKind.Zip: return office || (ext != ".epub" && ext != ".zip") ? InspectZip(s) : null;
             }
             // סיומת Office בלי תוכן מוכר (HTML/XML/טקסט בשם .doc ועוד) נחסמת
             if (office) return "סוג מסמך Office לא מזוהה לפי תוכנו";
@@ -281,39 +304,86 @@ public static class FsGuard
 
     private static readonly Regex DdeFormula = new(@"^\s*[=+\-@]?\s*[\w.\-]+\s*\|", RegexOptions.Compiled);
 
+    /// <summary>סיומות מדיה/גופן שמותרות כחלק בינארי בתוך מסמך (לא נטענות כקוד). כל חלק אחר שאינו XML נחסם</summary>
+    private static readonly HashSet<string> BinaryPartExt = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".png", ".jpg", ".jpeg", ".jpe", ".gif", ".bmp", ".tif", ".tiff", ".emf", ".wmf", ".wdp", ".jxr", ".ico", ".webp", ".odttf", ".ttf", ".otf", ".fntdata",
+        ".mp3", ".wav", ".mp4", ".m4a", ".wma", ".avi", ".mov", ".wmv", ".mpg", ".mpeg", ".ogg", ".webm",
+    };
+
+    /// <summary>ערך ContentType/Type שמעיד על מאקרו, ActiveX, OLE או גיליון מאקרו (Office פותח את החלק לפיהם, לא לפי שם)</summary>
+    private static bool IsRiskyContentType(string v)
+    {
+        if (string.IsNullOrEmpty(v)) return false;
+        foreach (string k in new[] { "macroEnabled", "vbaProject", "vbaData", "activeX", "macrosheet", "oleObject", "ms-office.vba", "ms-excel.sheet.binary.macro" })
+            if (v.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        return false;
+    }
+
     private static string InspectZip(Stream s)
     {
         if (s.Length > 200L * 1024 * 1024) return "המסמך גדול מדי לבדיקה";
         s.Seek(0, SeekOrigin.Begin);
         using var z = new ZipArchive(s, ZipArchiveMode.Read, leaveOpen: true);
         if (z.Entries.Count > 20000) return "מסמך חשוד (יותר מדי רכיבים)";
+        long total = 0;
         foreach (var e in z.Entries)
         {
+            total += e.Length;
             string n = e.FullName.Replace('\\', '/');
+            string sn = "/" + n;   // כך "/xl/macrosheets/" תופס גם חלק בתיקייה מקוננת
             if (n.IndexOf("vbaProject", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 n.IndexOf("vbaData", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                n.StartsWith("xl/macrosheets/", StringComparison.OrdinalIgnoreCase) ||
-                n.StartsWith("xl/connections", StringComparison.OrdinalIgnoreCase) ||     // חיבורי נתונים/שאילתות: הרצת פקודה/משאב חיצוני
-                n.StartsWith("xl/queryTables/", StringComparison.OrdinalIgnoreCase) ||
+                sn.IndexOf("/macrosheets/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                sn.IndexOf("/connections", StringComparison.OrdinalIgnoreCase) >= 0 ||     // חיבורי נתונים/שאילתות: הרצת פקודה/משאב חיצוני
+                sn.IndexOf("/queryTables/", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 n.StartsWith("Basic/", StringComparison.OrdinalIgnoreCase) ||
                 n.StartsWith("Scripts/", StringComparison.OrdinalIgnoreCase) ||
-                n.IndexOf("/activeX/", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                n.IndexOf("/embeddings/", StringComparison.OrdinalIgnoreCase) >= 0)
+                sn.IndexOf("/activeX/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                sn.IndexOf("/embeddings/", StringComparison.OrdinalIgnoreCase) >= 0)
                 return "המסמך מכיל מאקרו או רכיב מוטבע (" + n + ")";
         }
+        if (total > 2L * 1024 * 1024 * 1024) return "מסמך חשוד (גודל לא דחוס חריג)";
+        // WHY (U3): Office קובע את החלק הראשי לפי _rels/.rels ואת סוג החלק לפי [Content_Types].xml, לא לפי שם/תחילית. לכן כל חלק נבדק לפי תוכנו
+        // (מתחיל ב-'<' = XML) עם כל הבדיקות בלי תנאי תחילית; חלק שאינו XML ואינו מדיה/גופן מוכרים נחסם (fail-closed).
+        // סיכון false-positive: הרחבות יצרן נדירות (חלק .bin/.dat בתוך docx) נחסמות. printerSettings*.bin מותר במפורש.
         foreach (var e in z.Entries)
         {
             string n = e.FullName.Replace('\\', '/');
-            bool isRels = n.EndsWith(".rels", StringComparison.OrdinalIgnoreCase);
-            bool isXml = n.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) || n.EndsWith(".vml", StringComparison.OrdinalIgnoreCase);
-            if (!isRels && !isXml) continue;
+            if (n.EndsWith("/")) continue;   // רשומת תיקייה
+            var head = new byte[16];
+            int got = 0;
+            using (var hs = e.Open())
+            {
+                int r0;
+                while (got < head.Length && (r0 = hs.Read(head, got, head.Length - got)) > 0) got += r0;
+            }
+            if (!LooksLikeXml(head, got))
+            {
+                string ext = StdExt(n);
+                bool printer = n.IndexOf("/printerSettings/", StringComparison.OrdinalIgnoreCase) >= 0 || n.StartsWith("printerSettings/", StringComparison.OrdinalIgnoreCase);
+                bool okBin = BinaryPartExt.Contains(ext) || (printer && ext == ".bin") ||
+                             string.Equals(n, "mimetype", StringComparison.OrdinalIgnoreCase) || got == 0;
+                if (!okBin) return "המסמך מכיל רכיב לא מוכר (" + n + ")";
+                continue;
+            }
             if (e.Length > 64L * 1024 * 1024) return "רכיב XML גדול מדי לבדיקה (" + n + ")";
             using var st = e.Open();
             using var r = SafeXml(st);
-            string why = isRels ? InspectRels(r, n) : InspectPart(r, n);
+            string why = n.EndsWith(".rels", StringComparison.OrdinalIgnoreCase) ? InspectRels(r, n) : InspectPart(r, n);
             if (why != null) return why;
         }
         return null;
+    }
+
+    /// <summary>XML לפי תוכן: '&lt;' אחרי BOM/רווחים, או BOM של UTF-16/UTF-8 (XmlReader מזהה קידוד לפי BOM)</summary>
+    private static bool LooksLikeXml(byte[] h, int len)
+    {
+        int i = 0;
+        if (len >= 2 && ((h[0] == 0xFF && h[1] == 0xFE) || (h[0] == 0xFE && h[1] == 0xFF))) return true;
+        if (len >= 3 && h[0] == 0xEF && h[1] == 0xBB && h[2] == 0xBF) i = 3;
+        while (i < len && (h[i] == ' ' || h[i] == '\t' || h[i] == '\r' || h[i] == '\n')) i++;
+        return i < len && h[i] == '<';
     }
 
     private static string InspectRels(XmlReader r, string n)
@@ -321,6 +391,7 @@ public static class FsGuard
         while (r.Read())
         {
             if (r.NodeType != XmlNodeType.Element || !r.LocalName.Equals("Relationship", StringComparison.OrdinalIgnoreCase)) continue;
+            if (IsRiskyContentType(Attr(r, "Type"))) return "המסמך מפנה לרכיב מאקרו/מוטבע (" + n + ")";
             if (!(Attr(r, "TargetMode") ?? "").Trim().Equals("External", StringComparison.OrdinalIgnoreCase)) continue;
             // קישור רגיל (hyperlink) מותר: נפתח רק בלחיצה. כל משאב חיצוני אחר נטען אוטומטית (תבנית, תמונה, OLE)
             if ((Attr(r, "Type") ?? "").EndsWith("/hyperlink", StringComparison.OrdinalIgnoreCase)) continue;
@@ -331,31 +402,35 @@ public static class FsGuard
 
     private static string InspectPart(XmlReader r, string n)
     {
+        // WHY (U3): בלי תנאי תחילית בלבד. החלק הראשי יכול להיות בכל נתיב (לפי _rels/.rels); ה-namespace של האלמנט קובע את הסוג,
+        // והתחילית (word/ xl/) נשארת כרמז נוסף. בדיקת ppaction חלה על כל חלק (התכונה לא לגיטימית בחלק אחר)
         bool word = n.StartsWith("word/", StringComparison.OrdinalIgnoreCase);
-        bool ppt = n.StartsWith("ppt/", StringComparison.OrdinalIgnoreCase);
         bool xl = n.StartsWith("xl/", StringComparison.OrdinalIgnoreCase);
         // שדות Word: ההוראה יכולה להתפצל בין כמה w:instrText (DD + E), לכן מצברים לפי fldChar begin..separate
         var fields = new Stack<StringBuilder>();
         bool again = false;   // ReadElementContentAsString כבר התקדם לצומת הבא
+        bool sawXl = false;
         while (again || r.Read())
         {
             again = false;
             if (r.NodeType != XmlNodeType.Element) continue;
             string ln = r.LocalName;
+            string ns = r.NamespaceURI ?? "";
+            bool nsWord = ns.IndexOf("wordprocessingml", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool nsXl = ns.IndexOf("spreadsheetml", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (nsXl) sawXl = true;
+            if (IsRiskyContentType(Attr(r, "ContentType"))) return "המסמך מכיל סוג רכיב מאקרו/מוטבע (" + n + ")";
             if (ln.Equals("attachedTemplate", StringComparison.OrdinalIgnoreCase) || ln.Equals("externalData", StringComparison.OrdinalIgnoreCase) ||
                 ln.Equals("event-listener", StringComparison.OrdinalIgnoreCase) || ln.Equals("section-source", StringComparison.OrdinalIgnoreCase) ||
                 ln.Equals("table-source", StringComparison.OrdinalIgnoreCase) || ln.Equals("cell-range-source", StringComparison.OrdinalIgnoreCase))
                 return "המסמך מכיל תבנית מצורפת, מקור חיצוני או אירוע-סקריפט (" + n + ")";
             string instrAttr = Attr(r, "instr");
             if (instrAttr != null && IsDdeInstr(instrAttr)) return "המסמך מכיל שדה DDE (" + n + ")";
-            if (ppt)
-            {
-                string act = Attr(r, "action") ?? "";
-                if (act.StartsWith("ppaction://program", StringComparison.OrdinalIgnoreCase) || act.StartsWith("ppaction://macro", StringComparison.OrdinalIgnoreCase) ||
-                    act.StartsWith("ppaction://ole", StringComparison.OrdinalIgnoreCase))
-                    return "המצגת מכילה פעולה שמריצה תוכנה/מאקרו (" + n + ")";
-            }
-            if (word)
+            string act = Attr(r, "action") ?? "";
+            if (act.StartsWith("ppaction://program", StringComparison.OrdinalIgnoreCase) || act.StartsWith("ppaction://macro", StringComparison.OrdinalIgnoreCase) ||
+                act.StartsWith("ppaction://ole", StringComparison.OrdinalIgnoreCase))
+                return "המצגת מכילה פעולה שמריצה תוכנה/מאקרו (" + n + ")";
+            if (word || nsWord)
             {
                 if (ln.Equals("fldChar", StringComparison.OrdinalIgnoreCase))
                 {
@@ -378,7 +453,7 @@ public static class FsGuard
                     else if (IsDdeInstr(txt)) return "המסמך מכיל שדה DDE (" + n + ")";
                 }
             }
-            else if (xl && (ln == "f" || ln == "v" || ln == "t") && !r.IsEmptyElement)
+            else if ((xl || nsXl) && (ln == "f" || ln == "v" || ln == "t") && !r.IsEmptyElement)
             {
                 string txt = r.ReadElementContentAsString();
                 again = true;
@@ -388,7 +463,7 @@ public static class FsGuard
             }
         }
         foreach (var sb in fields) if (IsDdeInstr(sb.ToString())) return "המסמך מכיל שדה DDE (" + n + ")";
-        if (xl && n.StartsWith("xl/externalLinks/", StringComparison.OrdinalIgnoreCase)) return "הגיליון מכיל קישור חיצוני (" + n + ")";
+        if ((xl || sawXl) && n.IndexOf("/externalLinks/", StringComparison.OrdinalIgnoreCase) >= 0) return "הגיליון מכיל קישור חיצוני (" + n + ")";
         return null;
     }
 
@@ -401,13 +476,38 @@ public static class FsGuard
         return buf;
     }
 
+    /// <summary>תקרת גודל לסריקת RTF/OLE (כמו Zip 200MB): מעליה חסום. WHY (U3): קריאה חלקית (16/32MB) אפשרה להסתיר אובייקט/DDE אחרי הרף</summary>
+    private const long MaxLegacyScan = 256L * 1024 * 1024;
+    private const int ScanChunk = 8 * 1024 * 1024;
+    private const int ScanOverlap = 8 * 1024;
+
+    /// <summary>קורא את כל הזרם בנתחים חופפים (חפיפה מכסה תבנית שנחתכה בגבול), ומריץ scan על כל נתח; scan מחזיר סיבה או null</summary>
+    private static string ScanChunks(Stream s, Func<byte[], int, string> scan)
+    {
+        if (s.Length > MaxLegacyScan) return "המסמך גדול מדי לבדיקה";
+        s.Seek(0, SeekOrigin.Begin);
+        var buf = new byte[ScanChunk + ScanOverlap];
+        int carry = 0;
+        while (true)
+        {
+            int got = carry, n;
+            while (got < buf.Length && (n = s.Read(buf, got, buf.Length - got)) > 0) got += n;
+            if (got == carry) return null;   // לא נקרא דבר חדש
+            string why = scan(buf, got);
+            if (why != null) return why;
+            if (got < buf.Length) return null;
+            Buffer.BlockCopy(buf, got - ScanOverlap, buf, 0, ScanOverlap);
+            carry = ScanOverlap;
+        }
+    }
+
     private static readonly Regex RtfObj = new(@"\\(objdata|objautlink|objupdate|objemb|objlink|objclass|objsetsize|template|attachedtemplate)\b|\\\*\\(template|objclass|datafield|mailmerge)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex RtfCtl = new(@"\\\*|\\[a-zA-Z]+-?\d* ?|[{}\s""]", RegexOptions.Compiled);
 
-    private static string InspectRtf(Stream s)
+    private static string InspectRtf(Stream s) => ScanChunks(s, (b, len) =>
     {
-        string t = Encoding.Latin1.GetString(Head(s, 16 * 1024 * 1024));
+        string t = Encoding.Latin1.GetString(b, 0, len);
         if (RtfObj.IsMatch(t)) return "קובץ RTF עם אובייקט מוטבע או תבנית";
         // שדות: DDE/INCLUDEPICTURE/INCLUDETEXT/LINK אחרי הסרת סוגריים ומילות בקרה (הפיצול {DD}{E} לא עוקף)
         int i = 0;
@@ -421,25 +521,24 @@ public static class FsGuard
                 return "קובץ RTF עם שדה DDE/קישור חיצוני";
         }
         return null;
-    }
+    });
 
-    private static string InspectOle(Stream s)
+    private static string InspectOle(Stream s) => ScanChunks(s, (b, len) =>
     {
-        byte[] b = Head(s, 32 * 1024 * 1024);
         // שמות הזרמים ב-OLE שמורים כ-UTF-16, וטקסט שדות Word כ-ASCII או UTF-16: מסירים אפסים ומחפשים על הטקסט הדחוס
-        var packed = new byte[b.Length];
+        var packed = new byte[len];
         int k = 0;
-        foreach (byte x in b) if (x != 0) packed[k++] = x;
+        for (int q = 0; q < len; q++) if (b[q] != 0) packed[k++] = b[q];
         string t = Encoding.Latin1.GetString(packed, 0, k);
         foreach (string needle in new[] { "_VBA_PROJECT", "Macros", "ObjectPool", "Ole10Native", "DDEAUTO" })
             if (t.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0) return "מסמך ישן עם מאקרו, DDE או אובייקט מוטבע";
         if (Regex.IsMatch(t, @"\bDDE\s")) return "מסמך ישן עם שדה DDE";
         // גיליון מאקרו Excel 4.0 (XLM): רשומת BOUNDSHEET (0x0085) עם סוג גיליון 1 (macro) או 6 (VBA module)
-        for (int i = 0; i + 10 < b.Length; i++)
+        for (int i = 0; i + 10 < len; i++)
             if (b[i] == 0x85 && b[i + 1] == 0x00 && b[i + 3] == 0x00 && b[i + 2] >= 8 && b[i + 2] <= 80 && b[i + 8] <= 2 && (b[i + 9] == 1 || b[i + 9] == 6))
                 return "חוברת עבודה ישנה עם גיליון מאקרו";
         return null;
-    }
+    });
 
     // ---------- הפעלה (/sys/power) ----------
 

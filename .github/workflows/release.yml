@@ -90,7 +90,11 @@ jobs:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:UPDATE_SIGNING_KEY)) { throw "הסוד UPDATE_SIGNING_KEY לא מוגדר - לא משחררים בלי חתימה" }
-          ./tools/Sign-Sums.ps1 -Sums dist/SHA256SUMS.txt
+          # WHY (U3): המפתח הציבורי נשלף מהקוד שנבנה (UpdateApi.cs), כדי שהחתימה תאומת מול מה שהגשר המותקן באמת מכיר
+          $src = Get-Content bridge/UpdateApi.cs -Raw
+          $m = [regex]::Match($src, 'PublicKeySpkiBase64\s*=\s*"([^"]+)"')
+          if (-not $m.Success) { throw "לא נמצא PublicKeySpkiBase64 ב-UpdateApi.cs" }
+          ./tools/Sign-Sums.ps1 -Sums dist/SHA256SUMS.txt -PublicKey $m.Groups[1].Value
           Get-ChildItem dist -Recurse -File | ForEach-Object { $_.FullName }
 
       - name: Release

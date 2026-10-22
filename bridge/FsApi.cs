@@ -720,16 +720,17 @@ public static class FsApi
             throw FxPolicy.Outside("במצב מוגבל אי אפשר לפתוח תיקיות וקיצורי דרך בסייר Windows");
         }
         EnsureOpenExtAllowed(path);
-        // TOCTOU (S3): הבדיקה והפתיחה נעשו בשני שלבים על אותו שם, ואפשר להחליף את הקובץ/התיקייה ביניהם (נבדק מסמך נקי, נפתח חדש).
-        // עכשיו: handle אחד נפתח וננעל נגד כתיבה/מחיקה (FileShare.Read), הכול נבדק על ה-handle ועל נתיבו הסופי, והוא מוחזק עד אחרי
-        // Process.Start (כמו Programs.Activate). הפתיחה עצמה לפי הנתיב הסופי של ה-handle, לא לפי השם שהתקבל.
-        // שאריות: האפליקציה פותחת את הקובץ בשם אחרי שחרור ה-handle (חלון של מילי-שניות); אי אפשר לסגור זאת בלי לשבור שמירה ב-Word.
+        // TOCTOU (S3, U3): handle אחד נפתח וננעל נגד כתיבה/מחיקה (FileShare.Read), הכול נבדק על ה-handle ועל נתיבו הסופי.
+        // WHY (U3): סגירת ה-handle מיד אחרי Process.Start השאירה חלון של שניות (Word קורא אחרי הפעלה איטית) להחלפת הקובץ הנקי, וה-fallback
+        // ל-FileShare.ReadWrite איפשר לכותב להמשיך לשנות תוך כדי הבדיקה. עכשיו: קובץ פתוח לכתיבה = סירוב; מסמך (Office, או קובץ עד 256MB) מועתק
+        // מה-handle המאומת עצמו לתיקייה פרטית (ACL: משתמש+SYSTEM+Admins, בלי ירושה) ונפתח ההעתק, שמוחזק נעול (FileShare.Read, בלי Delete) 2 דקות
+        // ונשאר read-only. שאריות: קובץ גדול שאינו Office נפתח בשמו (המדיה אינה נבדקת בתוכן); אחרי 2 דקות ההעתק פתוח לשינוי ע"י אותו משתמש.
+        // סיכון false-positive: מסמך שפתוח כרגע לכתיבה ב-Word נדחה (לסגור ולנסות שוב); שמירה בתוך Word נעשית בהעתק ולא במקור.
         FileStream hold;
         try { hold = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read); }
         catch (IOException)
         {
-            // הקובץ כבר פתוח לכתיבה בתוכנה אחרת (Word): נועלים רק מחיקה/שינוי שם. בדיקת התוכן עדיין על אותו handle
-            hold = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            throw BridgeException.Forbidden("הקובץ פתוח לכתיבה בתוכנה אחרת: סגרו אותו ונסו שוב");
         }
         using (hold)
         {
@@ -741,9 +742,59 @@ public static class FsApi
                 throw BridgeException.Forbidden("הקובץ מקושר בקישור קשיח (hardlink) לשם נוסף: הפתיחה חסומה");
             string why = FsGuard.InspectDocument(hold, FsGuard.StdExt(fin));
             if (why != null) throw BridgeException.Forbidden("הקובץ נחסם: " + why);
-            Process.Start(new ProcessStartInfo(fin) { UseShellExecute = true });
+            if (FsGuard.OfficeExt.Contains(FsGuard.StdExt(fin)) || hold.Length <= 256L * 1024 * 1024)
+            {
+                string baseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OtzariaBridge", "open");
+                var keep = CopyForOpen(hold, fin, baseDir, out string copy);
+                try { Process.Start(new ProcessStartInfo(copy) { UseShellExecute = true }); }
+                catch { keep.Dispose(); throw; }
+                _ = Task.Run(async () => { try { await Task.Delay(TimeSpan.FromMinutes(2)); } finally { keep.Dispose(); } });
+            }
+            else Process.Start(new ProcessStartInfo(fin) { UseShellExecute = true });
         }
         return new { opened = true };
+    }
+
+    /// <summary>
+    /// מעתיק את תוכן ה-handle המאומת לקובץ חדש בתיקייה פרטית (baseDir\guid\שם-מקורי), מסמן read-only ומחזיר handle שמחזיק אותו נעול
+    /// (FileShare.Read: בלי כתיבה/מחיקה/שינוי שם לאחרים). מנקה העתקים בני יום ומעלה. internal לבדיקות.
+    /// </summary>
+    internal static FileStream CopyForOpen(FileStream src, string fin, string baseDir, out string copyPath)
+    {
+        Directory.CreateDirectory(baseDir);
+        try { ProtectOpenDir(baseDir); } catch { /* ACL best-effort: אין ACL = עדיין GUID אקראי + נעילה */ }
+        try
+        {
+            foreach (var d in new DirectoryInfo(baseDir).GetDirectories())
+                if (DateTime.UtcNow - d.CreationTimeUtc > TimeSpan.FromDays(1)) { try { d.Delete(true); } catch { } }
+        }
+        catch { }
+        string sub = Path.Combine(baseDir, Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(sub);
+        copyPath = Path.Combine(sub, Path.GetFileName(fin));
+        src.Seek(0, SeekOrigin.Begin);
+        using (var dst = new FileStream(copyPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            src.CopyTo(dst);
+            dst.Flush(true);
+        }
+        File.SetAttributes(copyPath, FileAttributes.ReadOnly);
+        return new FileStream(copyPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+    }
+
+    private static void ProtectOpenDir(string dir)
+    {
+        var di = new DirectoryInfo(dir);
+        var ds = di.GetAccessControl();
+        ds.SetAccessRuleProtection(true, false);
+        foreach (var r in ds.GetAccessRules(true, false, typeof(System.Security.Principal.SecurityIdentifier)).Cast<System.Security.AccessControl.FileSystemAccessRule>().ToList()) ds.RemoveAccessRule(r);
+        var inh = System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit;
+        foreach (var sid in new[] { System.Security.Principal.WindowsIdentity.GetCurrent().User,
+                                    new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.LocalSystemSid, null),
+                                    new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null) })
+            ds.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(sid, System.Security.AccessControl.FileSystemRights.FullControl, inh,
+                System.Security.AccessControl.PropagationFlags.None, System.Security.AccessControl.AccessControlType.Allow));
+        di.SetAccessControl(ds);
     }
 
     private static object Reveal(JsonElement b)
