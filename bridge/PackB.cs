@@ -162,7 +162,8 @@ public static class PackB
     {
         if (Kiosk.IsActive) throw BridgeException.Locked("אי אפשר לשחזר הגדרות במצב נעילה");
         // שחזור משנה גם את הגדרות הנעילה — דורש את סיסמת הנעילה כשהוגדרה
-        if (!string.IsNullOrEmpty(Config.Get<string>("kiosk.passwordHash", null)))
+        // [w4] לא נשען על hash מקומי: כשהשירות מחזיק את הסיסמה העותק המקומי נמחק (Kiosk.PurgeLocalPassword)
+        if (Kiosk.PasswordConfigured || Kiosk.ServiceDown())
         {
             Kiosk.RequirePassword(b.Str("password"));
             TwoFactor.Require("שחזור הגדרות");

@@ -20,7 +20,7 @@ public static class Tray
         _plugins = new ToolStripMenuItem("", null, (_, _) => Installer.OpenPluginsFolder());
         _install = new ToolStripMenuItem("", null, (_, _) => { Installer.DeployPlugins(); Installer.InstallPluginsInOtzaria(); });
         _lang = new ToolStripMenuItem("", null, (_, _) => { Lang.Set(Lang.En ? "he" : "en"); ApplyTexts(); });
-        _exit = new ToolStripMenuItem("", null, (_, _) => Application.ExitThread());
+        _exit = new ToolStripMenuItem("", null, (_, _) => TryExit());
         _about = new ToolStripMenuItem("", null, (_, _) => AboutForm.Open());
         _unpair = new ToolStripMenuItem("", null, (_, _) => PairingForm.Open());
         _changelog = new ToolStripMenuItem("", null, (_, _) => ChangelogForm.Open());
@@ -72,6 +72,23 @@ public static class Tray
         };
     }
 
+    /// <summary>יציאה מהמגש: בנעילה פעילה (או כשהשירות נועל) נדרשת סיסמת הנעילה/קוד שחזור. כשל באימות או ב-pipe = נשארים</summary>
+    private static void TryExit()
+    {
+        bool locked = false;
+        try { locked = Kiosk.IsActive || HardLock.ServiceActive; } catch { locked = true; }
+        if (!locked) { Application.ExitThread(); return; }
+        using var f = new ExitPasswordForm();
+        if (f.ShowDialog() != DialogResult.OK) return;
+        try { Kiosk.RequirePasswordOrRecovery(f.Password); }
+        catch (Exception ex)
+        {
+            Notify(Program.AppName, ex is BridgeException ? ex.Message : Lang.T("אימות נכשל", "Verification failed"));
+            return;
+        }
+        Application.ExitThread();
+    }
+
     private static void ApplyTexts()
     {
         if (_menu == null) return;
@@ -110,7 +127,7 @@ public static class Tray
 
     public static void SetKioskState(bool active) => Invoke(() =>
     {
-        if (_exit != null) _exit.Enabled = !active; // במצב נעילה אין יציאה מהמגש
+        // WHY: "יציאה" מושבתת הייתה מונעת גם יציאה לגיטימית; עכשיו היא פעילה אך דורשת סיסמה כשנעילה/שירות פעילים (TryExit)
         UpdateStatus();
     });
 
@@ -255,5 +272,29 @@ internal sealed class AboutForm : Form
             SetState(ex.Message, Color.Firebrick);
             _check.Enabled = true;
         }
+    }
+}
+
+/// <summary>בקשת סיסמה ליציאה מהמגש בזמן נעילה</summary>
+internal sealed class ExitPasswordForm : Form
+{
+    private readonly TextBox _pw = new() { UseSystemPasswordChar = true, Dock = DockStyle.Top };
+    public string Password => _pw.Text;
+
+    public ExitPasswordForm()
+    {
+        Text = Lang.T("יציאה מהגשר", "Exit the bridge");
+        RightToLeft = Lang.En ? RightToLeft.No : RightToLeft.Yes;
+        RightToLeftLayout = !Lang.En;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        TopMost = true;
+        ClientSize = new Size(340, 120);
+        Padding = new Padding(14);
+        var ok = new Button { Text = Lang.T("אישור", "OK"), DialogResult = DialogResult.OK, Dock = DockStyle.Bottom };
+        var lbl = new Label { Text = Lang.T("הזינו את סיסמת הנעילה:", "Enter the lock password:"), Dock = DockStyle.Top, Height = 28 };
+        Controls.AddRange(new Control[] { ok, _pw, lbl });
+        AcceptButton = ok;
     }
 }
