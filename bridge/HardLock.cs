@@ -130,6 +130,8 @@ public static class HardLock
         public bool? AutoTorah { get; private init; }
         public string[] AutoTorahKeywords { get; private init; }
         public string OtzariaPath { get; private init; }        // "" = זיהוי אוטומטי (בלי נתיב מוגדר)
+        /// <summary>WHY (T1): SHA-256 של אוצריא שהשירות מחזיק (נשמר בסיסמה). אוצריא במיקום כתיב תופעל רק אם הקובץ תואם. "" = אין נעיצה</summary>
+        public string OtzariaSha256 { get; private init; }
         public string FxMode { get; private init; }
         public string[] FxRoots { get; private init; }
         public int? FxUnlockMinutes { get; private init; }
@@ -149,6 +151,7 @@ public static class HardLock
                     AutoTorah = o["autoTorahPrograms"] is JsonValue at ? at.GetValue<bool>() : null,
                     AutoTorahKeywords = Strs(o["autoTorahKeywords"], json: false),
                     OtzariaPath = o["otzariaPath"]?.ToString(),
+                    OtzariaSha256 = o["otzariaSha256"]?.ToString(),
                     FxMode = fx?["mode"]?.ToString(),
                     FxRoots = fx == null ? null : Strs(fx["roots"], json: false) ?? Array.Empty<string>(),
                     FxUnlockMinutes = fx?["unlockMinutes"] is JsonValue fm ? fm.GetValue<int>() : null,
@@ -241,8 +244,13 @@ public static class HardLock
         });
 
     /// <summary>נתיב אוצריא → השירות. מחרוזת ריקה = זיהוי אוטומטי</summary>
-    public static void SetOtzariaPath(string password, string path) =>
-        PushSettings(password, new JsonObject { ["otzariaPath"] = path ?? "" });
+    public static void SetOtzariaPath(string password, string path, string sha256 = null)
+    {
+        var f = new JsonObject { ["otzariaPath"] = path ?? "" };
+        // WHY (T1): הנעיצה נשלחת באותה בקשה (בסיסמה) כדי שנתיב ונעיצה לא יתפצלו; בלי sha השירות מנקה נעיצה ישנה של נתיב אחר
+        if (sha256 != null) f["otzariaSha256"] = sha256;
+        PushSettings(password, f);
+    }
 
     /// <summary>מדיניות סייר הקבצים → השירות</summary>
     public static void SetFxPolicy(string password, string mode, IEnumerable<string> roots, int unlockMinutes) =>
@@ -275,6 +283,10 @@ public static class HardLock
                 SetOtzariaPath(password, Config.Get<string>("kiosk.otzariaPath", "") ?? "");
         }
         catch (Exception ex) { Config.Log("hardlock sync otzariaPath: " + ex.Message); }
+        // WHY (T1): הגירה חד-פעמית: הגדרות קיימות (בלי חתימה) נחתמות עכשיו, כשהמנהל אימת סיסמה — אחרת עדכון השירות היה מפיל
+        // את כל מפתחות האבטחה לברירות מחדל מחמירות עד שמירת הגדרות ידנית
+        try { ConfigSeal.Reset(); Kiosk.SealConfig(); }
+        catch (Exception ex) { Config.Log("hardlock sync seal: " + ex.Message); }
     }
 
     /// <summary>האם השירות אומר שהנעילה פעילה</summary>
@@ -383,6 +395,17 @@ public static class HardLock
     {
         var r = Call(new JsonObject { ["op"] = "disable", ["password"] = code ?? "" });
         return r?["ok"]?.GetValue<bool>() == true;
+    }
+
+    /// <summary>
+    /// בדיקת "הוכחת" קוד שחזור (ר' Secret.RecoveryProofs) מול הגיבוב שהשירות מחזיק, בלי לבטל כלום. null = השירות לא ענה/לא מכיר את הפקודה
+    /// </summary>
+    public static bool? RecoveryProofCheck(string[] proofs)
+    {
+        var r = Call(new JsonObject { ["op"] = "recovery-proof", ["proofs"] = new JsonArray((proofs ?? Array.Empty<string>()).Select(x => (JsonNode)x).ToArray()) });
+        if (r == null) return null;
+        if (r["ok"]?.GetValue<bool>() == true) return true;
+        return r["message"]?.ToString()?.StartsWith("פקודה לא מוכרת") == true ? null : false;
     }
 
     public static string UninstallWithPassword(string password)
@@ -883,6 +906,7 @@ public class HardLockService : ServiceBase
     // גשרים שהשירות יצר בעצמו (pid -> זמן התחלה): רק הם נחשבים מהימנים; כל גשר אמיתי אחר נהרג כשהנעילה נאכפת
     private readonly Dictionary<int, DateTime> _ownBridges = new();
 
+    private byte[] _sealKey; // מפתח HMAC של ConfigSeal, נטען עצלנית (נקרא תחת _gate)
     private static string StateFile => Path.Combine(HardLock.DataDir, "hardlock.json");
 
     public HardLockService()
@@ -890,6 +914,36 @@ public class HardLockService : ServiceBase
         ServiceName = HardLock.ServiceName;
         CanStop = true;
         CanShutdown = true;
+        CanHandleSessionChangeEvent = true; // SERVICE_CONTROL_SESSIONCHANGE: הגשר עולה מיד בכניסה/ביטול נעילת מסך (T1)
+    }
+
+    // סשנים שנכנסו/ננעלו-נפתחו: הגשר שלהם מופעל בלי חסד הסשן (ר' RelaunchPolicy.ShouldLaunch immediate)
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte> _immediateSessions = new();
+
+    /// <summary>
+    /// WHY (T1): אחרי Sign out/כניסה מחדש הסשן חדש והגשר לא רץ בו; בלי אירוע זה ההפעלה מחכה לחסד הסשן (3 שניות) ולטיימר של שנייה.
+    /// כאן מסמנים את הסשן כ"מיידי" ומפעילים סבב מיידי, אם הנעילה נאכפת. הסבב עצמו רץ ברקע כדי לא לחסום את תור אירועי ה-SCM
+    /// </summary>
+    protected override void OnSessionChange(SessionChangeDescription change)
+    {
+        try
+        {
+            if (!SessionTrigger.IsLogonLike(change.Reason) || change.SessionId <= 0) return;
+            _immediateSessions[change.SessionId] = 0;
+            Task.Run(() =>
+            {
+                if (!Monitor.TryEnter(_bridgeGate, 3000)) return;
+                try
+                {
+                    bool enforced;
+                    lock (_gate) enforced = Configured && Enforced;
+                    if (enforced) EnsureBridgeInSessions();
+                }
+                catch (Exception ex) { HardLock.SvcLog("session change: " + ex.Message); }
+                finally { Monitor.Exit(_bridgeGate); }
+            });
+        }
+        catch (Exception ex) { HardLock.SvcLog("session change: " + ex.Message); }
     }
 
     protected override void OnStart(string[] args)
@@ -921,7 +975,7 @@ public class HardLockService : ServiceBase
         // DisableTaskMgr/DisableRegistryTools (וחסימת USB) - מנהל המשימות ועורך הרישום חסומים בלי שום נעילה.
         // מנקים בעצירה. הנעילה השמורה (active) לא משתנה, ולכן כשהשירות יעלה שוב ה-Tick הראשון יאכוף מחדש
         // S1 ממצא 3: הקשחת האתחול (SafeBoot/WinRE/bcd) לא משתחררת בעצירה; רק בהסרה מלאה (SelfUninstall)
-        try { EnforcePolicies(false); EnforceUsb(false); }
+        try { EnforcePolicies(false); EnforceUsb(false); EnforceOffice(false); }
         catch (Exception ex) { HardLock.SvcLog("stop cleanup: " + ex.Message); }
         HardLock.SvcLog("service: נעצר");
     }
@@ -1056,6 +1110,22 @@ public class HardLockService : ServiceBase
     private bool Matches(string secret, string hashKey, string saltKey) =>
         Secret.Matches(secret, _state[hashKey]?.ToString(), _state[saltKey]?.ToString());
 
+    /// <summary>
+    /// WHY (T1): גיבוב ישן (200k איטרציות, בלי תחילית v2) משודרג לפורמט הנוכחי בכניסה מוצלחת, כשהסוד הגלוי בידינו. אותו salt.
+    /// כשל שמירה לא פוסל את האימות (הישן עדיין תקף). נקרא תחת _gate
+    /// </summary>
+    private void UpgradeHash(string secret, string hashKey, string saltKey)
+    {
+        try
+        {
+            if (!Secret.NeedsUpgrade(_state[hashKey]?.ToString())) return;
+            _state[hashKey] = Secret.Hash(secret, Convert.FromBase64String(_state[saltKey]?.ToString() ?? ""));
+            Save();
+            HardLock.SvcLog("service: גיבוב " + hashKey + " שודרג לפורמט הנוכחי");
+        }
+        catch (Exception ex) { HardLock.SvcLog("upgrade hash: " + ex.Message); }
+    }
+
     /// <summary>null = תקין; אחרת תשובת שגיאה</summary>
     private JsonObject Check(string password, bool allowRecovery)
     {
@@ -1063,8 +1133,10 @@ public class HardLockService : ServiceBase
         if (!Configured) return Err("bad_request", "רכיב ההקשחה עדיין לא הוגדר");
         if (!_limiter.CanTry(_clientKey, NowMs, out int wait))
             return Err("too_many", $"יותר מדי ניסיונות שגויים. נסו שוב בעוד {wait} שניות");
-        bool ok = Matches(password, "passwordHash", "salt") ||
-                  (allowRecovery && Matches(Secret.NormalizeRecovery(password), "recoveryHash", "recoverySalt"));
+        bool ok = false;
+        if (Matches(password, "passwordHash", "salt")) { ok = true; UpgradeHash(password, "passwordHash", "salt"); }
+        else if (allowRecovery && Matches(Secret.NormalizeRecovery(password), "recoveryHash", "recoverySalt"))
+        { ok = true; UpgradeHash(Secret.NormalizeRecovery(password), "recoveryHash", "recoverySalt"); }
         if (ok) { _limiter.Success(_clientKey); return null; }
         _limiter.Fail(_clientKey, NowMs);
         return Err("wrong_password", "סיסמה שגויה");
@@ -1075,7 +1147,7 @@ public class HardLockService : ServiceBase
 
     // ---------- מדיניות הנעילה (מקור האמת כשהשירות מותקן) ----------
 
-    private static readonly string[] PolicyKeys = { "programs", "autoTorahPrograms", "autoTorahKeywords", "otzariaPath", "fxPolicy" };
+    private static readonly string[] PolicyKeys = { "programs", "autoTorahPrograms", "autoTorahKeywords", "otzariaPath", "otzariaSha256", "fxPolicy" };
 
     /// <summary>המדיניות השמורה, לתשובת "status". רק מפתחות שהוגדרו — מפתח חסר = עוד לא סונכרן</summary>
     private JsonObject PolicyNode()
@@ -1142,6 +1214,14 @@ public class HardLockService : ServiceBase
             string op = (q["otzariaPath"]?.ToString() ?? "").Trim();
             if (op.Length > 0 && !ExePath(op)) return Err("bad_request", "נתיב אוצריא אינו תקין (נדרש נתיב מלא לקובץ exe)");
             res["otzariaPath"] = op;
+            // נתיב חדש בלי נעיצה מפורשת: מנקים נעיצה ישנה (שייכת לקובץ אחר) — fail-closed
+            if (!q.ContainsKey("otzariaSha256")) res["otzariaSha256"] = "";
+        }
+        if (q.ContainsKey("otzariaSha256"))
+        {
+            string osha = (q["otzariaSha256"]?.ToString() ?? "").Trim().ToLowerInvariant();
+            if (osha.Length != 0 && !System.Text.RegularExpressions.Regex.IsMatch(osha, "^[0-9a-f]{64}$")) return Err("bad_request", "SHA-256 של אוצריא אינו תקין");
+            res["otzariaSha256"] = osha;
         }
         if (q["fxPolicy"] is JsonNode fn)
         {
@@ -1247,6 +1327,7 @@ public class HardLockService : ServiceBase
     [ThreadStatic] private static bool _clientAdmin;
     [ThreadStatic] private static int _clientPid;
     [ThreadStatic] private static int _clientSession;
+    [ThreadStatic] private static bool _clientOwnBridge;
 
     [DllImport("kernel32.dll")] private static extern bool GetNamedPipeClientProcessId(IntPtr pipe, out uint pid);
     [DllImport("kernel32.dll")] private static extern bool ProcessIdToSessionId(uint pid, out uint session);
@@ -1336,6 +1417,7 @@ public class HardLockService : ServiceBase
                 }
                 catch { }
                 _clientKey = ClientBuckets.Key(sidText, admin, ownBridge);
+                _clientOwnBridge = ownBridge;
                 _clientPid = 0; _clientSession = 0;
                 try
                 {
@@ -1384,6 +1466,34 @@ public class HardLockService : ServiceBase
                         ["stateCorrupt"] = _corrupt,
                         ["enforcementIssues"] = new JsonArray(_policyIssues.Select(kv => (JsonNode)(kv.Key + ": " + kv.Value)).ToArray()),
                     };
+
+                case "recovery-proof":
+                {
+                    // בדיקת הוכחת קוד שחזור מקובץ סימון החירום (בלי קוד גלוי). מוגבל בקצב כמו סיסמה; לא משנה מצב
+                    if (_corrupt) return Err("corrupt", "קובץ המצב פגום");
+                    if (!_limiter.CanTry(_clientKey, NowMs, out int rpWait)) return Err("too_many", $"יותר מדי ניסיונות שגויים. נסו שוב בעוד {rpWait} שניות");
+                    var proofs = (q["proofs"] as JsonArray)?.Take(4).Select(x => x?.ToString()).Where(x => x != null).ToArray();
+                    if (Secret.ProofMatches(proofs, _state["recoveryHash"]?.ToString())) { _limiter.Success(_clientKey); return Ok(); }
+                    _limiter.Fail(_clientKey, NowMs);
+                    return Err("wrong_password", "הוכחת קוד השחזור שגויה");
+                }
+
+                case "config-sign":
+                {
+                    // WHY (T1): חתימת ConfigSeal. הצינור פתוח לכל משתמש, ולכן רק גשר אמיתי (נתיב = ServiceExe) או מנהל מורם; ובנעילה נאכפת — רק גשר של השירות
+                    if (!Configured) return Err("bad_request", "רכיב ההקשחה עדיין לא הוגדר");
+                    bool pathOk = false;
+                    try { pathOk = _clientPid > 0 && BridgeProcs.SamePath(BridgeProcs.ImagePath(_clientPid), HardLock.ServiceExe); } catch { }
+                    if (!ConfigSealKey.ClientMaySign(_clientAdmin, pathOk, _clientOwnBridge, Enforced))
+                        return Err("forbidden", "חתימת הגדרות מותרת רק לגשר המותקן");
+                    byte[] cdata;
+                    try { cdata = Convert.FromBase64String(q["data"]?.ToString() ?? ""); }
+                    catch { return Err("bad_request", "data אינו Base64 תקין"); }
+                    if (cdata.Length > ConfigSealKey.MaxData) return Err("bad_request", "data ארוך מדי");
+                    try { _sealKey ??= ConfigSealKey.LoadOrCreate(Path.Combine(HardLock.DataDir, "config-seal.key"), HardLock.SvcLog); }
+                    catch (Exception ex) { HardLock.SvcLog("config-sign: " + ex.Message); return Err("internal", "מפתח החתימה אינו זמין"); }
+                    return new JsonObject { ["ok"] = true, ["mac"] = Convert.ToBase64String(ConfigSealKey.Mac(_sealKey, cdata)) };
+                }
 
                 case "setup":
                     if (Configured && !_corrupt) return Err("bad_request", "כבר הוגדר");
@@ -1621,6 +1731,7 @@ public class HardLockService : ServiceBase
             }
             EnforcePolicies(active);
             EnforceUsb(active && blockUsb);
+            EnforceOffice(active);
             // S1 ממצא 3: Safe Mode/WinRE/bcd נשארים מוקשחים כל עוד השירות Configured (לא רק כשהנעילה נאכפת); שחרור בהסרה מלאה בלבד
             BootHardening.Enforce(hardenBoot);
             // הגשר נבדק ב-WatchBridge (כל שנייה) ולא כאן (כל 5 שניות): חלון ההרמה מחדש קוצר
@@ -1767,6 +1878,28 @@ public class HardLockService : ServiceBase
         catch (Exception ex) { HardLock.SvcLog("policy repair " + sid + ": " + ex.Message); }
     }
 
+    /// <summary>מדיניות Office (VBAWarnings/AccessVBOM) כשהנעילה נאכפת; שחרור מחזיר את המקור. ר' OfficePolicy</summary>
+    private void EnforceOffice(bool active)
+    {
+        try
+        {
+            var issues = new List<string>();
+            lock (_gate)
+            {
+                var orig = _state["officeOriginal"] as JsonObject ?? new JsonObject();
+                if (OfficePolicy.Apply(new OfficePolicy.RegistryStore(), active, orig, issues))
+                {
+                    if (orig.Count > 0) _state["officeOriginal"] = orig; else _state.Remove("officeOriginal");
+                    Save();
+                    HardLock.SvcLog("service: מדיניות Office " + (active ? "הופעלה" : "שוחררה"));
+                }
+            }
+            foreach (string i in issues) _policyIssues["office:" + i] = i;
+            if (issues.Count == 0) foreach (var k in _policyIssues.Keys.Where(k => k.StartsWith("office:")).ToList()) _policyIssues.TryRemove(k, out _);
+        }
+        catch (Exception ex) { HardLock.SvcLog("office: " + ex.Message); }
+    }
+
     private void EnforceUsb(bool block)
     {
         try
@@ -1844,7 +1977,7 @@ public class HardLockService : ServiceBase
         foreach (int sid in active)
         {
             if (!_sessionSeen.ContainsKey(sid)) _sessionSeen[sid] = now;
-            if (running.Contains(sid)) { _launchStreak.Remove(sid); continue; }
+            if (running.Contains(sid)) { _launchStreak.Remove(sid); _immediateSessions.TryRemove(sid, out _); continue; }
 
             // תהליכים בשם הגשר מנתיב אחר בסשן הזה — מחזיקים את ה-mutex ומונעים מהאמיתי לעלות
             foreach (var imp in BridgeProcs.Impostors(procs, HardLock.ServiceExe).Where(p => p.Session == sid))
@@ -1855,7 +1988,9 @@ public class HardLockService : ServiceBase
 
             _launchStreak.TryGetValue(sid, out int streak);
             DateTime? last = _lastLaunch.TryGetValue(sid, out var l) ? l : null;
-            if (!RelaunchPolicy.ShouldLaunch(now, _sessionSeen[sid], last, streak)) continue;
+            bool immediate = _immediateSessions.ContainsKey(sid);
+            if (!RelaunchPolicy.ShouldLaunch(now, _sessionSeen[sid], last, streak, immediate)) continue;
+            _immediateSessions.TryRemove(sid, out _);
             _lastLaunch[sid] = now;
             _launchStreak[sid] = streak + 1;
             bool ok = Native.LaunchInSession(sid, "\"" + HardLock.ServiceExe + "\" --background --portable --from-service", out int newPid);
@@ -1933,6 +2068,7 @@ public class HardLockService : ServiceBase
             Thread.Sleep(500);
             EnforcePolicies(false);
             EnforceUsb(false);
+            EnforceOffice(false);
             BootHardening.Enforce(false); // BOOTHARDENING: אחרת SafeBoot/WinRE נשארים נעולים אחרי הסרה
             HardLock.SvcLog("service: הסרה");
             HardLock.UnregisterMachineRun();
@@ -2064,4 +2200,12 @@ internal static class Native
             ProcessDacl.FreeAttributes(paThr, sdThr);
         }
     }
+}
+
+/// <summary>אילו אירועי SERVICE_CONTROL_SESSIONCHANGE מפעילים הרמת גשר מיידית (כניסה, ביטול נעילת מסך, חיבור קונסול/מרוחק)</summary>
+internal static class SessionTrigger
+{
+    internal static bool IsLogonLike(System.ServiceProcess.SessionChangeReason r) =>
+        r is System.ServiceProcess.SessionChangeReason.SessionLogon or System.ServiceProcess.SessionChangeReason.SessionUnlock
+          or System.ServiceProcess.SessionChangeReason.ConsoleConnect or System.ServiceProcess.SessionChangeReason.RemoteConnect;
 }

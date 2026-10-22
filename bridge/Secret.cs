@@ -45,6 +45,33 @@ public static class Secret
         catch { return false; } // גיבוב/salt שמורים בפורמט פגום — נחשב "לא תואם", לא קריסה
     }
 
+    /// <summary>
+    /// "הוכחת" קוד שחזור לקובץ סימון החירום (emergency-release.req): במקום הקוד בטקסט, גיבוב PBKDF2 שלו עם ה-salt של קוד השחזור,
+    /// בשני הפורמטים (ישן וחדש) כי הגיבוב השמור יכול להיות בכל אחד מהם (השירות משדרג בכניסה מוצלחת). WHY (T1): קובץ בתיקיית המשתמש
+    /// לא מחזיק קוד גלוי; ואי אפשר לזייף הוכחה בלי הקוד. null = אין salt
+    /// </summary>
+    public static string[] RecoveryProofs(string normalizedCode, string saltB64)
+    {
+        if (string.IsNullOrEmpty(normalizedCode) || string.IsNullOrEmpty(saltB64)) return null;
+        try
+        {
+            byte[] salt = Convert.FromBase64String(saltB64);
+            return new[] { Hash(normalizedCode, salt), HashLegacy(normalizedCode, salt) };
+        }
+        catch { return null; }
+    }
+
+    /// <summary>האם אחת ההוכחות שווה לגיבוב השמור (השוואה בזמן קבוע). false כשחסר/ריק</summary>
+    public static bool ProofMatches(string[] proofs, string storedHash)
+    {
+        if (proofs == null || string.IsNullOrEmpty(storedHash)) return false;
+        bool any = false;
+        byte[] st = System.Text.Encoding.UTF8.GetBytes(storedHash);
+        foreach (var p in proofs)
+            if (!string.IsNullOrEmpty(p) && CryptographicOperations.FixedTimeEquals(System.Text.Encoding.UTF8.GetBytes(p), st)) any = true;
+        return any;
+    }
+
     /// <summary>מנרמל קוד שחזור שהוקלד: בלי מקפים/רווחים, אותיות גדולות (תואם לאלפבית ב-NewRecoveryCode)</summary>
     public static string NormalizeRecovery(string s) => (s ?? "").Replace("-", "").Replace(" ", "").ToUpperInvariant();
 

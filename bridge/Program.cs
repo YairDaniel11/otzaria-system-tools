@@ -80,7 +80,8 @@ public static class Program
             if (Has("--install") || (!Installer.IsRunningFromInstallDir() && !Has("--portable")))
             {
                 Installer.Install(showMessage: !Has("--quiet"));
-                return 0;
+                // WHY (T1): Install מסמן Environment.ExitCode=3 (שירות ישן שלא הוחלף); בלי החזרה כאן המתקין השקט ראה תמיד הצלחה
+                return Environment.ExitCode;
             }
 
             // לפני הכול: אם אין נעילה פעילה — שולחן העבודה חייב לעלות (בעיה #8)
@@ -181,6 +182,12 @@ public static class Config
     public static void Remove(string key)
     {
         lock (Gate) { Data.Remove(key); }
+    }
+
+    /// <summary>עותק עמוק של ההגדרות הנוכחיות (לחתימה/אימות ConfigSeal בלי לחשוף את האובייקט המשותף)</summary>
+    public static JsonObject Snapshot()
+    {
+        lock (Gate) { return (JsonObject)Data.DeepClone(); }
     }
 
     public static void Reload()

@@ -121,8 +121,16 @@ internal static class RelaunchPolicy
 
     internal static TimeSpan RetryAfter(int consecutiveLaunches) => consecutiveLaunches < FastAttempts ? FastRetry : SlowRetry;
 
-    internal static bool ShouldLaunch(DateTime now, DateTime sessionSeen, DateTime? lastLaunch, int consecutiveLaunches)
+    /// <summary>הפסקה מינימלית בין הפעלות כשהסשן סומן "מיידי" (אירוע כניסה/ביטול נעילת מסך)</summary>
+    internal static readonly TimeSpan ImmediateRetry = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// immediate: אירוע SERVICE_CONTROL_SESSIONCHANGE (SessionLogon/Unlock) — מדלגים על חסד הסשן, כדי שהגשר יעלה מיד אחרי Sign out/כניסה
+    /// ולא רק אחרי ההשהיה של Run/הטיימר. WHY (T1): בלי זה יש חלון של שניות עם שולחן עבודה לא נעול אחרי כניסה
+    /// </summary>
+    internal static bool ShouldLaunch(DateTime now, DateTime sessionSeen, DateTime? lastLaunch, int consecutiveLaunches, bool immediate = false)
     {
+        if (immediate) return lastLaunch == null || now - lastLaunch.Value >= ImmediateRetry;
         if (now - sessionSeen < SessionGrace) return false;
         return lastLaunch == null || now - lastLaunch.Value >= RetryAfter(consecutiveLaunches);
     }

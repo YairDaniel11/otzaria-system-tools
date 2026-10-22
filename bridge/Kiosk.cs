@@ -54,7 +54,40 @@ public static partial class Kiosk
         catch (Exception ex) { Config.Log("purge local password: " + ex.Message); }
     }
 
-    public static string[] AllowedExtensions => Config.GetList("kiosk.allowOpenExtensions");
+    // ---------- חתימת מפתחות האבטחה (ConfigSeal) ----------
+    // WHY (T1): config.json כתיב למשתמש. כשהשירות פעיל, מפתחות readOnly/openSections/allowOpenExtensions/allowExcelDocs/strict/blockTaskManager
+    // חייבים להיות חתומים (HMAC במפתח של השירות). חתימה חסרה/לא תואמת => ערכי ברירת מחדל מחמירים. בלי שירות/שירות ישן: תאימות לאחור (Intact=true).
+    private static bool _sealOk = true;
+    private static DateTime _sealAt = DateTime.MinValue;
+
+    /// <summary>האם מפתחות האבטחה ב-config.json תואמים את החתימה (מטמון 2 שניות; מתאפס אחרי חתימה)</summary>
+    internal static bool SecurityIntact()
+    {
+        if (DateTime.UtcNow - _sealAt < TimeSpan.FromSeconds(2)) return _sealOk;
+        bool ok;
+        try { ok = ConfigSeal.SecurityIntact(Config.Snapshot()); } catch { ok = false; }
+        _sealOk = ok; _sealAt = DateTime.UtcNow;
+        return ok;
+    }
+
+    /// <summary>חותם את מצב מפתחות האבטחה הנוכחי ושומר. נקרא אחרי כל שינוי לגיטימי של המפתחות. כשל חתימה: נשאר לא-חתום (fail-closed רק כשהשירות נאכף)</summary>
+    internal static void SealConfig()
+    {
+        try
+        {
+            var snap = Config.Snapshot();
+            ConfigSeal.Seal(snap);
+            if (snap[ConfigSeal.SealKey] is JsonNode m) { Config.Set(ConfigSeal.SealKey, m.DeepClone()); Config.Save(); }
+        }
+        catch (Exception ex) { Config.Log("config seal: " + ex.Message); }
+        _sealAt = DateTime.MinValue;
+    }
+
+    /// <summary>ערך מפתח אבטחה בוליאני: ההגדרה כשהחתימה תקינה, אחרת ברירת המחדל המחמירה</summary>
+    private static bool SecBool(string key, bool fallback, bool strictDefault) =>
+        SecurityIntact() ? Config.Get(key, fallback) : strictDefault;
+
+    public static string[] AllowedExtensions => SecurityIntact() ? Config.GetList("kiosk.allowOpenExtensions") : Array.Empty<string>();
 
     /// <summary>
     /// בסיס קבוע (תמיד מותר, לא ניתן להסרה דרך ההגדרות) לרשימת הסיומות ש-DialogGuard מתיר לבחור/לפתוח
@@ -74,14 +107,14 @@ public static partial class Kiosk
     }
 
     /// <summary>במצב readOnly (ברירת מחדל כבוי) שינוי קבצים חסום בזמן נעילה</summary>
-    public static bool ReadOnly => Config.Get("kiosk.readOnly", false);
+    public static bool ReadOnly => SecBool("kiosk.readOnly", false, true);
 
     /// <summary>
     /// מדיניות מסמכי Office בסייר הקבצים: ברירת מחדל - רק Word (docx/doc) ניתן לצפייה/פתיחה.
     /// גיליונות Excel (xlsx) מותרים רק כשהמנהל מפעיל כאן; מצגות PowerPoint (pptx) חסומות תמיד, בלי אפשרות הפעלה.
     /// האכיפה מתבצעת בתוסף סייר הקבצים עצמו (file-explorer/js/app.js), שקורא את הערך הזה מ-Status().
     /// </summary>
-    public static bool AllowExcelDocs => Config.Get("kiosk.allowExcelDocs", false);
+    public static bool AllowExcelDocs => SecBool("kiosk.allowExcelDocs", false, false);
 
     /// <summary>חוסם שינוי קבצים בזמן נעילה רק כאשר הופעל מצב readOnly</summary>
     public static void EnsureFileWriteAllowed()
@@ -97,6 +130,7 @@ public static partial class Kiosk
     private static readonly string[] DefaultOpenSections = { "audio", "display", "energy", "keyboard", "mouse", "printer" };
 
     public static string[] OpenSections =>
+        !SecurityIntact() ? Array.Empty<string>() :   // חתימה לא תקינה: שום הגדרה לא פתוחה
         Config.HasList("kiosk.openSections") ? Config.GetList("kiosk.openSections") : DefaultOpenSections;
 
     /// <summary>שער לכל נקודות הקצה של ההגדרות: בזמן נעילה הגדרה שלא נפתחה חסומה גם בגשר, לא רק מוסתרת בתוסף</summary>
@@ -169,8 +203,16 @@ public static partial class Kiosk
     // החישוב הקריפטוגרפי הטהור (Hash/Matches/נורמליזציה/קוד שחזור) משותף ל-Kiosk ול-HardLockService
     // דרך Secret.cs, כדי ששני המקומות לא יתפצלו בלי ששמים לב. כאן רק קריאה/כתיבה מ-Config.
 
-    private static bool Matches(string secret, string hashKey, string saltKey) =>
-        Secret.Matches(secret, Config.Get<string>(hashKey, null), Config.Get<string>(saltKey, null));
+    private static bool Matches(string secret, string hashKey, string saltKey)
+    {
+        string stored = Config.Get<string>(hashKey, null), salt = Config.Get<string>(saltKey, null);
+        if (!Secret.Matches(secret, stored, salt)) return false;
+        // WHY (T1): גיבוב ישן (200k) משודרג לפורמט הנוכחי בכניסה מוצלחת, כשהסוד הגלוי בידינו (אותו salt)
+        if (Secret.NeedsUpgrade(stored))
+            try { Config.Set(hashKey, Secret.Hash(secret, Convert.FromBase64String(salt))); Config.Save(); }
+            catch (Exception ex) { Config.Log("upgrade hash: " + ex.Message); }
+        return true;
+    }
 
     private static void StoreSecret(string secret, string hashKey, string saltKey)
     {
@@ -287,10 +329,10 @@ public static partial class Kiosk
     {
         active = IsActive,
         hasPassword = HasPassword,
-        strict = Config.Get("kiosk.strict", false),
+        strict = SecBool("kiosk.strict", false, true),
         autoStartBridge = Installer.HasAutoStart(),
         otzariaPath = OtzariaPath() ?? "",
-        blockTaskManager = Config.Get("kiosk.blockTaskManager", true),
+        blockTaskManager = SecBool("kiosk.blockTaskManager", true, true),
         allowOpenExtensions = AllowedExtensions,
         readOnly = ReadOnly,
         allowExcelDocs = AllowExcelDocs,
@@ -690,7 +732,8 @@ public static partial class Kiosk
     /// <summary>רכיב ההקשחה אומר "נעול" (למשל אחרי עריכת config.json או בחשבון Windows אחר) — נועלים גם כאן</summary>
     public static void ForceActivate(string servicePath)
     {
-        if (string.IsNullOrEmpty(OtzariaPath()) && !string.IsNullOrEmpty(servicePath) && File.Exists(servicePath))
+        // WHY (T1): kiosk.otzariaPath חלק מקבוצת החתימה; עם שירות הנתיב ממילא נקרא מהשירות, ושינוי בלי חתימה מחדש היה שובר את החתימה
+        if (!HardLock.Available && string.IsNullOrEmpty(OtzariaPath()) && !string.IsNullOrEmpty(servicePath) && File.Exists(servicePath))
             Config.Set("kiosk.otzariaPath", servicePath);
         string otz = OtzariaPath();
         if (string.IsNullOrEmpty(otz) || !File.Exists(otz))
@@ -758,7 +801,7 @@ public static partial class Kiosk
             throw BridgeException.BadRequest("לא נמצאה תוכנת אוצריא. יש להגדיר otzariaPath בהגדרות הנעילה");
         // WHY: אוצריא בתיקיה כתיבה למשתמש (למשל LocalAppData\Programs) ניתנת להחלפה בקובץ אחר, והנעילה היא שמפעילה אותה.
         // בנעילה קשיחה מסרבים, אלא אם המפעיל אישר במפורש (acceptWritableOtzaria) - ואז הנעיצה (SHA256) מגנה מפני החלפה
-        if ((strict || HardLock.Available || HardLock.ServiceInstalled()) && !AppTrust.IsTrustedLocation(otz) && (!b.Bool("acceptWritableOtzaria", false) || HardLock.Available || HardLock.ServiceInstalled()))   // [s2] עם שירות אין אישור-נעיצה מקומית (הנעיצה בקובץ כתיב למשתמש)
+        if ((strict || HardLock.Available || HardLock.ServiceInstalled()) && !AppTrust.IsTrustedLocation(otz) && (!b.Bool("acceptWritableOtzaria", false) || HardLock.ServiceInstalled() && !HardLock.Available))   // [t1] עם שירות פעיל: אישור + נעיצה בשירות (בסיסמה); שירות מותקן שלא עונה: סירוב
             throw new BridgeException("otzaria_untrusted_location", "אוצריא מותקנת בתיקיה שמשתמש רגיל יכול לשנות (" + otz + "), ולכן אפשר להחליף אותה בתוכנה אחרת. התקינו אותה ב-Program Files, או אשרו במפורש (acceptWritableOtzaria) - הנעילה תנעץ את הקובץ הנוכחי ותסרב להפעיל קובץ ששונה.", 403);
 
         // הפעלה ידנית בסיסמה בזמן פתיחה זמנית מסיימת אותה (ברכיב ההקשחה — "enable" מנקה אותה שם)
@@ -768,7 +811,14 @@ public static partial class Kiosk
         Config.Set("kiosk.active", true);
         Config.Set("kiosk.activatedBy", "manual"); // נעילה ידנית לא תבוטל אוטומטית בסוף חלון התזמון
         PinOtzaria(otz); // נעיצת SHA256 של אוצריא בהפעלה (מאומתת לפני כל הפעלה במיקום כתיב)
+        // [t1] עם שירות: הנעיצה נשמרת בשירות (בסיסמה), לא ב-config. כישלון = לא מפעילים נעילה שאוצריא בה לא תעלה
+        if (HardLock.Available && !AppTrust.IsTrustedLocation(otz))
+        {
+            string osha = Sha256Of(otz) ?? throw new BridgeException("internal", "לא ניתן לחשב SHA-256 של אוצריא", 500);
+            HardLock.SetOtzariaPath(b.Str("password"), otz, osha.ToLowerInvariant());
+        }
         Config.Save();
+        SealConfig(); // strict/blockTaskManager נחתמים (הסיסמה אומתה למעלה)
         try { Apply(); }
         catch
         {
@@ -904,7 +954,12 @@ public static partial class Kiosk
             string p = b.Str("otzariaPath", "");
             if (p.Length > 0 && !File.Exists(p)) throw BridgeException.NotFound("הקובץ לא נמצא: " + p);
             // כשרכיב ההקשחה מותקן הנתיב נשמר קודם אצלו (מקור האמת); כישלון שם עוצר גם את השמירה המקומית
-            if (HardLock.Available) HardLock.SetOtzariaPath(b.Str("password"), p);
+            if (HardLock.Available)
+            {
+                // [t1] נעיצת הקובץ הנוכחי בשירות (בסיסמה); מיקום מהימן לא צריך נעיצה
+                string psha = p.Length > 0 && !AppTrust.IsTrustedLocation(p) ? Sha256Of(p)?.ToLowerInvariant() : "";
+                HardLock.SetOtzariaPath(b.Str("password"), p, psha ?? "");
+            }
             Config.Set("kiosk.otzariaPath", p);
         }
         bool schedChanged = false;
@@ -927,6 +982,7 @@ public static partial class Kiosk
             schedChanged = true;
         }
         Config.Save();
+        SealConfig(); // WHY (T1): שמירת הגדרות לגיטימית (אחרי אימות סיסמה) => חתימה מחדש של מפתחות האבטחה
         if (IsActive) { Apply(); Overlay.ShowSideBar(); }
         if (schedChanged)
         {
@@ -1005,7 +1061,17 @@ public static partial class Kiosk
     /// [s2] נקודת חיבור לשירות: SHA-256 של אוצריא שהשירות מחזיק (מקור אמת, לא כתיב למשתמש). כרגע אין API בשירות שמחזיר/שומר אותו,
     /// ולכן null = עם שירות, אוצריא במיקום כתיב לא תופעל. חיבור (הצעה): HardLock.Policy.OtzariaSha256 + שמירה ב-SetOtzariaPath בסיסמה.
     /// </summary>
-    internal static Func<string, string> ServiceOtzariaSha = _ => null;
+    internal static Func<string, string> ServiceOtzariaSha = path => ServicePinned(HardLock.Policy, path);
+
+    /// <summary>
+    /// הנעיצה שהשירות מחזיק, רק אם היא שייכת לאותו נתיב (נתיב אחר = נעיצה של קובץ אחר = אין נעיצה). ריק/חסר = null.
+    /// WHY (T1): נעיצה נשמרת בשירות בסיסמה (SetOtzariaPath); בלי TOFU בצד הגשר
+    /// </summary>
+    internal static string ServicePinned(HardLock.PolicySnapshot pol, string path)
+    {
+        if (pol == null || string.IsNullOrEmpty(pol.OtzariaSha256) || !SamePath(pol.OtzariaPath, path)) return null;
+        return pol.OtzariaSha256;
+    }
 
     private static void PinOtzaria(string path)
     {
@@ -1155,7 +1221,7 @@ public static partial class Kiosk
             try
             {
                 using var k = Registry.CurrentUser.CreateSubKey(PoliciesKey);
-                if (Config.Get("kiosk.blockTaskManager", true)) { k.SetValue("DisableTaskMgr", 1, RegistryValueKind.DWord); _taskMgrByPolicy = true; }
+                if (SecBool("kiosk.blockTaskManager", true, true)) { k.SetValue("DisableTaskMgr", 1, RegistryValueKind.DWord); _taskMgrByPolicy = true; }
                 else k.DeleteValue("DisableTaskMgr", false);
             }
             catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
@@ -1167,14 +1233,14 @@ public static partial class Kiosk
             {
                 using var k = Registry.CurrentUser.CreateSubKey(WinlogonKey);
                 // נעילה קפדנית: המעטפת היא הגשר, שמפעיל את אוצריא. ללא strict המעטפת לא משתנה
-                if (Config.Get("kiosk.strict", false))
+                if (SecBool("kiosk.strict", false, true))
                     k.SetValue("Shell", "\"" + Installer.InstalledExe + "\" --background", RegistryValueKind.String);
                 else k.DeleteValue("Shell", false);
             }
             catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
             {
                 Config.Log("kiosk: Winlogon לא נגיש: " + ex.Message);
-                if (Config.Get("kiosk.strict", false))
+                if (SecBool("kiosk.strict", false, true))
                     throw BridgeException.Forbidden("נעילה קפדנית דורשת הרשאה לשנות את מעטפת Windows, ואין הרשאה כזו במחשב הזה. אפשר להפעיל נעילה רגילה.");
             }
 
@@ -1200,6 +1266,9 @@ public static partial class Kiosk
             if (!keepStrict) Config.Set("kiosk.strict", false);
             // כשל בשמירה (נעילת קובץ של אנטי-וירוס, דיסק מלא) לא יעצור את שאר השחרור - אחרת נשאר מצב חצי-משוחרר
             try { Config.Save(); } catch (Exception ex) { Config.Log("release save: " + ex.Message); }
+            // WHY (T1): kiosk.strict שונה, והוא חלק מקבוצת החתימה; בלי חתימה מחדש הקבוצה נחשבת פגומה (ברירות מחדל מחמירות).
+            // ברקע: קריאת pipe לא תעכב/תתקע שחרור (מסלול חירום)
+            if (!keepStrict) Task.Run(SealConfig);
             _watchdog?.Dispose();
             _watchdog = null;
             StopFastGuard();
@@ -1294,10 +1363,15 @@ public static partial class Kiosk
         if (others.Count > 0)
         {
             string marker = EmergencyMarkerPath;
-            try { Directory.CreateDirectory(Config.Dir); File.WriteAllText(marker, code ?? ""); } catch (Exception ex) { Config.Log("emergency marker: " + ex.Message); }
-            var end = DateTime.UtcNow.AddSeconds(8);
-            while (DateTime.UtcNow < end && File.Exists(marker)) Thread.Sleep(200);
-            try { File.Delete(marker); } catch { } // לא משאירים קוד בקובץ
+            // WHY (T1): הקובץ בתיקיית המשתמש; לא כותבים בו את הקוד אלא הוכחה (גיבוב עם salt קוד השחזור). בלי salt: בלי סימון, נשאר Kill כגיבוי
+            string[] proofs = Secret.RecoveryProofs(Secret.NormalizeRecovery(code), Config.Get<string>("kiosk.recoverySalt", null));
+            if (proofs != null)
+            {
+                try { Directory.CreateDirectory(Config.Dir); File.WriteAllText(marker, MarkerPrefix + string.Join("\n", proofs)); } catch (Exception ex) { Config.Log("emergency marker: " + ex.Message); }
+                var end = DateTime.UtcNow.AddSeconds(8);
+                while (DateTime.UtcNow < end && File.Exists(marker)) Thread.Sleep(200);
+                try { File.Delete(marker); } catch { }
+            }
             foreach (var p in others)
             {
                 try { if (!p.WaitForExit(3000)) { p.Kill(); p.WaitForExit(3000); } } catch { }
@@ -1320,11 +1394,12 @@ public static partial class Kiosk
         {
             string f = EmergencyMarkerPath;
             if (!File.Exists(f)) return;
-            string code;
-            try { code = File.ReadAllText(f).Trim(); File.Delete(f); } catch { return; } // לא נמחק = לא מעבדים (בלי לולאה)
+            string text;
+            try { text = File.ReadAllText(f).Trim(); File.Delete(f); } catch { return; } // לא נמחק = לא מעבדים (בלי לולאה)
             if (DateTime.UtcNow < _markerBlockedUntil) return;
-            if (code.Length == 0 || code.Length > 64) return;
-            if (EmergencyRelease(code))
+            string[] proofs = ParseMarker(text);
+            if (proofs == null) return; // קוד גלוי בקובץ כבר לא מתקבל (הכותב החדש כותב הוכחה בלבד)
+            if (EmergencyReleaseProof(proofs))
             {
                 Config.Log("kiosk: שחרור חירום מ---unlock (קובץ סימון מאומת) - הגשר יוצא");
                 Tray.ExitNow();
@@ -1332,6 +1407,43 @@ public static partial class Kiosk
             else if (++_markerFails >= 5) { _markerFails = 0; _markerBlockedUntil = DateTime.UtcNow.AddSeconds(60); }
         }
         catch (Exception ex) { Config.Log("emergency marker poll: " + ex.Message); }
+    }
+
+    internal const string MarkerPrefix = "proof-v1\n";
+
+    /// <summary>מפרק את תוכן קובץ הסימון להוכחות; null אם הפורמט לא תקין (כולל קוד גלוי ישן)</summary>
+    internal static string[] ParseMarker(string text)
+    {
+        const string head = "proof-v1";
+        if (text == null || !text.StartsWith(head, StringComparison.Ordinal)) return null;
+        var lines = text.Substring(head.Length).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Length is 0 or > 4 || lines.Any(l => l.Length > 100)) return null;
+        return lines;
+    }
+
+    /// <summary>כמו VerifyEmergencyCode אבל לפי הוכחה: מול השירות כשהוא מותקן ועונה; מקומית רק בלי שירות או כשהוא מופסק בפועל</summary>
+    internal static bool VerifyEmergencyProof(string[] proofs)
+    {
+        bool LocalOk() => Secret.ProofMatches(proofs, Config.Get<string>("kiosk.recoveryHash", null));
+        if (!HardLock.ServiceInstalled()) return LocalOk();
+        for (int i = 0; ; i++)
+        {
+            bool? r = null;
+            try { r = HardLock.RecoveryProofCheck(proofs); } catch (Exception ex) { Config.Log("emergency proof: " + ex.Message); }
+            if (r == true) return true;
+            if (ServiceStopped()) return LocalOk();
+            if (r == false || i >= 2) return false; // השירות ענה והוכחה שגויה / לא עונה: נשארים נעולים
+            Thread.Sleep(1000);
+        }
+    }
+
+    private static bool EmergencyReleaseProof(string[] proofs)
+    {
+        if (!VerifyEmergencyProof(proofs)) return false;
+        EndTempUnlockLocal("ביטול חירום בקוד שחזור", relock: false);
+        Release();
+        Config.Log("kiosk: הנעילה בוטלה בקובץ סימון חירום (הוכחת קוד שחזור)");
+        return true;
     }
 
     /// <summary>
@@ -1537,7 +1649,7 @@ public static partial class Kiosk
             }
 
             // אם המדיניות לא נכתבה (אין הרשאה) — סוגרים את מנהל המשימות כשהוא נפתח (מה שאפשר בלי הרשאות מנהל)
-            if (!_taskMgrByPolicy && Config.Get("kiosk.blockTaskManager", true))
+            if (!_taskMgrByPolicy && SecBool("kiosk.blockTaskManager", true, true))
                 foreach (var p in Process.GetProcessesByName("Taskmgr"))
                 {
                     try { if (p.SessionId == session) p.Kill(); } catch { }
