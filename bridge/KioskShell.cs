@@ -14,7 +14,7 @@ namespace OtzariaBridge;
 internal static class KioskKeys
 {
     internal const uint VkTab = 0x09, VkEsc = 0x1B, VkSpace = 0x20, VkF1 = 0x70, VkF4 = 0x73, VkF10 = 0x79,
-        VkApps = 0x5D, VkO = 0x4F, VkP = 0x50, VkLWin = 0x5B, VkRWin = 0x5C;
+        VkF8 = 0x77, VkF11 = 0x7A, VkApps = 0x5D, VkO = 0x4F, VkP = 0x50, VkLWin = 0x5B, VkRWin = 0x5C;
 
     // FgDialogUnsafe [r1]: בדיאלוג הקבצים בחזית, תיבת השם מכילה כרגע ערך אסור (DialogGuard) - Enter לא עובר (אחרת הדיאלוג נסגר/מנווט לפני הסריקה)
     internal readonly record struct Ctx(bool Alt, bool Ctrl, bool Shift, bool Win,
@@ -43,6 +43,8 @@ internal static class KioskKeys
         if (vk == VkReturn && c.FgFileDialog && c.FgDialogUnsafe) return true; // Enter על ערך אסור בדיאלוג קבצים
         if (c.Win) return true;                                      // Win+כל מקש
         if (c.Alt && vk is VkTab or VkEsc or VkSpace) return true;   // Alt+Tab / Alt+Shift+Tab / Alt+Esc / Alt+Space
+        // [s2] WHY: Alt+F11 (עורך VBA) / Alt+F8 (רשימת מאקרו) ב-Word/Excel = הרצת קוד חופשי שעוקפת כל רשימה. נחסמים תמיד (גם Alt+Shift+F11 - עורך סקריפטים)
+        if (c.Alt && vk is VkF11 or VkF8) return true;
         if (c.Alt && vk == VkF4) return !c.FgAllowed;                // Alt+F4 מותר רק בתוכנה מותרת (כדי לסגור אותה)
         if (c.Ctrl && vk == VkEsc) return true;                      // Ctrl+Esc ו-Ctrl+Shift+Esc (מנהל משימות)
         bool legit = c.FgOtzaria || c.FgAllowed;
@@ -79,6 +81,12 @@ internal static class ShellPolicy
         ["diskmgmt"] = ShellAction.Kill, ["lusrmgr"] = ShellAction.Kill, ["secpol"] = ShellAction.Kill, ["gpedit"] = ShellAction.Kill,
         ["cleanmgr"] = ShellAction.Kill, ["psr"] = ShellAction.Kill, ["mdsched"] = ShellAction.Kill, ["msra"] = ShellAction.Kill,
         ["quickassist"] = ShellAction.Kill, ["odbcad32"] = ShellAction.Kill, ["dfrgui"] = ShellAction.Kill,
+        // [s2] צאצאי VBA/LOLBins (ר' Programs.Blocked) + PickerHost: כל חלון שלו (לא רק #32770) נסגר, בלי תלות במחלקה
+        ["hh"] = ShellAction.Kill, ["msdt"] = ShellAction.Kill, ["cmstp"] = ShellAction.Kill, ["odbcconf"] = ShellAction.Kill,
+        ["wordpad"] = ShellAction.Kill, ["write"] = ShellAction.Kill, ["charmap"] = ShellAction.Kill, ["regsvr32"] = ShellAction.Kill,
+        ["installutil"] = ShellAction.Kill, ["msbuild"] = ShellAction.Kill, ["regasm"] = ShellAction.Kill, ["regsvcs"] = ShellAction.Kill,
+        ["mavinject"] = ShellAction.Kill, ["presentationhost"] = ShellAction.Kill, ["ieexec"] = ShellAction.Kill,
+        ["notepad"] = ShellAction.Kill, ["mspaint"] = ShellAction.Kill, ["PickerHost"] = ShellAction.Kill,
     };
 
     /// <summary>[r1] שמות שמסומנים עוינים (לשימוש הקורא שרוצה לבדוק לפני כל "אמון" אחר)</summary>
@@ -97,7 +105,7 @@ internal static class ShellPolicy
 
     // נטפלים בהם במקום אחר (Watch / KioskGuard): לא נוגעים כאן — אבל רק אם הנתיב+חתימה אמיתיים (אחרת התחזות)
     private static readonly HashSet<string> HandledElsewhere = new(StringComparer.OrdinalIgnoreCase)
-        { "explorer", "PickerHost", "StartMenuExperienceHost", "SearchHost" };
+        { "explorer", "StartMenuExperienceHost", "SearchHost" };   // [s2] PickerHost הוצא: נסגר/נהרג בכל מחלקה (Hostile)
 
     // [r1] explorer אינו עוד "Keep" גורף: רק חלונות המעטפת עצמם (שולחן עבודה/שורת משימות). כל השאר (Run #32770, CabinetWClass...) נסגרים
     private static readonly HashSet<string> ExplorerShellClasses = new(StringComparer.Ordinal)
@@ -116,6 +124,9 @@ internal static class ShellPolicy
                "Windows.UI.Composition.DesktopWindowContentBridge" or "Windows.UI.Input.InputSite.WindowClass");
 
     // [r1] תהליכים שה-Close שלהם אינו מסלים ל-Kill: ApplicationFrameHost מארח גם אפליקציות UWP מותרות; explorer נטפל ב-Watch
+    /// <summary>[s2] WHY: פטור מהריגה לפי שם בלבד אפשר לזייף (explorer.exe בתיקיה כתיבה = בלתי ניתן להריגה). הפטור רק כשהנתיב+חתימה אמיתיים</summary>
+    internal static bool NeverKill(string name, bool trustedSystem) => trustedSystem && NeverKill(name);
+
     internal static bool NeverKill(string name)
     {
         string n = Stem(name);
@@ -126,7 +137,8 @@ internal static class ShellPolicy
     internal static bool NeedsTrust(string name)
     {
         string n = Stem(name);
-        return HandledElsewhere.Contains(n) || Critical.Contains(n) || n.Equals("ShellExperienceHost", StringComparison.OrdinalIgnoreCase);
+        return HandledElsewhere.Contains(n) || Critical.Contains(n) || n.Equals("ShellExperienceHost", StringComparison.OrdinalIgnoreCase) ||
+               n.Equals("ApplicationFrameHost", StringComparison.OrdinalIgnoreCase);   // [s2] נדרש לחישוב NeverKill לפי אמון
     }
 
     /// <summary>
@@ -391,7 +403,7 @@ public static partial class Kiosk
         Thread t;
         lock (HookGate) { t = _shellThread; _shellThread = null; _shellStop = true; }
         try { t?.Join(2000); } catch { }
-        _pidCache.Clear(); _closeSeen.Clear();
+        _pidCache.Clear(); _closeSeen.Clear(); _procSeen.Clear(); _procBaselineDone = false;
     }
 
     private static void ShellGuardMain()
@@ -410,7 +422,7 @@ public static partial class Kiosk
                 if (h != IntPtr.Zero) hooks.Add(h);
             }
             if (hooks.Count == 0) Config.Log("shell guard: SetWinEventHook נכשל, נשארת סריקה תקופתית בלבד");
-            long lastSweep = 0;
+            long lastSweep = 0, lastProc = 0;
             while (!_shellStop)
             {
                 MsgWaitForMultipleObjectsEx(0, null, 100, 0x04FF /* QS_ALLINPUT */, 0x4 /* MWMO_INPUTAVAILABLE */);
@@ -421,6 +433,11 @@ public static partial class Kiosk
                 {
                     lastSweep = now;
                     try { if (IsActive) SweepWindows(); } catch (Exception ex) { LogThrottled("sweep", "shell sweep: " + ex.Message, 30); }
+                }
+                if (now - lastProc >= 1000)
+                {
+                    lastProc = now;
+                    try { if (IsActive) SweepProcesses(); } catch (Exception ex) { LogThrottled("procsweep", "process sweep: " + ex.Message, 30); }
                 }
             }
         }
@@ -489,7 +506,7 @@ public static partial class Kiosk
         int session = Process.GetCurrentProcess().SessionId;
         UpdateForegroundAllowedCacheIfChanged();
         bool snip = _snipSeen != DateTime.MinValue && (DateTime.UtcNow - _snipSeen).TotalSeconds < 120;
-        var victims = new Dictionary<uint, (string name, ShellAction act, List<IntPtr> wins)>();
+        var victims = new Dictionary<uint, (string name, ShellAction act, List<IntPtr> wins, bool trusted)>();
         var cb = new StringBuilder(128);
         EnumWindows((h, _) =>
         {
@@ -510,7 +527,7 @@ public static partial class Kiosk
                 uint core = HostedCorePid(h, pid);
                 if (core != 0 && Programs.IsAllowedPackageProcess(core)) return true;
             }
-            if (!victims.TryGetValue(pid, out var v)) victims[pid] = v = (info.Name, act, new List<IntPtr>());
+            if (!victims.TryGetValue(pid, out var v)) victims[pid] = v = (info.Name, act, new List<IntPtr>(), info.Trusted);
             if (act == ShellAction.Kill) v.act = ShellAction.Kill;
             v.wins.Add(h);
             victims[pid] = v;
@@ -518,14 +535,14 @@ public static partial class Kiosk
         }, IntPtr.Zero);
 
         long now = Environment.TickCount64;
-        foreach (var (pid, (name, act, wins)) in victims)
+        foreach (var (pid, (name, act, wins, trustedSys)) in victims)
         {
             bool kill = act == ShellAction.Kill;
             if (!kill)
             {
                 // Close: קודם סגירה מנומסת; אם החלון עדיין שם אחרי >=600ms — Kill.
                 // [r1] חריג: ApplicationFrameHost/explorer — רק סגירה (WM_CLOSE בכל סריקה), בלי הסלמה: הריגתם סוגרת גם UWP מותרים/את המעטפת
-                if (!ShellPolicy.NeverKill(name) && _closeSeen.TryGetValue(pid, out long first) && now - first >= 600) kill = true;
+                if (!ShellPolicy.NeverKill(name, trustedSys) && _closeSeen.TryGetValue(pid, out long first) && now - first >= 600) kill = true;
                 else
                 {
                     _closeSeen.TryAdd(pid, now);
@@ -543,6 +560,112 @@ public static partial class Kiosk
         }
         // ניקוי רשומות סגירה של תהליכים שנעלמו
         foreach (var k in _closeSeen.Keys) if (!victims.ContainsKey(k)) _closeSeen.TryRemove(k, out _);
+    }
+
+    // ---------- [s2] סריקת תהליכים (לא רק חלונות) ----------
+    // WHY: SweepWindows רואה רק חלונות גלויים בגודל>0; תהליך בלי חלון / חלון מוסתר / cloaked / בגודל 0 לא נראה, ו-Watch הורג רק explorer/Taskmgr.
+    // כאן: תהליך *חדש* בסשן (שלא היה קיים כשהשומר עלה) שהוא בשם/זהות חסומה, או שהקובץ שלו לא במיקום מנהל-בלבד ואינו תוכנה מותרת - נהרג, גם בלי חלון.
+    // false-positive: תוכנות רקע של המשתמש שעולות אחרי הנעילה מ-AppData (OneDrive/Teams/עדכונים) נהרגות; מה שרץ לפני הנעילה לא נוגעים בו (baseline)
+
+    [DllImport("ntdll.dll")] private static extern int NtQueryInformationProcess(IntPtr h, int cls, ref PROCESS_BASIC_INFORMATION pbi, int len, out int ret);
+    [StructLayout(LayoutKind.Sequential)] private struct PROCESS_BASIC_INFORMATION { public IntPtr Exit, PebBase, Affinity, BasePriority, Pid, ParentPid; }
+
+    /// <summary>PID האב לפי ntdll (0 אם לא ידוע). האב עלול להיות PID ממוחזר; הקורא משווה זמני יצירה</summary>
+    internal static uint ParentPidOf(uint pid)
+    {
+        IntPtr h = OpenProcess(0x1000, false, pid);
+        if (h == IntPtr.Zero) return 0;
+        try
+        {
+            var pbi = new PROCESS_BASIC_INFORMATION();
+            return NtQueryInformationProcess(h, 0, ref pbi, Marshal.SizeOf<PROCESS_BASIC_INFORMATION>(), out _) == 0 ? (uint)(long)pbi.ParentPid : 0;
+        }
+        catch { return 0; }
+        finally { CloseHandle(h); }
+    }
+
+    internal static string ImagePathOf(uint pid) => ImagePath(pid);
+
+    /// <summary>
+    /// החלטה טהורה: האם להרוג תהליך חדש בסשן. צאצאי הגשר/אוצריא/baseline פטורים; זהות חסומה נהרגת גם במיקום מהימן
+    /// (wordpad/hh ב-Windows); אחרת רק אם המיקום לא מנהל-בלבד ואין התאמה לרשימה.
+    /// </summary>
+    internal static bool ShouldKillProcess(bool selfTree, bool otzaria, bool grandfathered, bool blockedIdentity, bool locationTrusted, bool allowedByList)
+    {
+        if (selfTree || otzaria || grandfathered) return false;
+        if (blockedIdentity) return true;
+        if (allowedByList) return false;
+        return !locationTrusted;
+    }
+
+    /// <summary>שמות שלעולם לא נהרגים בסריקת תהליכים (נטפלים במקום אחר / מארחים משותפים)</summary>
+    private static readonly HashSet<string> ProcSweepExempt = new(StringComparer.OrdinalIgnoreCase)
+        { "explorer", "msiexec", "ApplicationFrameHost", "conhost", "openconsole" };
+
+    private static readonly ConcurrentDictionary<(int pid, long start), bool> _procSeen = new();
+    private static bool _procBaselineDone;
+
+    private static bool IsSelfDescendant(uint pid, long startTicks)
+    {
+        uint cur = pid; long curStart = startTicks;
+        for (int i = 0; i < 8 && cur > 4; i++)
+        {
+            uint par = ParentPidOf(cur);
+            if (par <= 4) return false;
+            if (par == (uint)Environment.ProcessId) return true;
+            try
+            {
+                using var pp = Process.GetProcessById((int)par);
+                long ps = pp.StartTime.ToUniversalTime().Ticks;
+                if (ps > curStart) return false;   // PID ממוחזר: האב "צעיר" מהבן
+                cur = par; curStart = ps;
+            }
+            catch { return false; }
+        }
+        return false;
+    }
+
+    private static void SweepProcesses()
+    {
+        int session = Process.GetCurrentProcess().SessionId;
+        string otz = null;
+        try { otz = OtzariaPath(); } catch { }
+        var alive = new HashSet<(int, long)>();
+        bool baseline = !_procBaselineDone;
+        foreach (var p in Process.GetProcesses())
+        {
+            using (p)
+            {
+                try
+                {
+                    if (p.SessionId != session || p.Id == Environment.ProcessId || p.Id <= 4) continue;
+                    long start = p.StartTime.ToUniversalTime().Ticks;
+                    var key = (p.Id, start);
+                    alive.Add(key);
+                    if (baseline) { _procSeen[key] = true; continue; }   // כל מה שרץ כשהשומר עלה: לא נוגעים
+                    if (_procSeen.ContainsKey(key)) continue;
+                    string path = ImagePath((uint)p.Id);
+                    if (string.IsNullOrEmpty(path)) continue;            // מוגבה/מוגן: לא נשמר, ינוסה שוב (הצעה בדוח: ניטור בשירות)
+                    string name = p.ProcessName;
+                    if (ProcSweepExempt.Contains(name)) { _procSeen[key] = true; continue; }
+                    bool selfTree = IsSelfDescendant((uint)p.Id, start);
+                    bool isOtz = !string.IsNullOrEmpty(otz) && SamePath(path, otz);
+                    bool blocked = Programs.IsBlockedProc(p);
+                    bool locTrusted = AppTrust.IsAdminOnlyLocation(path) || AppTrust.IsMicrosoftPackage(path, AppTrust.Env);
+                    bool byList = !blocked && !locTrusted && !selfTree && !isOtz && Programs.IsAllowedForeground((uint)p.Id);
+                    if (ShouldKillProcess(selfTree, isOtz, false, blocked, locTrusted, byList))
+                    {
+                        bool ok = AppTrust.KillLogged(p, "procsweep");
+                        LogThrottled("procsweep:" + name, "process sweep: " + name + (ok ? " נהרג" : " לא ניתן להרוג") + " (תהליך לא מהימן/חסום בלי חלון): " + path, 30);
+                        if (ok) _procSeen[key] = false;
+                    }
+                    else _procSeen[key] = true;
+                }
+                catch { /* תהליך נסגר באמצע */ }
+            }
+        }
+        _procBaselineDone = true;
+        foreach (var k in _procSeen.Keys) if (!alive.Contains(k)) _procSeen.TryRemove(k, out _);
     }
 
     private static readonly object NoteGate = new();
