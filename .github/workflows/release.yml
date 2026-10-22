@@ -1,0 +1,112 @@
+name: שחרור וחתימה (ידני, מ-main בלבד)
+
+# WHY: בעבר ה-Release הופעל מתגית v*, ו-workflow שמופעל מתגית נלקח מה-commit של התגית: מי שיכול לדחוף תגית שולט
+# בקובץ ה-workflow (כולל בדיקת "ה-commit ב-main" ושלב החתימה) ויכול לחתום/לפרסם קוד שלא עבר ביקורת.
+# עכשיו: רק workflow_dispatch, ורק כשהוא רץ מהענף main (הקובץ הזה עצמו נלקח מ-main). תגית היא קלט (טקסט),
+# לא טריגר. הג'וב verify מוודא שהתגית קיימת ושה-commit שלה בהיסטוריית main, והבנייה/החתימה פועלות על אותו SHA מאומת.
+# סוד UPDATE_SIGNING_KEY קיים רק ב-Environment בשם release (מוגבל ל-main + Required reviewers, ר' docs\RELEASE.md).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "תגית לשחרור (vX.Y.Z). חייבת להיות קיימת ו-commit שלה בהיסטוריית main"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # חגורה ובורג: גם בלי הגבלת ה-Environment, לא רצים מענף אחר
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.chk.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: אימות תגית ושושלת
+        id: chk
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,6}$ ]] || { echo "שם תגית לא תקין: רק vX.Y.Z"; exit 1; }
+          git fetch --force --tags origin
+          sha=$(git rev-parse --verify "refs/tags/${TAG}^{commit}") || { echo "התגית $TAG לא קיימת"; exit 1; }
+          git merge-base --is-ancestor "$sha" origin/main || { echo "ה-commit $sha של $TAG אינו בהיסטוריית main - לא משחררים"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  # בנייה ובדיקות על ה-SHA המאומת, בלי גישה לסודות (build.yml אינו מקבל secrets)
+  build:
+    needs: verify
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.verify.outputs.sha }}
+      tag: ${{ inputs.tag }}
+
+  release:
+    needs: [verify, build]
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      # סקריפט החתימה נלקח מ-main (הענף שממנו רץ ה-workflow), לא מתגית
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+
+      # בדיקה חוזרת (התגית יכולה לזוז בין הג'ובים): ה-SHA חייב להישאר זהה ובתוך main
+      - name: אימות חוזר
+        shell: pwsh
+        env:
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ needs.verify.outputs.sha }}
+        run: |
+          git fetch --force --tags origin
+          $now = (git rev-parse --verify "refs/tags/$($env:TAG)^{commit}").Trim()
+          if ($now -ne $env:SHA) { throw "התגית זזה מאז האימות ($now != $($env:SHA))" }
+          git merge-base --is-ancestor $env:SHA origin/main
+          if ($LASTEXITCODE -ne 0) { throw "ה-commit אינו בהיסטוריית main" }
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: OtzariaBridge-Setup
+          path: dist
+
+      # fail-closed: בלי סוד לא משחררים. שחרור בלי חתימה נדחה ממילא על ידי הגשר.
+      - name: חתימת SHA256SUMS.txt
+        shell: pwsh
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:UPDATE_SIGNING_KEY)) { throw "הסוד UPDATE_SIGNING_KEY לא מוגדר - לא משחררים בלי חתימה" }
+          ./tools/Sign-Sums.ps1 -Sums dist/SHA256SUMS.txt
+          Get-ChildItem dist -Recurse -File | ForEach-Object { $_.FullName }
+
+      - name: Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          target_commitish: ${{ needs.verify.outputs.sha }}
+          name: OtzariaBridge ${{ inputs.tag }}
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/installer/Output/*.exe
+            dist/out/OtzariaBridge.exe
+            dist/bridge/plugins/*.otzplugin
+            dist/SHA256SUMS.txt
+            dist/SHA256SUMS.txt.sig
+            dist/BRIDGE_VERSION.txt

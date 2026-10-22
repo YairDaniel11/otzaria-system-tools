@@ -34,6 +34,25 @@ public static class Installer
         catch { return false; }
     }
 
+    /// <summary>
+    /// האם ה-exe שעולה בפועל הוא עותק השירות ב-Program Files (שרק מנהל כותב). WHY (S4): במצב הזה --install מעדכן רק
+    /// את LOCALAPPDATA, ולכן עדכון עצמי של הגשר לא מחליף את מה שרץ.
+    /// </summary>
+    internal static bool ServiceOwnsRunningExe() =>
+        HardLock.ServiceInstalled() && File.Exists(HardLock.ServiceExe) && MachineRunPointsToService();
+
+    /// <summary>האם גרסת הקובץ של ServiceExe נמוכה מגרסת התהליך הנוכחי (כלומר "הותקן" לא החליף את מה שיעלה)</summary>
+    internal static bool ServiceExeOlderThanSelf()
+    {
+        try
+        {
+            var svc = UpdateApi.Parse(FileVersionInfo.GetVersionInfo(HardLock.ServiceExe).FileVersion);
+            var self = UpdateApi.Parse(Program.Version);
+            return svc != null && self != null && svc < self;
+        }
+        catch { return false; }
+    }
+
     public static bool HasAutoStart()
     {
         using var k = Registry.CurrentUser.OpenSubKey(RunKey);
@@ -71,6 +90,17 @@ public static class Installer
         int plugins = DeployPlugins();
         bool canInstall = plugins > 0 && OtzariaProtocolRegistered();
 
+        // WHY (S4): כשהשירות מותקן ההפעלה היא מ-Program Files (ישן). בלי זה "עדכון הצליח" בלי להחליף: מדווחים כשל ברור
+        // (קוד יציאה 3 + הודעה), ולא מעתיקים לשם מהנתיב הזה (העתקה מוגברת מחייבת אימות hash דרך התקנת רכיב ההקשחה).
+        // נקודת חיבור מוצעת לנתיב עדכון אמיתי: op "update-service" ב-pipe של השירות שמקבל נתיב+SHA-256 ומריץ InstallTrust.CopyVerified.
+        bool staleService = machineRun && ServiceExeOlderThanSelf();
+        if (staleService)
+        {
+            Config.Log("install: עותק השירות ב-Program Files ישן מהגרסה המותקנת; לא עודכן. נדרשת התקנת רכיב ההקשחה מחדש כמנהל.");
+            // (Program.cs מחזיר 0 אחרי Install: מוצע שם `return Environment.ExitCode;` כדי שהמתקין השקט יראה כשל)
+            Environment.ExitCode = 3;
+        }
+
         if (machineRun) Process.Start(new ProcessStartInfo(HardLock.ServiceExe, "--background --portable") { UseShellExecute = false, WorkingDirectory = HardLock.ProgDir });
         else Process.Start(new ProcessStartInfo(InstalledExe, "--background") { UseShellExecute = false, WorkingDirectory = Config.Dir });
 
@@ -78,6 +108,9 @@ public static class Installer
         {
             string msg = Lang.T(Program.AppFullName + " הותקן ויעלה אוטומטית עם כניסה ל-Windows.",
                 Program.AppFullNameEn + " is installed and will start automatically when you sign in to Windows.");
+            if (staleService)
+                msg += Lang.T("\n\nאזהרה: הגשר מותקן כשירות (Program Files) ולא עודכן. להשלמת העדכון הריצו את קובץ ההתקנה כמנהל או התקינו מחדש את רכיב ההקשחה.",
+                       "\n\nWarning: the bridge runs as a service (Program Files) and was NOT updated. Run the installer as administrator or reinstall the hardening component to finish the update.");
             if (canInstall)
                 msg += Lang.T("\n\nעכשיו אוצריא תיפתח ותציע להתקין את התוספים \"סייר קבצים\" ו\"הגדרות מערכת\" — אשרו בחלון ההתקנה של אוצריא.",
                        "\n\nOtzaria will now open and offer to install the \"File Explorer\" and \"System Settings\" plugins — confirm in Otzaria's install window.");

@@ -31,7 +31,7 @@ public class UpdateSecurityTests
     {
         exe ??= FakePe();
         var bv = Encoding.ASCII.GetBytes(ver);
-        string sums = sumsOverride ?? $"# tag={tag}\r\n{Hex(exe)}  OtzariaBridge.exe\r\n{Hex(bv)}  BRIDGE_VERSION.txt\r\n";
+        string sums = sumsOverride ?? $"# tag={tag}\r\n# keyver=1\r\n{Hex(exe)}  OtzariaBridge.exe\r\n{Hex(bv)}  BRIDGE_VERSION.txt\r\n";
         var sb = Encoding.ASCII.GetBytes(sums);
         return new Pkg(sb, Sign(sb, signer), bv, exe);
     }
@@ -179,7 +179,7 @@ public class UpdateSecurityTests
     private static string Rel(string tag, bool draft = false, bool pre = false, bool withAssets = true)
         => "{\"tag_name\":\"" + tag + "\",\"draft\":" + (draft ? "true" : "false") + ",\"prerelease\":" + (pre ? "true" : "false") +
            ",\"html_url\":\"https://x/" + tag + "\",\"body\":\"n\",\"assets\":" +
-           (withAssets ? "[{\"name\":\"OtzariaBridge.exe\",\"browser_download_url\":\"https://x/" + tag + "/exe\"},{\"name\":\"SHA256SUMS.txt\",\"browser_download_url\":\"https://x/" + tag + "/sums\"},{\"name\":\"SHA256SUMS.txt.sig\",\"browser_download_url\":\"https://x/" + tag + "/sig\"},{\"name\":\"BRIDGE_VERSION.txt\",\"browser_download_url\":\"https://x/" + tag + "/bv\"}]" : "[]") + "}";
+           (withAssets ? "[{\"name\":\"OtzariaBridge.exe\",\"browser_download_url\":\"https://objects.githubusercontent.com/x/" + tag + "/exe\"},{\"name\":\"SHA256SUMS.txt\",\"browser_download_url\":\"https://objects.githubusercontent.com/x/" + tag + "/sums\"},{\"name\":\"SHA256SUMS.txt.sig\",\"browser_download_url\":\"https://objects.githubusercontent.com/x/" + tag + "/sig\"},{\"name\":\"BRIDGE_VERSION.txt\",\"browser_download_url\":\"https://objects.githubusercontent.com/x/" + tag + "/bv\"}]" : "[]") + "}";
 
     [Fact]
     public void SelectRelease_picks_highest_tag_regardless_of_order_and_has_no_latest_field()
@@ -187,8 +187,8 @@ public class UpdateSecurityTests
         // אין שדה "latest" ב-API של GitHub; הסדר ברשימה לא מובטח
         var r = UpdateApi.SelectRelease("[" + Rel("v0.1.3") + "," + Rel("v0.1.10") + "," + Rel("v0.1.9") + "]");
         Assert.Equal("v0.1.10", r.Tag);
-        Assert.Equal("https://x/v0.1.10/sig", r.SigUrl);
-        Assert.Equal("https://x/v0.1.10/bv", r.BridgeVerUrl);
+        Assert.Equal("https://objects.githubusercontent.com/x/v0.1.10/sig", r.SigUrl);
+        Assert.Equal("https://objects.githubusercontent.com/x/v0.1.10/bv", r.BridgeVerUrl);
     }
 
     [Fact]
@@ -252,11 +252,11 @@ public class UpdateSecurityTests
         => Assert.Equal("4.0.0", Verify(Make(), pub: "!!!;" + Pub).Version.ToString(3));
 
     [Fact]
-    public void KeyVersion_DefaultsToOne_AndParses()
+    public void KeyVersion_MissingIsZero_AndParses()
     {
-        Assert.Equal(1, UpdateApi.SignedKeyVersion("# tag=v1.0.1\n"));
+        Assert.Equal(0, UpdateApi.SignedKeyVersion("# tag=v1.0.1\n")); // S4: חסר = 0 (אין ביטול-בשתיקה)
         Assert.Equal(7, UpdateApi.SignedKeyVersion("# tag=v1.0.1\n# keyver=7\n"));
-        Assert.Equal(1, UpdateApi.SignedKeyVersion("# keyver=99999999999\n"));
+        Assert.Equal(0, UpdateApi.SignedKeyVersion("# keyver=99999999999\n"));
     }
 
     [Fact]

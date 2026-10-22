@@ -485,13 +485,36 @@ internal static class InstallTrust
         return true;
     }
 
+    /// <summary>גרסת ה-exe (FileVersion) או null אם אין/לא קריא/לא מספר גרסה</summary>
+    internal static Version FileVer(string path)
+    {
+        try { return UpdateApi.Parse(System.Diagnostics.FileVersionInfo.GetVersionInfo(path).FileVersion); }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// true כשהיעד קיים עם גרסה קריאה והמקור נמוך ממנה, או שגרסת המקור לא קריאה (fail-closed).
+    /// יעד חסר/פגום (בלי גרסה קריאה): מותר, אחרת אי אפשר לתקן התקנה שבורה. גרסה שווה: מותר (תיקון/התקנה מחדש).
+    /// </summary>
+    internal static bool IsDowngrade(string src, string dst)
+    {
+        if (!File.Exists(dst)) return false;
+        var d = FileVer(dst);
+        if (d == null) return false;
+        var s = FileVer(src);
+        return s == null || s < d;
+    }
+
     /// <summary>
     /// מעתיק src ל-dst רק אם מותר. null = הצלחה; אחרת סיבת הסירוב. dst נכתב דרך קובץ זמני ו-Move (לא נשאר קובץ חלקי).
     /// כללים: אותו נתיב — אין מה להעתיק; מקור מחוץ למיקום כתיב-משתמש — מותר; אחרת נדרש expectedSha256 תואם.
     /// </summary>
-    internal static string CopyVerified(string src, string dst, string expectedSha256)
+    internal static string CopyVerified(string src, string dst, string expectedSha256, bool allowDowngrade = false)
     {
         if (BridgeProcs.SamePath(src, dst)) return null;
+        // WHY (S4): בלי מונוטוניות, מי שמחזיק ב-exe ישן (חתום-hash תקף/נתיב מערכת) היה מחזיר את שירות SYSTEM לגרסה פגיעה.
+        // allowDowngrade דורש אישור מפורש של הקורא (אף קורא קיים לא מעביר אותו).
+        if (!allowDowngrade && IsDowngrade(src, dst)) return "ה-exe המותקן חדש יותר מזה שהתבקש להתקנה — לא מורידים גרסה בשירות (נדרש אישור מפורש)";
         byte[] data;
         try { data = File.ReadAllBytes(src); }
         catch (Exception ex) { return "קריאת ה-exe נכשלה: " + ex.Message; }

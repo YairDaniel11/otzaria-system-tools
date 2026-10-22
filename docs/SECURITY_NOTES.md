@@ -232,7 +232,7 @@ Intel Gen12 ומעלה (2022 ואילך) — לא רלוונטי לרוב המח
 2. מדביקים את הציבורי ב-`UpdateApi.PublicKeySpkiBase64`, בונים ומשחררים גרסה (גרסאות שנבנו לפני כן לא יקבלו עדכונים חתומים).
 3. GitHub: Settings > Secrets and variables > Actions > New repository secret, שם `UPDATE_SIGNING_KEY`, ערך = תוכן קובץ הפרטי. מוחקים את הקובץ ושומרים גיבוי לא מקוון.
 4. **GitHub Environment (חובה, פעולה ידנית):** Settings > Environments > New environment בשם `release`: סמנו Required reviewers (אתם), Deployment branches and tags = Selected, והוסיפו `main` ו-`v*`. הזיזו את `UPDATE_SIGNING_KEY` מ-Repository secrets ל-Environment secrets של `release` (ומחקו את הישן). בלי זה ה-job ירוץ בלי אישור. הוסיפו Branch protection ל-`main` ו-Tag protection (Rulesets) ל-`v*`.
-5. **רוטציית מפתח:** `PublicKeySpkiBase64` יכול להכיל כמה מפתחות ציבוריים מופרדים ב-`;`. מעבר: משחררים גשר (חתום בישן) עם `ישן;חדש`, מחליפים את הסוד לחדש, ובגשר הבא משאירים רק את החדש. **ביטול:** קובץ ה-sums החתום יכול לכלול שורה `# keyver=N` (ברירת מחדל 1); הגשר דוחה הוצאה כש-`N < UpdateApi.MinKeyVersion`. אחרי דליפה: גשר חדש עם `MinKeyVersion` גבוה ומפתח חדש בלבד (גשרים ישנים לא יתעדכנו אוטומטית).
+5. **רוטציית מפתח:** `PublicKeySpkiBase64` יכול להכיל כמה מפתחות ציבוריים מופרדים ב-`;`. מעבר: משחררים גשר (חתום בישן) עם `ישן;חדש`, מחליפים את הסוד לחדש, ובגשר הבא משאירים רק את החדש. **ביטול:** קובץ ה-sums החתום יכול לכלול שורה `# keyver=N` (חסר = 0, נדחה כש-MinKeyVersion>=1; ה-CI כותב keyver במפורש); הגשר דוחה הוצאה כש-`N < UpdateApi.MinKeyVersion`. אחרי דליפה: גשר חדש עם `MinKeyVersion` גבוה ומפתח חדש בלבד (גשרים ישנים לא יתעדכנו אוטומטית).
 6. `UpdateApi.Parse` מוגבל ל-6 ספרות למקטע ו-`TryParse`: תגית/קובץ גרסה עם מספר ענק מחזירים null במקום לזרוק.
 
 ## מגבלות ידועות
