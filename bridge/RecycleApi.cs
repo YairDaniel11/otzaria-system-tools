@@ -80,9 +80,14 @@ public static class RecycleApi
         else return null;
 
         if (!Path.IsPathFullyQualified(orig)) return null;
+        // $I ניתן לכתיבה ע"י המשתמש (תיקיית הסל שלו): נתיב המקור הוא קלט לא מהימן. מנרמלים (8.3, התקן, ADS)
+        // ודוחים כל נתיב שאינו תקין; ההגנה על יעד מוגן נאכפת ב-Restore (ר' CheckRestoreTarget)
+        try { orig = PathPolicy.Normalize(orig); } catch { return null; }
         string rPath = Path.Combine(dir, "$R" + iName.Substring(2));
         bool isDir = Directory.Exists(rPath);
         if (!isDir && !File.Exists(rPath)) return null; // $I יתום
+        // $R שהוא קישור (reparse) ולא תוכן אמיתי: שחזור שלו ייצור קישור לקובץ סודי בתיקייה מותרת
+        try { if ((File.GetAttributes(rPath) & FileAttributes.ReparsePoint) != 0) return null; } catch { return null; }
 
         DateTime deleted;
         try { deleted = ft > 0 ? DateTime.FromFileTimeUtc(ft) : File.GetLastWriteTimeUtc(iPath); }
@@ -144,6 +149,18 @@ public static class RecycleApi
         return Parse(ip, iName, drive, dir) ?? throw BridgeException.NotFound("הפריט כבר אינו בסל המיחזור");
     }
 
+    /// <summary>
+    /// יעד שחזור (מגיע מקובץ $I שמשתמש יכול לזייף): חייב לעבור מדיניות, אזורים מוגנים (כולל Startup/Program Files/
+    /// נתוני הגשר) וחסימת סיומות מריצות. נקרא גם מהבדיקות.
+    /// </summary>
+    internal static void CheckRestoreTarget(string dest)
+    {
+        FxPolicy.EnsurePathAllowed(dest);
+        FsApi.EnsureNotProtected(dest);
+        FsApi.EnsureNotReadable(dest);
+        FsApi.EnsureWriteTargetAllowed(dest);
+    }
+
     private static void DeleteTree(string dir)
     {
         foreach (string f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
@@ -178,6 +195,7 @@ public static class RecycleApi
 
     private static object Restore(JsonElement b)
     {
+        Kiosk.EnsureFileWriteAllowed();
         string conflict = b.Str("conflict", "rename");
         if (conflict is not ("rename" or "skip"))
             throw BridgeException.BadRequest("conflict חייב להיות skip או rename");
@@ -192,8 +210,8 @@ public static class RecycleApi
                 string dest = it.OriginalPath;
                 string parent = Path.GetDirectoryName(dest);
                 if (string.IsNullOrEmpty(parent)) throw BridgeException.Forbidden("אין לשחזר לשורש כונן");
-                FxPolicy.EnsurePathAllowed(dest);
-                FsApi.EnsureNotProtected(dest);
+                Kiosk.EnsureFileWriteAllowed();
+                CheckRestoreTarget(dest);
                 Directory.CreateDirectory(parent);
                 if (File.Exists(dest) || Directory.Exists(dest))
                 {
@@ -216,6 +234,7 @@ public static class RecycleApi
 
     private static object Delete(JsonElement b)
     {
+        Kiosk.EnsureFileWriteAllowed();
         int deleted = 0;
         var failed = new List<object>();
         foreach (string id in b.StrArray("ids"))
@@ -247,6 +266,7 @@ public static class RecycleApi
 
     private static object Empty()
     {
+        Kiosk.EnsureFileWriteAllowed();
         FxPolicy.EnsureAvailable();
         if (FxPolicy.IsRestricted) throw FxPolicy.Outside("במצב מוגבל אי אפשר לרוקן את כל סל המיחזור");
         const uint NoConfirmation = 0x1, NoProgressUi = 0x2, NoSound = 0x4;
