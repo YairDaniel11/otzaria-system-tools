@@ -1,27 +1,35 @@
 name: בנייה — גשר + תוספים + קובץ התקנה (Inno Setup)
 
-# פורק אישי: אין כאן שער "חובה לפני אריזה" ואין פרסום אוטומטי לחנות אוצריא/Release רשמי —
-# רק בנייה + אריזת installer כ-artifact להורדה. רץ על כל push לכל ענף, ועל workflow_dispatch ידני.
+# שרשרת אספקה (הקשחה): dotnet test חוסם לפני האריזה; Release נוצר רק מ-main או מתגית v*, ורק בג'וב נפרד
+# (release) שהוא היחיד שרואה את סוד החתימה; SHA256SUMS.txt נחתם ב-ECDSA (UPDATE_SIGNING_KEY) והגשר
+# דוחה עדכון בלי חתימה תקפה. ענפים אחרים רק בונים ומעלים artifact להורדה.
+# actions מוצמדים ל-SHA מלא (ההערה ליד כל אחד היא התגית שממנה נלקח). לעדכון: git ls-remote <repo> refs/tags/<tag>.
 
 on:
   push:
+    tags:
+      - "v*"
     paths:
       - "bridge/**"
       - "system-settings/**"
       - "file-explorer/**"
       - "installer/**"
+      - "tests/**"
+      - "tools/**"
       - "RELEASE_VERSION.txt"
       - ".github/workflows/build.yml"
   workflow_dispatch: {}
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0 # נדרש היסטוריה מלאה (לא שכפול רדוד) לחישוב גרסת התוספים למטה
 
@@ -51,12 +59,18 @@ jobs:
           $parts = $base -split '\.'
           $majorMinor = "$($parts[0]).$($parts[1])"
           $full = "$majorMinor.${{ github.run_number }}"
+          # בהרצה מתגית v* משתמשים בתגית עצמה (אחרת ייווצר Release בתגית שונה מזו שנדחפה)
+          if ("${{ github.ref_type }}" -eq "tag") { $tag = "${{ github.ref_name }}"; $full = $tag.TrimStart('v') } else { $tag = "v$full" }
           "version=$full" >> $env:GITHUB_OUTPUT
-          "tag=v$full" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: "8.0.x"
+
+      # שער בדיקות: כשל כאן עוצר את הכול (אריזה, Release). מיד אחרי build כדי שכשל קומפילציה יהיה ברור.
+      - name: בדיקות (xunit)
+        run: dotnet test tests/OtzariaBridge.Tests/OtzariaBridge.Tests.csproj -c Release --nologo
 
       # כותבים את גרסת התוספים המחושבת (steps.pluginver) לתוך שני המניפסטים לפני האריזה - רק בעותק
       # הזמני שב-runner, לא מחזירים commit לריפו (ר' הסבר אצל חישוב הגרסה למעלה)
@@ -80,9 +94,21 @@ jobs:
       - name: Publish
         run: dotnet publish bridge/OtzariaBridge.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o out
 
-      - name: התקנת Inno Setup
-        shell: powershell
-        run: choco install innosetup --no-progress --yes
+      # ללא choco בלתי נעול: מורידים גרסה מסוימת ישירות ממאגר הפרויקט ומאמתים SHA256 מוצמד לפני ההרצה.
+      # ה-hash חושב מהקובץ הרשמי innosetup-6.4.3.exe (https://github.com/jrsoftware/issrc/releases/tag/is-6_4_3);
+      # לאימות עצמאי השוו מול jrsoftware.org לפני שינוי.
+      - name: התקנת Inno Setup (גרסה מוצמדת)
+        shell: pwsh
+        env:
+          IS_VERSION: "6.4.3"
+          IS_SHA256: f3c42116542c4cc57263c5ba6c4feabfc49fe771f2f98a79d2f7628b8762723b
+        run: |
+          $f = Join-Path $env:RUNNER_TEMP "innosetup.exe"
+          Invoke-WebRequest "https://github.com/jrsoftware/issrc/releases/download/is-$($env:IS_VERSION -replace '\.','_')/innosetup-$($env:IS_VERSION).exe" -OutFile $f
+          $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $env:IS_SHA256) { throw "hash של Inno Setup לא תואם: $h" }
+          Start-Process $f -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-" -Wait
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { throw "ISCC.exe לא נמצא אחרי ההתקנה" }
 
       # AppVersion של קובץ ההתקנה (וגם שם הקובץ עצמו, OtzariaBridge-Setup-{AppVersion}.exe) הוא מספר
       # ה-Release (steps.ver.outputs.version) - לא Program.Version הפנימי - כדי שמה שרואים בשם הקובץ
@@ -96,15 +122,6 @@ jobs:
             "installer\OtzariaBridge.iss"
           Get-ChildItem installer\Output
 
-      - name: SHA256 לאימות ההורדה
-        shell: pwsh
-        run: |
-          $setup = Get-ChildItem installer\Output\*.exe | Select-Object -First 1 -ExpandProperty FullName
-          $files = @($setup, "out/OtzariaBridge.exe", "bridge/plugins/system-settings.otzplugin", "bridge/plugins/file-explorer.otzplugin")
-          $lines = foreach ($f in $files) { "{0}  {1}" -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), (Split-Path $f -Leaf) }
-          $lines | Set-Content SHA256SUMS.txt -Encoding ascii
-          Get-Content SHA256SUMS.txt
-
       # נפרד ממספר ה-Release - UpdateApi.cs בגשר משווה מול הקובץ הזה (גרסת הגשר הפנימית בפועל,
       # OtzariaBridge.csproj) כדי לדעת אם יש עדכון אמיתי לגשר, לא מול מספר ה-Release.
       - name: גרסת הגשר לבדיקת עדכון עצמי
@@ -113,7 +130,18 @@ jobs:
           $ver = ([xml](Get-Content bridge/OtzariaBridge.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
           Set-Content BRIDGE_VERSION.txt $ver -Encoding ascii -NoNewline
 
-      - uses: actions/upload-artifact@v4
+      # SHA256SUMS.txt הוא הקובץ החתום (בג'וב release). השורה הראשונה "# tag=" קושרת אותו להוצאה אחת,
+      # וכוללת את BRIDGE_VERSION.txt, כך שגם הגרסה שהגשר משווה מולה חתומה.
+      - name: SHA256 לאימות ההורדה
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem installer\Output\*.exe | Select-Object -First 1 -ExpandProperty FullName
+          $files = @($setup, "out/OtzariaBridge.exe", "bridge/plugins/system-settings.otzplugin", "bridge/plugins/file-explorer.otzplugin", "BRIDGE_VERSION.txt")
+          $lines = @("# tag=${{ steps.ver.outputs.tag }}") + (foreach ($f in $files) { "{0}  {1}" -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), (Split-Path $f -Leaf) })
+          $lines | Set-Content SHA256SUMS.txt -Encoding ascii
+          Get-Content SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: OtzariaBridge-Setup
           path: |
@@ -124,20 +152,44 @@ jobs:
             BRIDGE_VERSION.txt
           if-no-files-found: error
 
-      # Release חדש בכל push (תגית ייחודית, מספר הגרסה עולה כל פעם - make_latest מסמן תמיד את האחרון
-      # כ"Latest" כך שקישור ה-/releases/latest עדיין מצביע על הבנייה העדכנית ביותר).
-      # לא תלוי במיזוג ל-main/next ולא בשער "חובה לפני אריזה" - פורק אישי, בלי ההגבלות של הריפו המשותף.
-      - name: Release
-        uses: softprops/action-gh-release@v2
+  # Release: רק מ-main או מתגית v*, ובג'וב נפרד עם הרשאת כתיבה ועם סוד החתימה (לא זמין לענפים אחרים).
+  release:
+    needs: build
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      # סקריפט החתימה נלקח מהריפו (commit זהה לבנייה), הקבצים מה-artifact של ג'וב הבנייה
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: OtzariaBridge ${{ steps.ver.outputs.tag }}
+          name: OtzariaBridge-Setup
+          path: dist
+
+      # fail-closed: בלי סוד לא משחררים. שחרור בלי חתימה נדחה ממילא על ידי הגשר.
+      - name: חתימת SHA256SUMS.txt
+        shell: pwsh
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:UPDATE_SIGNING_KEY)) { throw "הסוד UPDATE_SIGNING_KEY לא מוגדר - לא משחררים בלי חתימה" }
+          ./tools/Sign-Sums.ps1 -Sums dist/SHA256SUMS.txt
+          Get-ChildItem dist -Recurse -File | ForEach-Object { $_.FullName }
+
+      - name: Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          name: OtzariaBridge ${{ needs.build.outputs.tag }}
           prerelease: false
           make_latest: true
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
-            installer/Output/*.exe
-            out/OtzariaBridge.exe
-            bridge/plugins/*.otzplugin
-            SHA256SUMS.txt
-            BRIDGE_VERSION.txt
+            dist/installer/Output/*.exe
+            dist/out/OtzariaBridge.exe
+            dist/bridge/plugins/*.otzplugin
+            dist/SHA256SUMS.txt
+            dist/SHA256SUMS.txt.sig
+            dist/BRIDGE_VERSION.txt
