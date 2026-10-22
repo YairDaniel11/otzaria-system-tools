@@ -17,19 +17,43 @@ internal static class ConfigSealKey
     public static byte[] Mac(byte[] key, byte[] data) =>
         HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(Prefix + Convert.ToBase64String(data)));
 
-    /// <summary>טוען את המפתח; חסר/באורך שגוי: יוצר חדש (כתיבה אטומית: זמני + החלפה). מפתח חדש מבטל חתימות קיימות (fail-closed; חותמים מחדש בשמירת הגדרות)</summary>
+    /// <summary>
+    /// MAC עם מונה: HMAC(key, Prefix + base64(data) + "|ctr=" + n). WHY (U1): בלי מונה, חתימה ישנה תקפה לנצח ואפשר להחזיר config.json
+    /// ישן (rollback) שהיה חתום כדין; עם מונה שהשירות מחזיק, רק החתימה האחרונה תקפה.
+    /// </summary>
+    public static byte[] MacWithCounter(byte[] key, byte[] data, long counter) =>
+        HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(Prefix + Convert.ToBase64String(data) + "|ctr=" + counter));
+
+    /// <summary>
+    /// האם מונה שהוצג ב-config מתקבל מול המונה הנוכחי בשירות. presented=null (config בלי מונה = חתום לפני העדכון): רק כשהשירות עוד לא הנפיק מונה (0).
+    /// מונה מוצג חייב להיות שווה בדיוק לנוכחי (ישן = rollback = נדחה; עתידי = זיוף)
+    /// </summary>
+    public static bool CounterAccepts(long current, long? presented) =>
+        presented == null ? current == 0 : (presented.Value > 0 && presented.Value == current);
+
+    /// <summary>
+    /// טוען את המפתח. חסר/באורך שגוי: יוצר חדש (כתיבה אטומית: זמני + החלפה); מפתח חדש מבטל חתימות קיימות (fail-closed; חותמים מחדש בשמירת הגדרות).
+    /// WHY (U1): שגיאת IO זמנית (נעילת קובץ ע"י AV/גיבוי) לא אמורה לדרוס מפתח תקין ולהפיל את כל החתימות: במקרה כזה מנסים שוב וזורקים, בלי ליצור חדש.
+    /// </summary>
     public static byte[] LoadOrCreate(string path, Action<string> log = null)
     {
-        try
+        for (int attempt = 0; ; attempt++)
         {
-            if (File.Exists(path))
+            try
             {
+                if (!File.Exists(path)) break;
                 var k = File.ReadAllBytes(path);
                 if (k.Length == KeyLength) return k;
                 log?.Invoke("config-seal: קובץ המפתח באורך שגוי; נוצר מפתח חדש");
+                break;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                log?.Invoke("config-seal: קריאת מפתח נכשלה (ניסיון " + (attempt + 1) + "): " + ex.Message);
+                if (attempt >= 3) throw; // לא דורסים מפתח שאולי תקין
+                Thread.Sleep(150);
             }
         }
-        catch (Exception ex) { log?.Invoke("config-seal: קריאת מפתח נכשלה: " + ex.Message); }
         var key = RandomNumberGenerator.GetBytes(KeyLength);
         string tmp = path + ".tmp";
         File.WriteAllBytes(tmp, key);
@@ -38,9 +62,10 @@ internal static class ConfigSealKey
     }
 
     /// <summary>
-    /// מי רשאי לבקש חתימה. הצינור פתוח לכל משתמש מאומת, ולכן חתימה על נתונים שרירותיים = זיוף. מורשים: מנהל מורם, או תהליך שנתיב ה-exe שלו
-    /// הוא ה-exe של השירות (Program Files, לא כתיב למשתמש); כשהנעילה נאכפת — רק גשר שהשירות עצמו הפעיל (מוגן DACL).
+    /// מי רשאי לבקש חתימה. הצינור פתוח לכל משתמש מאומת, ולכן חתימה על נתונים שרירותיים = זיוף. מורשים: מנהל מורם; גשר שהשירות עצמו הפעיל (מוגן DACL);
+    /// או תהליך מנתיב ה-exe של השירות שהציג סיסמת נעילה נכונה בבקשה. WHY (U1): "נתיב = ServiceExe" לבדו אינו הוכחה (DOTNET_STARTUP_HOOKS ב-HKCU
+    /// מריץ קוד זר בתוך exe תקין), וחתימה שנעשתה כשהנעילה לא נאכפת נשארת תקפה אחר כך.
     /// </summary>
-    public static bool ClientMaySign(bool admin, bool pathIsServiceExe, bool ownBridge, bool enforced) =>
-        admin || (pathIsServiceExe && (!enforced || ownBridge));
+    public static bool ClientMaySign(bool admin, bool pathIsServiceExe, bool ownBridge, bool passwordOk) =>
+        admin || ownBridge || (pathIsServiceExe && passwordOk);
 }

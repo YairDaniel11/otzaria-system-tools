@@ -630,9 +630,14 @@ internal static class ToolGuard
 {
     internal static readonly string[] Names = { "taskmgr", "regedit", "mmc" };
 
-    internal static bool ShouldKill(string name, string imagePath, bool elevated, string windowsDir)
+    /// <summary>שמות מקוריים (VERSIONINFO OriginalFilename) של הכלים. WHY (U1): העתקה של taskmgr/regedit/mmc בשם אחר ובנתיב כתיב עקפה את הזיהוי לפי שם+נתיב</summary>
+    internal static readonly string[] OriginalNames = { "taskmgr.exe", "regedit.exe", "mmc.exe" };
+
+    internal static bool ShouldKill(string name, string imagePath, bool elevated, string windowsDir, string originalFilename = null)
     {
         if (elevated || string.IsNullOrEmpty(imagePath) || string.IsNullOrEmpty(windowsDir)) return false;
+        // זהות לפי המטא-דאטה של הקובץ: מכל נתיב ובכל שם (העתק שנקרא calc.exe נהרג גם הוא)
+        if (!string.IsNullOrEmpty(originalFilename) && OriginalNames.Contains(originalFilename.Trim(), StringComparer.OrdinalIgnoreCase)) return true;
         if (!Names.Contains(name, StringComparer.OrdinalIgnoreCase)) return false;
         string exe = name + ".exe";
         foreach (string sub in new[] { "System32", "SysWOW64", "" })
@@ -708,5 +713,83 @@ internal static class CliSecret
         string inline = InlineValue(args, name);
         if (inline != null) { Console.WriteLine(warning); return inline; }
         return ReadSecret(prompt) ?? "";
+    }
+}
+
+/// <summary>
+/// טוקני שחרור חירום חד-פעמיים (challenge-response), בזיכרון השירות בלבד. WHY (U1): בעבר "הוכחת" קוד השחזור בקובץ הסימון (emergency-release.req,
+/// בתיקיית המשתמש) הייתה שווה ל-hash השמור, ולכן מי שקרא את ה-hash מ-config.json יכל לכתוב קובץ סימון ולשחרר את הנעילה (pass-the-hash).
+/// עכשיו: השירות מנפיק טוקן אקראי רק אחרי אימות קוד השחזור עצמו בפייפ, הקובץ מכיל רק את הטוקן, והגשר צורך אותו מול השירות (תפוגה קצרה, שימוש יחיד).
+/// </summary>
+internal sealed class RecoveryTokens
+{
+    internal const long TtlMs = 120_000;
+    internal const int Max = 8;
+    private readonly List<(string tok, long exp)> _l = new();
+
+    internal string Mint(long nowMs)
+    {
+        Prune(nowMs);
+        if (_l.Count >= Max) _l.RemoveAt(0);
+        string t = Convert.ToBase64String(RandomNumberGenerator.GetBytes(24));
+        _l.Add((t, nowMs + TtlMs));
+        return t;
+    }
+
+    /// <summary>צורך טוקן: true פעם אחת בלבד, ורק לפני התפוגה. השוואה בזמן קבוע</summary>
+    internal bool Consume(string token, long nowMs)
+    {
+        Prune(nowMs);
+        if (string.IsNullOrEmpty(token) || token.Length > 100) return false;
+        byte[] want = Encoding.UTF8.GetBytes(token);
+        int found = -1;
+        for (int i = 0; i < _l.Count; i++)
+            if (CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(_l[i].tok), want)) found = i;
+        if (found < 0) return false;
+        _l.RemoveAt(found);
+        return true;
+    }
+
+    private void Prune(long nowMs) => _l.RemoveAll(x => x.exp <= nowMs);
+}
+
+/// <summary>סיבוב יומן השירות: מעל המגבלה הקובץ עובר ל-.1 (דורס .1 קודם) במקום להימחק. WHY (U1): מחיקה הייתה מאבדת את הראיות בדיוק כשיש הרבה אירועים</summary>
+internal static class LogRotator
+{
+    internal static void RotateIfLarge(string path, long maxBytes)
+    {
+        try
+        {
+            if (File.Exists(path) && new FileInfo(path).Length > maxBytes) File.Move(path, path + ".1", true);
+        }
+        catch { }
+    }
+}
+
+/// <summary>
+/// הגבלת כתיבה ליומן: אותה שורה לא נכתבת שוב תוך חלון קצר, וסך השורות בדקה מוגבל. WHY (U1): קריאות פגומות/לולאת שגיאות מילאו את היומן
+/// (ודחקו החוצה את הראיות בסיבוב)
+/// </summary>
+internal sealed class LogThrottle
+{
+    private readonly long _dupMs;
+    private readonly int _perMinute;
+    private string _last;
+    private long _lastAt, _winStart;
+    private int _inWin, _dropped;
+
+    internal LogThrottle(long dupWindowMs = 10_000, int perMinute = 60) { _dupMs = dupWindowMs; _perMinute = perMinute; }
+
+    /// <summary>true = לכתוב. suppressed: כמה שורות נבלעו מאז הכתיבה הקודמת (לציון בשורה הבאה)</summary>
+    internal bool Allow(string line, long nowMs, out int suppressed)
+    {
+        suppressed = 0;
+        if (nowMs - _winStart >= 60_000) { _winStart = nowMs; _inWin = 0; }
+        if (line == _last && nowMs - _lastAt < _dupMs) { _dropped++; return false; }
+        if (_inWin >= _perMinute) { _dropped++; return false; }
+        _inWin++;
+        _last = line; _lastAt = nowMs;
+        suppressed = _dropped; _dropped = 0;
+        return true;
     }
 }

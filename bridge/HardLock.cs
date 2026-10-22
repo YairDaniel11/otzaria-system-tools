@@ -398,14 +398,36 @@ public static class HardLock
     }
 
     /// <summary>
-    /// בדיקת "הוכחת" קוד שחזור (ר' Secret.RecoveryProofs) מול הגיבוב שהשירות מחזיק, בלי לבטל כלום. null = השירות לא ענה/לא מכיר את הפקודה
+    /// בקשת טוקן שחרור חירום חד-פעמי מהשירות, אחרי אימות קוד השחזור בפייפ (ר' RecoveryTokens). null = השירות לא ענה/לא מכיר את הפקודה/הקוד שגוי
     /// </summary>
-    public static bool? RecoveryProofCheck(string[] proofs)
+    public static string RecoveryTokenMint(string code)
     {
-        var r = Call(new JsonObject { ["op"] = "recovery-proof", ["proofs"] = new JsonArray((proofs ?? Array.Empty<string>()).Select(x => (JsonNode)x).ToArray()) });
+        var r = Call(new JsonObject { ["op"] = "recovery-token", ["code"] = code ?? "" });
+        return r?["ok"]?.GetValue<bool>() == true ? r["token"]?.ToString() : null;
+    }
+
+    /// <summary>צריכת הטוקן מול השירות. true = תקף (ונצרך), false = נדחה, null = השירות לא ענה/לא מכיר את הפקודה (קורא מנסה שוב / נשאר נעול)</summary>
+    public static bool? RecoveryTokenConsume(string token)
+    {
+        var r = Call(new JsonObject { ["op"] = "recovery-consume", ["token"] = token ?? "" });
         if (r == null) return null;
         if (r["ok"]?.GetValue<bool>() == true) return true;
-        return r["message"]?.ToString()?.StartsWith("פקודה לא מוכרת") == true ? null : false;
+        return r["code"]?.ToString() == "unknown_op" ? null : false;
+    }
+
+    /// <summary>האם הטקסט הוא קוד השחזור, לפי השירות (עותק ה-hash המקומי נמחק). null = השירות לא ענה/לא מכיר את הפקודה</summary>
+    public static bool? VerifyRecoveryOnly(string code)
+    {
+        var r = Call(new JsonObject { ["op"] = "verify", ["password"] = code ?? "", ["recoveryOnly"] = true });
+        if (r == null) return null;
+        if (r["ok"]?.GetValue<bool>() == true) return true;
+        return r["code"]?.ToString() is "unknown_op" or "too_many" ? null : false;
+    }
+
+    /// <summary>האם השירות מחזיק קוד שחזור (שדה status "hasRecovery", שירות ישן: false). רק אז מותר למחוק את העותק המקומי</summary>
+    public static bool ServiceHasRecovery()
+    {
+        try { return ServiceStatus()?["hasRecovery"]?.GetValue<bool>() == true; } catch { return false; }
     }
 
     public static string UninstallWithPassword(string password)
@@ -849,14 +871,20 @@ public static class HardLock
 
     private static bool SamePathDir(string a, string b) => BridgeProcs.SamePath(a.TrimEnd('\\'), b.TrimEnd('\\'));
 
+    private static readonly LogThrottle SvcLogThrottle = new();
+
     internal static void SvcLog(string line)
     {
         try
         {
+            // WHY (U1): בעבר הקובץ נמחק מעל 2MB (איבוד ראיות), וקריאות פגומות חוזרות הציפו אותו. עכשיו: סיבוב ל-.1 והגבלת קצב/כפילויות
+            int dropped;
+            lock (SvcLogThrottle) if (!SvcLogThrottle.Allow(line, Environment.TickCount64, out dropped)) return;
             Directory.CreateDirectory(DataDir);
             string f = Path.Combine(DataDir, "service.log");
-            if (File.Exists(f) && new FileInfo(f).Length > 2_000_000) File.Delete(f);
-            File.AppendAllText(f, DateTime.Now.ToString("s") + " " + line + Environment.NewLine);
+            LogRotator.RotateIfLarge(f, 2_000_000);
+            string pre = dropped > 0 ? DateTime.Now.ToString("s") + " (" + dropped + " שורות דומות הושמטו)" + Environment.NewLine : "";
+            File.AppendAllText(f, pre + DateTime.Now.ToString("s") + " " + line + Environment.NewLine);
         }
         catch { }
     }
@@ -906,6 +934,7 @@ public class HardLockService : ServiceBase
     // גשרים שהשירות יצר בעצמו (pid -> זמן התחלה): רק הם נחשבים מהימנים; כל גשר אמיתי אחר נהרג כשהנעילה נאכפת
     private readonly Dictionary<int, DateTime> _ownBridges = new();
 
+    private readonly RecoveryTokens _recoveryTokens = new(); // טוקני שחרור חירום חד-פעמיים (זיכרון בלבד; נקרא תחת _gate)
     private byte[] _sealKey; // מפתח HMAC של ConfigSeal, נטען עצלנית (נקרא תחת _gate)
     private static string StateFile => Path.Combine(HardLock.DataDir, "hardlock.json");
 
@@ -1148,6 +1177,22 @@ public class HardLockService : ServiceBase
     // ---------- מדיניות הנעילה (מקור האמת כשהשירות מותקן) ----------
 
     private static readonly string[] PolicyKeys = { "programs", "autoTorahPrograms", "autoTorahKeywords", "otzariaPath", "otzariaSha256", "fxPolicy" };
+
+    /// <summary>
+    /// נתיב אוצריא שמגיע עם "enable". WHY (U1): "enable" עקף את ParsePolicy (נתיב לא תקין/מעטפת/מנהל מערכת נכנסו ישירות למצב), ונתיב שהשתנה השאיר נעיצת
+    /// SHA-256 של הקובץ הקודם. עכשיו: אותה בדיקה כמו "settings", ונעיצה ישנה מנוקה כשהנתיב שונה (ParsePolicy מנקה אותה); נתיב זהה משאיר את הנעיצה.
+    /// מחזיר שגיאה (בלי לשנות את state) או null
+    /// </summary>
+    internal static JsonObject ApplyEnableOtzariaPath(JsonObject state, string otz)
+    {
+        if (string.IsNullOrEmpty(otz)) return null;
+        var e = ParsePolicy(new JsonObject { ["otzariaPath"] = otz }, out var enPolicy);
+        if (e != null) return e;
+        bool samePath = BridgeProcs.SamePath(state["otzariaPath"]?.ToString(), otz);
+        foreach (var kv in enPolicy)
+            if (!(samePath && kv.Key == "otzariaSha256")) state[kv.Key] = kv.Value;
+        return null;
+    }
 
     /// <summary>המדיניות השמורה, לתשובת "status". רק מפתחות שהוגדרו — מפתח חסר = עוד לא סונכרן</summary>
     private JsonObject PolicyNode()
@@ -1464,34 +1509,94 @@ public class HardLockService : ServiceBase
                         ["policy"] = PolicyNode(),
                         ["tempUnlock"] = TempNode(),
                         ["stateCorrupt"] = _corrupt,
+                        ["hasRecovery"] = !string.IsNullOrEmpty(_state["recoveryHash"]?.ToString()), // U1: הגשר מוחק את העותק המקומי רק כשהשירות מחזיק קוד שחזור
                         ["enforcementIssues"] = new JsonArray(_policyIssues.Select(kv => (JsonNode)(kv.Key + ": " + kv.Value)).ToArray()),
                     };
 
-                case "recovery-proof":
+                case "recovery-token":
                 {
-                    // בדיקת הוכחת קוד שחזור מקובץ סימון החירום (בלי קוד גלוי). מוגבל בקצב כמו סיסמה; לא משנה מצב
+                    // WHY (U1): challenge-response לשחרור חירום. הטוקן מונפק רק אחרי אימות קוד השחזור עצמו בפייפ (--unlock), נשמר בזיכרון בלבד
+                    // ופג תוך 2 דקות; הקובץ בתיקיית המשתמש מכיל רק אותו. ה-hash השמור כבר לא משמש "הוכחה" (pass-the-hash). דלי ניסיונות נפרד מסיסמת ההורה
                     if (_corrupt) return Err("corrupt", "קובץ המצב פגום");
-                    if (!_limiter.CanTry(_clientKey, NowMs, out int rpWait)) return Err("too_many", $"יותר מדי ניסיונות שגויים. נסו שוב בעוד {rpWait} שניות");
-                    var proofs = (q["proofs"] as JsonArray)?.Take(4).Select(x => x?.ToString()).Where(x => x != null).ToArray();
-                    if (Secret.ProofMatches(proofs, _state["recoveryHash"]?.ToString())) { _limiter.Success(_clientKey); return Ok(); }
-                    _limiter.Fail(_clientKey, NowMs);
-                    return Err("wrong_password", "הוכחת קוד השחזור שגויה");
+                    if (!Configured) return Err("bad_request", "רכיב ההקשחה עדיין לא הוגדר");
+                    string pk = _clientKey + "|proof";
+                    if (!_limiter.CanTry(pk, NowMs, out int rtWait)) return Err("too_many", $"יותר מדי ניסיונות שגויים. נסו שוב בעוד {rtWait} שניות");
+                    string rcode = Secret.NormalizeRecovery(q["code"]?.ToString());
+                    if (Matches(rcode, "recoveryHash", "recoverySalt"))
+                    {
+                        _limiter.Success(pk);
+                        UpgradeHash(rcode, "recoveryHash", "recoverySalt");
+                        return new JsonObject { ["ok"] = true, ["token"] = _recoveryTokens.Mint(NowMs) };
+                    }
+                    _limiter.Fail(pk, NowMs);
+                    return Err("wrong_password", "קוד השחזור שגוי");
+                }
+
+                case "recovery-consume":
+                {
+                    // צריכת טוקן חירום חד-פעמי (מהגשר, אחרי שקרא אותו מקובץ הסימון). טוקן אקראי 192 ביט: ניחוש אינו ריאלי, ובכל זאת דלי נפרד
+                    if (_corrupt) return Err("corrupt", "קובץ המצב פגום");
+                    string ck = _clientKey + "|proof";
+                    if (!_limiter.CanTry(ck, NowMs, out int rcWait)) return Err("too_many", $"יותר מדי ניסיונות שגויים. נסו שוב בעוד {rcWait} שניות");
+                    if (_recoveryTokens.Consume(q["token"]?.ToString(), NowMs)) { _limiter.Success(ck); return Ok(); }
+                    _limiter.Fail(ck, NowMs);
+                    return Err("wrong_password", "טוקן שחרור החירום שגוי או שפג");
+                }
+
+                case "config-verify":
+                {
+                    // אימות MAC מועמד: בלי הגבלת חותם, כי התשובה היא כן/לא בלבד (אין אורקל חתימה). kind=seal: גם מונה מונוטוני (הגנת rollback)
+                    if (!Configured) return Err("bad_request", "רכיב ההקשחה עדיין לא הוגדר");
+                    byte[] vdata, vmac;
+                    try { vdata = Convert.FromBase64String(q["data"]?.ToString() ?? ""); vmac = Convert.FromBase64String(q["mac"]?.ToString() ?? ""); }
+                    catch { return new JsonObject { ["ok"] = true, ["valid"] = false }; }
+                    if (vdata.Length > ConfigSealKey.MaxData) return Err("bad_request", "data ארוך מדי");
+                    try { _sealKey ??= ConfigSealKey.LoadOrCreate(Path.Combine(HardLock.DataDir, "config-seal.key"), HardLock.SvcLog); }
+                    catch (Exception ex) { HardLock.SvcLog("config-verify: " + ex.Message); return Err("internal", "מפתח החתימה אינו זמין"); }
+                    byte[] expected;
+                    if (q["kind"]?.ToString() == "seal")
+                    {
+                        long cur = _state["sealCounter"] is JsonValue scv && scv.TryGetValue<long>(out long scl) ? scl : 0;
+                        long? presented = q["counter"] is JsonValue pcv && pcv.TryGetValue<long>(out long pcl) ? pcl : null;
+                        if (!ConfigSealKey.CounterAccepts(cur, presented)) return new JsonObject { ["ok"] = true, ["valid"] = false };
+                        expected = presented == null ? ConfigSealKey.Mac(_sealKey, vdata) : ConfigSealKey.MacWithCounter(_sealKey, vdata, presented.Value);
+                    }
+                    else expected = ConfigSealKey.Mac(_sealKey, vdata);
+                    return new JsonObject { ["ok"] = true, ["valid"] = vmac.Length == expected.Length && CryptographicOperations.FixedTimeEquals(vmac, expected) };
                 }
 
                 case "config-sign":
                 {
-                    // WHY (T1): חתימת ConfigSeal. הצינור פתוח לכל משתמש, ולכן רק גשר אמיתי (נתיב = ServiceExe) או מנהל מורם; ובנעילה נאכפת — רק גשר של השירות
+                    // WHY (U1): הצינור פתוח לכל משתמש. חתימה רק למנהל מורם, לגשר שהשירות עצמו הפעיל (DACL), או לתהליך מנתיב ה-ServiceExe שהציג סיסמת נעילה
+                    // נכונה (נתיב לבדו לא מספיק: DOTNET_STARTUP_HOOKS ב-HKCU מריץ קוד זר ב-exe תקין, וחתימה שנעשתה כשהנעילה לא נאכפת נשארת תקפה)
                     if (!Configured) return Err("bad_request", "רכיב ההקשחה עדיין לא הוגדר");
+                    if (_corrupt) return Err("corrupt", "קובץ המצב פגום");
                     bool pathOk = false;
                     try { pathOk = _clientPid > 0 && BridgeProcs.SamePath(BridgeProcs.ImagePath(_clientPid), HardLock.ServiceExe); } catch { }
-                    if (!ConfigSealKey.ClientMaySign(_clientAdmin, pathOk, _clientOwnBridge, Enforced))
-                        return Err("forbidden", "חתימת הגדרות מותרת רק לגשר המותקן");
+                    bool pwOk = false;
+                    if (!_clientAdmin && !_clientOwnBridge && pathOk && !string.IsNullOrEmpty(pw))
+                    {
+                        string sk = _clientKey + "|sign"; // דלי נפרד: ניחושים כאן לא שורפים את דלי הסיסמה הרגיל
+                        if (!_limiter.CanTry(sk, NowMs, out int sgWait)) return Err("too_many", $"יותר מדי ניסיונות שגויים. נסו שוב בעוד {sgWait} שניות");
+                        pwOk = !_corrupt && Matches(pw, "passwordHash", "salt");
+                        if (pwOk) _limiter.Success(sk); else _limiter.Fail(sk, NowMs);
+                    }
+                    if (!ConfigSealKey.ClientMaySign(_clientAdmin, pathOk, _clientOwnBridge, pwOk))
+                        return Err("forbidden", "חתימת הגדרות מותרת רק לגשר שהשירות הפעיל, למנהל מורם, או עם סיסמת הנעילה");
                     byte[] cdata;
                     try { cdata = Convert.FromBase64String(q["data"]?.ToString() ?? ""); }
                     catch { return Err("bad_request", "data אינו Base64 תקין"); }
                     if (cdata.Length > ConfigSealKey.MaxData) return Err("bad_request", "data ארוך מדי");
                     try { _sealKey ??= ConfigSealKey.LoadOrCreate(Path.Combine(HardLock.DataDir, "config-seal.key"), HardLock.SvcLog); }
                     catch (Exception ex) { HardLock.SvcLog("config-sign: " + ex.Message); return Err("internal", "מפתח החתימה אינו זמין"); }
+                    if (q["kind"]?.ToString() == "seal")
+                    {
+                        // מונה מונוטוני: נשמר בדיסק לפני שהחתימה יוצאת, כך שחתימה שיצאה תמיד עם מונה שכבר נרשם (כשל שמירה = שגיאה, לא חתימה)
+                        long next = (_state["sealCounter"] is JsonValue ov && ov.TryGetValue<long>(out long ol) ? ol : 0) + 1;
+                        _state["sealCounter"] = next;
+                        try { Save(); } catch (Exception ex) { HardLock.SvcLog("config-sign counter: " + ex.Message); return Err("internal", "שמירת מונה החתימה נכשלה"); }
+                        return new JsonObject { ["ok"] = true, ["counter"] = next, ["mac"] = Convert.ToBase64String(ConfigSealKey.MacWithCounter(_sealKey, cdata, next)) };
+                    }
                     return new JsonObject { ["ok"] = true, ["mac"] = Convert.ToBase64String(ConfigSealKey.Mac(_sealKey, cdata)) };
                 }
 
@@ -1512,6 +1617,17 @@ public class HardLockService : ServiceBase
                     return Ok();
 
                 case "verify":
+                    if (q["recoveryOnly"]?.GetValue<bool>() == true)
+                    {
+                        // U1: "האם זה קוד השחזור" (פטור 2FA בביטול חירום). עותק ה-hash המקומי נמחק, ולכן השאלה עוברת לשירות. דלי נפרד ("|rec"): לא שורף את סיסמת ההורה
+                        if (_corrupt || !Configured) return Err("bad_request", "רכיב ההקשחה לא מוגדר");
+                        string rk = _clientKey + "|rec";
+                        if (!_limiter.CanTry(rk, NowMs, out int rcw)) return Err("too_many", $"יותר מדי ניסיונות. נסו שוב בעוד {rcw} שניות");
+                        string rnorm = Secret.NormalizeRecovery(pw);
+                        if (Matches(rnorm, "recoveryHash", "recoverySalt")) { _limiter.Success(rk); UpgradeHash(rnorm, "recoveryHash", "recoverySalt"); return Ok(); }
+                        _limiter.Fail(rk, NowMs);
+                        return Err("wrong_password", "לא קוד השחזור");
+                    }
                     return Check(pw, q["allowRecovery"]?.GetValue<bool>() == true) ?? Ok();
 
                 case "enable":
@@ -1520,7 +1636,7 @@ public class HardLockService : ServiceBase
                     _state["activatedBy"] = "manual"; // נעילה ידנית לא תבוטל בסוף חלון התזמון
                     _state["tempUnlockUntil"] = "";   // הפעלה בסיסמה מסיימת פתיחה זמנית
                     string otz = q["otzariaPath"]?.ToString();
-                    if (!string.IsNullOrEmpty(otz)) _state["otzariaPath"] = otz;
+                    if ((e = ApplyEnableOtzariaPath(_state, otz)) != null) return e;
                     Save();
                     HardLock.SvcLog("service: נעילה הופעלה");
                     Task.Run(Tick);
@@ -1705,7 +1821,7 @@ public class HardLockService : ServiceBase
                     return Ok();
 
                 default:
-                    return Err("bad_request", "פקודה לא מוכרת: " + op);
+                    return Err("unknown_op", "פקודה לא מוכרת: " + op); // קוד ייעודי: הגשר מבחין בין שירות ישן לשגיאה אחרת (ר' ConfigSeal.ClassifyError)
             }
         }
     }
@@ -1887,7 +2003,8 @@ public class HardLockService : ServiceBase
             lock (_gate)
             {
                 var orig = _state["officeOriginal"] as JsonObject ?? new JsonObject();
-                if (OfficePolicy.Apply(new OfficePolicy.RegistryStore(), active, orig, issues))
+                // persist: המקורות נשמרים לדיסק לפני הכתיבה הראשונה, כך שקריסה באמצע לא תשאיר ערך שלנו שייחשב מקור (ר' OfficePolicy.Apply)
+                if (OfficePolicy.Apply(new OfficePolicy.RegistryStore(), active, orig, issues, () => { _state["officeOriginal"] = orig; Save(); }))
                 {
                     if (orig.Count > 0) _state["officeOriginal"] = orig; else _state.Remove("officeOriginal");
                     Save();
@@ -2043,6 +2160,52 @@ public class HardLockService : ServiceBase
                     catch (Exception ex) { HardLock.SvcLog("tool guard " + name + ": " + ex.Message); }
                 }
         }
+        GuardRenamedTools(win);
+    }
+
+    private readonly Dictionary<string, string> _origNameCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// WHY (U1): העתק של taskmgr/regedit/mmc בשם אחר (בנתיב כתיב) לא נתפס לפי שם. כאן עוברים על תהליכים מחוץ לתיקיית Windows וקוראים את
+    /// OriginalFilename מה-VERSIONINFO (מטמון לפי נתיב+גודל+זמן שינוי, כדי שהסריקה תישאר זולה). לא נבדק בחי.
+    /// </summary>
+    private void GuardRenamedTools(string win)
+    {
+        Process[] all;
+        try { all = Process.GetProcesses(); } catch { return; }
+        string winPrefix = win.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        foreach (var p in all)
+            using (p)
+            {
+                try
+                {
+                    if (p.Id <= 4 || p.Id == Environment.ProcessId) continue;
+                    string img = BridgeProcs.ImagePath(p.Id);
+                    if (string.IsNullOrEmpty(img) || img.StartsWith(winPrefix, StringComparison.OrdinalIgnoreCase)) continue; // תחת Windows: כתיב למנהלים בלבד, והשם נבדק למעלה
+                    string orig = OriginalNameOf(img);
+                    if (string.IsNullOrEmpty(orig)) continue;
+                    var (_, elevated) = ClientIdentity(p.Id);
+                    if (!ToolGuard.ShouldKill(p.ProcessName, img, elevated, win, orig)) continue;
+                    p.Kill();
+                    HardLock.SvcLog($"service: נהרג העתק של {orig} ({img}, pid {p.Id}) בזמן נעילה");
+                }
+                catch { }
+            }
+        if (_origNameCache.Count > 2000) _origNameCache.Clear();
+    }
+
+    private string OriginalNameOf(string img)
+    {
+        try
+        {
+            var fi = new FileInfo(img);
+            string key = img + "|" + fi.Length + "|" + fi.LastWriteTimeUtc.Ticks;
+            if (_origNameCache.TryGetValue(key, out var v)) return v;
+            string o = FileVersionInfo.GetVersionInfo(img).OriginalFilename ?? "";
+            _origNameCache[key] = o;
+            return o;
+        }
+        catch { return null; }
     }
 
     private void TrackOwn(int pid)

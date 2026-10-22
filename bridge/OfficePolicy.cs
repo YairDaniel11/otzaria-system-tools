@@ -48,9 +48,38 @@ internal static class OfficePolicy
     /// מיישם (active) או מחזיר (!active) את המדיניות. original = המקורות השמורים ("App|Name" → ערך או Absent); מתעדכן במקום.
     /// מחזיר true אם original השתנה (השירות צריך לשמור). שגיאות לא נבלעות כאן: הקורא רושם ביומן; fail-closed = ממשיכים לנסות בטיק הבא
     /// </summary>
-    internal static bool Apply(IStore store, bool active, JsonObject original, List<string> issues = null)
+    internal static bool Apply(IStore store, bool active, JsonObject original, List<string> issues = null, Action persist = null)
     {
         bool changed = false;
+        if (active)
+        {
+            // WHY (U1): המקורות נרשמים (ונשמרים לדיסק דרך persist) לפני כל כתיבה. אחרת קריסה בין ה-Set הראשון לשמירה השאירה את הערך שלנו
+            // ברישום בלי מקור שמור, ובהפעלה הבאה "המקור" היה הערך שלנו (והשחרור לא היה מחזיר את מה שהיה)
+            bool recorded = false;
+            foreach (string app in Apps)
+                foreach (var (name, _) in Values)
+                {
+                    string key = app + "|" + name;
+                    try
+                    {
+                        if (original.ContainsKey(key)) continue;
+                        original[key] = store.Get(app, name) ?? Absent;
+                        recorded = true;
+                    }
+                    catch (Exception ex) { issues?.Add(key + ": " + ex.Message); }
+                }
+            if (recorded)
+            {
+                changed = true;
+                try { persist?.Invoke(); }
+                catch (Exception ex)
+                {
+                    // לא הצלחנו לשמור את המקורות: לא כותבים כלום (עדיף בלי מדיניות Office מאשר לאבד את המקור)
+                    issues?.Add("office: שמירת הערכים המקוריים נכשלה: " + ex.Message);
+                    return changed;
+                }
+            }
+        }
         foreach (string app in Apps)
             foreach (var (name, want) in Values)
             {
@@ -60,7 +89,7 @@ internal static class OfficePolicy
                     int? cur = store.Get(app, name);
                     if (active)
                     {
-                        if (!original.ContainsKey(key)) { original[key] = cur ?? Absent; changed = true; } // המקור נשמר פעם אחת, לפני הכתיבה הראשונה
+                        if (!original.ContainsKey(key)) continue; // לא נרשם מקור (קריאה נכשלה למעלה): לא כותבים בלי מקור שמור
                         if (cur != want) store.Set(app, name, want);
                         if (store.Get(app, name) != want) issues?.Add(key + " לא אומת");
                     }

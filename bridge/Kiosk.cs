@@ -45,11 +45,16 @@ public static partial class Kiosk
     {
         try
         {
-            if (string.IsNullOrEmpty(Config.Get<string>("kiosk.passwordHash", null)) && string.IsNullOrEmpty(Config.Get<string>("kiosk.salt", null))) return;
-            Config.Remove("kiosk.passwordHash");
-            Config.Remove("kiosk.salt");
+            // WHY (U1): גם hash/salt של קוד השחזור. עותק קריא-כתיב שלהם איפשר ניחוש לא מקוון, ובגרסה הקודמת גם שחרור חירום ב-pass-the-hash
+            // (ההוכחה בקובץ הסימון הייתה שווה ל-hash). נמחק רק כשהשירות מאשר שהוא מחזיק קוד שחזור (שירות ישן: נשאר, כדי לא לאבד את מסלול החירום)
+            bool recovery = (!string.IsNullOrEmpty(Config.Get<string>("kiosk.recoveryHash", null)) || !string.IsNullOrEmpty(Config.Get<string>("kiosk.recoverySalt", null)))
+                            && HardLock.ServiceHasRecovery();
+            bool password = !string.IsNullOrEmpty(Config.Get<string>("kiosk.passwordHash", null)) || !string.IsNullOrEmpty(Config.Get<string>("kiosk.salt", null));
+            if (!password && !recovery) return;
+            if (password) { Config.Remove("kiosk.passwordHash"); Config.Remove("kiosk.salt"); }
+            if (recovery) { Config.Remove("kiosk.recoveryHash"); Config.Remove("kiosk.recoverySalt"); }
             Config.Save();
-            Config.Log("kiosk: עותק hash הסיסמה המקומי הוסר (השירות מקור האמת)");
+            Config.Log("kiosk: עותק hash הסיסמה" + (recovery ? " וקוד השחזור" : "") + " המקומי הוסר (השירות מקור האמת)");
         }
         catch (Exception ex) { Config.Log("purge local password: " + ex.Message); }
     }
@@ -228,7 +233,7 @@ public static partial class Kiosk
         {
             ThrowIfLockedOut();
             // כשרכיב ההקשחה מותקן — הוא מקור האמת לסיסמה (עריכת config.json לא עוזרת)
-            if (HardLock.Available) { HardLock.Verify(password, allowRecovery); PurgeLocalPassword(); return; }
+            if (HardLock.Available) { HardLock.Verify(password, allowRecovery); ConfigSeal.NoteVerified(password); PurgeLocalPassword(); return; }
             // fail-closed: שירות מותקן שלא עונה לא מחזיר אותנו ל-hash מקומי
             if (ServiceDown()) throw new BridgeException("unsupported", "רכיב ההקשחה לא מגיב ולכן אי אפשר לאמת סיסמה כרגע. נסו שוב בעוד רגע (או קוד שחזור בקיצור החירום)", 503);
             bool ok = Matches(password, "kiosk.passwordHash", "kiosk.salt") ||
@@ -687,7 +692,7 @@ public static partial class Kiosk
         {
             if (secret.Length < TempUnlock.MinSecretLength)
                 throw BridgeException.BadRequest($"סיסמת הפתיחה הזמנית חייבת להכיל לפחות {TempUnlock.MinSecretLength} תווים");
-            if (Matches(secret, "kiosk.passwordHash", "kiosk.salt") || Matches(Secret.NormalizeRecovery(secret), "kiosk.recoveryHash", "kiosk.recoverySalt"))
+            if (Matches(secret, "kiosk.passwordHash", "kiosk.salt") || IsRecoveryCode(secret))
                 throw BridgeException.BadRequest("סיסמת הפתיחה הזמנית חייבת להיות שונה מסיסמת הנעילה ומקוד השחזור");
         }
         if (want && !cur.Enabled)
@@ -726,8 +731,19 @@ public static partial class Kiosk
     }
 
     /// <summary>האם הטקסט שהוקלד הוא קוד השחזור (פטור מאימות דו-שלבי בביטול חירום) — internal כדי ש-FxPolicy ישתמש באותו כלל</summary>
-    internal static bool IsRecoveryCode(string s) =>
-        Matches(Secret.NormalizeRecovery(s), "kiosk.recoveryHash", "kiosk.recoverySalt");
+    internal static bool IsRecoveryCode(string s)
+    {
+        string norm = Secret.NormalizeRecovery(s);
+        // WHY (U1): כשהשירות מותקן העותק המקומי של ה-hash נמחק (או לא אמין: config.json כתיב למשתמש), והשירות הוא מקור האמת
+        if (HardLock.Available)
+        {
+            bool? r = null;
+            try { r = HardLock.VerifyRecoveryOnly(norm); } catch { }
+            if (r != null) return r == true;
+            return ServiceStopped() && LocalRecoveryMatches(norm); // שירות מופסק בפועל: מצב חירום מקומי (כמו VerifyEmergencyCode)
+        }
+        return Matches(norm, "kiosk.recoveryHash", "kiosk.recoverySalt");
+    }
 
     /// <summary>רכיב ההקשחה אומר "נעול" (למשל אחרי עריכת config.json או בחשבון Windows אחר) — נועלים גם כאן</summary>
     public static void ForceActivate(string servicePath)
@@ -1335,7 +1351,7 @@ public static partial class Kiosk
     internal static bool VerifyEmergencyCode(string code)
     {
         string norm = Secret.NormalizeRecovery(code);
-        bool LocalOk() => Matches(norm, "kiosk.recoveryHash", "kiosk.recoverySalt");
+        bool LocalOk() => LocalRecoveryMatches(norm);
         if (!HardLock.ServiceInstalled()) return LocalOk();
         for (int i = 0; ; i++)
         {
@@ -1351,6 +1367,28 @@ public static partial class Kiosk
     }
 
     /// <summary>
+    /// ה-hash/salt של קוד השחזור לשימוש מקומי (מצב רך, או שירות מופסק): config.json, ובהיעדרו (נמחק כשהשירות החזיק אותו) הקובץ של השירות ב-ProgramData,
+    /// שנקרא רק כשהתהליך מורם (משתמש רגיל לא יכול לקרוא אותו; ומי שעצר את השירות הוא מנהל). לא קורא רשת/pipe.
+    /// </summary>
+    private static (string hash, string salt) LocalRecoveryStored()
+    {
+        string h = Config.Get<string>("kiosk.recoveryHash", null), s = Config.Get<string>("kiosk.recoverySalt", null);
+        if (!string.IsNullOrEmpty(h) && !string.IsNullOrEmpty(s)) return (h, s);
+        try
+        {
+            var st = StateStore.Read(Path.Combine(HardLock.DataDir, "hardlock.json"), out _, out _);
+            return (st?["recoveryHash"]?.ToString(), st?["recoverySalt"]?.ToString());
+        }
+        catch { return (null, null); }
+    }
+
+    private static bool LocalRecoveryMatches(string norm)
+    {
+        var (h, s) = LocalRecoveryStored();
+        return Secret.Matches(norm, h, s);
+    }
+
+    /// <summary>
     /// קוד שחזור משורת הפקודה: OtzariaBridge.exe --unlock CODE.
     /// WHY: גשר מוקשח (DACL) לא ניתן להריגה ע"י תהליך המשתמש, וגשר שנשאר רץ מחזיק kiosk.active בזיכרון ונשאר נעול.
     /// לכן מאותתים לו בקובץ סימון (עם הקוד, שהגשר מאמת בעצמו מול השירות/המקומי) והוא משחרר ויוצא; Kill רק כגיבוי לגשרים ישנים.
@@ -1363,11 +1401,24 @@ public static partial class Kiosk
         if (others.Count > 0)
         {
             string marker = EmergencyMarkerPath;
-            // WHY (T1): הקובץ בתיקיית המשתמש; לא כותבים בו את הקוד אלא הוכחה (גיבוב עם salt קוד השחזור). בלי salt: בלי סימון, נשאר Kill כגיבוי
-            string[] proofs = Secret.RecoveryProofs(Secret.NormalizeRecovery(code), Config.Get<string>("kiosk.recoverySalt", null));
-            if (proofs != null)
+            // WHY (U1): הקובץ בתיקיית המשתמש, ולכן אסור שיכיל משהו שאפשר לזייף מה-hash השמור (הוכחה = hash: pass-the-hash). כשהשירות מותקן ועונה:
+            // טוקן חד-פעמי שהשירות הנפיק אחרי אימות הקוד בפייפ (challenge-response). הוכחה מבוססת hash נכתבת רק במצב רך (בלי שירות) או כשהשירות מופסק בפועל,
+            // ושם ממילא אין סוד מול מי שיכול לערוך config.json. בלי שניהם: בלי סימון, נשאר Kill כגיבוי
+            string content = null;
+            if (HardLock.ServiceInstalled())
             {
-                try { Directory.CreateDirectory(Config.Dir); File.WriteAllText(marker, MarkerPrefix + string.Join("\n", proofs)); } catch (Exception ex) { Config.Log("emergency marker: " + ex.Message); }
+                string tok = null;
+                try { tok = HardLock.RecoveryTokenMint(code); } catch (Exception ex) { Config.Log("emergency token: " + ex.Message); }
+                if (tok != null) content = TokenMarkerPrefix + tok;
+            }
+            if (content == null && (!HardLock.ServiceInstalled() || ServiceStopped()))
+            {
+                string[] proofs = Secret.RecoveryProofs(Secret.NormalizeRecovery(code), LocalRecoveryStored().salt);
+                if (proofs != null) content = MarkerPrefix + string.Join("\n", proofs);
+            }
+            if (content != null)
+            {
+                try { Directory.CreateDirectory(Config.Dir); File.WriteAllText(marker, content); } catch (Exception ex) { Config.Log("emergency marker: " + ex.Message); }
                 var end = DateTime.UtcNow.AddSeconds(8);
                 while (DateTime.UtcNow < end && File.Exists(marker)) Thread.Sleep(200);
                 try { File.Delete(marker); } catch { }
@@ -1397,9 +1448,10 @@ public static partial class Kiosk
             string text;
             try { text = File.ReadAllText(f).Trim(); File.Delete(f); } catch { return; } // לא נמחק = לא מעבדים (בלי לולאה)
             if (DateTime.UtcNow < _markerBlockedUntil) return;
-            string[] proofs = ParseMarker(text);
-            if (proofs == null) return; // קוד גלוי בקובץ כבר לא מתקבל (הכותב החדש כותב הוכחה בלבד)
-            if (EmergencyReleaseProof(proofs))
+            string token = ParseTokenMarker(text);
+            string[] proofs = token == null ? ParseMarker(text) : null;
+            if (token == null && proofs == null) return; // קוד גלוי בקובץ כבר לא מתקבל (הכותב החדש כותב טוקן/הוכחה בלבד)
+            if (token != null ? EmergencyReleaseToken(token) : EmergencyReleaseProof(proofs))
             {
                 Config.Log("kiosk: שחרור חירום מ---unlock (קובץ סימון מאומת) - הגשר יוצא");
                 Tray.ExitNow();
@@ -1410,6 +1462,16 @@ public static partial class Kiosk
     }
 
     internal const string MarkerPrefix = "proof-v1\n";
+    internal const string TokenMarkerPrefix = "token-v1\n";
+
+    /// <summary>טוקן חד-פעמי מקובץ סימון (token-v1); null אם הפורמט אחר/לא תקין</summary>
+    internal static string ParseTokenMarker(string text)
+    {
+        const string head = "token-v1";
+        if (text == null || !text.StartsWith(head, StringComparison.Ordinal)) return null;
+        var lines = text.Substring(head.Length).Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return lines.Length == 1 && lines[0].Length is > 0 and <= 100 ? lines[0] : null;
+    }
 
     /// <summary>מפרק את תוכן קובץ הסימון להוכחות; null אם הפורמט לא תקין (כולל קוד גלוי ישן)</summary>
     internal static string[] ParseMarker(string text)
@@ -1424,17 +1486,37 @@ public static partial class Kiosk
     /// <summary>כמו VerifyEmergencyCode אבל לפי הוכחה: מול השירות כשהוא מותקן ועונה; מקומית רק בלי שירות או כשהוא מופסק בפועל</summary>
     internal static bool VerifyEmergencyProof(string[] proofs)
     {
-        bool LocalOk() => Secret.ProofMatches(proofs, Config.Get<string>("kiosk.recoveryHash", null));
-        if (!HardLock.ServiceInstalled()) return LocalOk();
+        bool LocalOk() => Secret.ProofMatches(proofs, LocalRecoveryStored().hash);
+        // WHY (U1): הוכחה = hash מתקבלת רק כשאין שירות או שהוא מופסק בפועל. שירות שרץ: רק טוקן (VerifyEmergencyToken); אחרת מי שקרא את ה-hash היה משחרר
+        bool installed = HardLock.ServiceInstalled();
+        return ProofAcceptable(installed, installed && ServiceStopped(), LocalOk);
+    }
+
+    /// <summary>הכרעה טהורה: הוכחת hash מתקבלת רק בלי שירות מותקן, או כשהוא מופסק בפועל (localOk נבדק עצלנית)</summary>
+    internal static bool ProofAcceptable(bool serviceInstalled, bool serviceStopped, Func<bool> localOk) =>
+        !serviceInstalled ? localOk() : serviceStopped && localOk();
+
+    /// <summary>צריכת טוקן חירום מול השירות (חד-פעמי). שירות לא מותקן/מופסק: טוקן לא תקף (נשאר נעול). לא עונה: מנסים שוב ואז נשארים נעולים</summary>
+    internal static bool VerifyEmergencyToken(string token)
+    {
+        if (!HardLock.ServiceInstalled()) return false;
         for (int i = 0; ; i++)
         {
             bool? r = null;
-            try { r = HardLock.RecoveryProofCheck(proofs); } catch (Exception ex) { Config.Log("emergency proof: " + ex.Message); }
+            try { r = HardLock.RecoveryTokenConsume(token); } catch (Exception ex) { Config.Log("emergency token: " + ex.Message); }
             if (r == true) return true;
-            if (ServiceStopped()) return LocalOk();
-            if (r == false || i >= 2) return false; // השירות ענה והוכחה שגויה / לא עונה: נשארים נעולים
+            if (r == false || ServiceStopped() || i >= 2) return false;
             Thread.Sleep(1000);
         }
+    }
+
+    private static bool EmergencyReleaseToken(string token)
+    {
+        if (!VerifyEmergencyToken(token)) return false;
+        EndTempUnlockLocal("ביטול חירום בקוד שחזור", relock: false);
+        Release();
+        Config.Log("kiosk: הנעילה בוטלה בקובץ סימון חירום (טוקן חד-פעמי מהשירות)");
+        return true;
     }
 
     private static bool EmergencyReleaseProof(string[] proofs)

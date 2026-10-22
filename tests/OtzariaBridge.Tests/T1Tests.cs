@@ -76,15 +76,16 @@ public class T1Tests
     }
 
     [Theory]
-    [InlineData(false, true, true, true, true)]     // גשר של השירות בנעילה נאכפת
-    [InlineData(false, true, false, true, false)]   // גשר מנתיב השירות שלא הופעל ע"י השירות, בנעילה נאכפת: סירוב
-    [InlineData(false, true, false, false, true)]   // בלי נעילה נאכפת: גשר מנתיב השירות מספיק
-    [InlineData(false, false, true, false, false)]  // תהליך משתמש רגיל: סירוב תמיד (הצינור פתוח לכולם: זיוף חתימה)
-    [InlineData(true, false, false, true, true)]    // מנהל מורם
-    public void ClientMaySign_matrix(bool admin, bool pathOk, bool own, bool enforced, bool expected)
+    [InlineData(false, true, true, false, true)]    // גשר של השירות
+    [InlineData(false, true, false, false, false)]  // גשר מנתיב השירות שלא הופעל ע"י השירות וללא סיסמה: סירוב (U1: נתיב לבדו לא מספיק)
+    [InlineData(false, true, false, true, true)]    // מנתיב השירות עם סיסמת נעילה נכונה בבקשה
+    [InlineData(false, false, false, true, false)]  // סיסמה בלי נתיב השירות: סירוב
+    [InlineData(false, false, false, false, false)] // תהליך משתמש רגיל: סירוב תמיד (הצינור פתוח לכולם: זיוף חתימה)
+    [InlineData(true, false, false, false, true)]   // מנהל מורם
+    public void ClientMaySign_matrix(bool admin, bool pathOk, bool own, bool passwordOk, bool expected)
     {
         // WHY: config-sign הוא אורקל חתימה; בלי הגבלה כל תהליך משתמש היה חותם config מזויף
-        Assert.Equal(expected, ConfigSealKey.ClientMaySign(admin, pathOk, own, enforced));
+        Assert.Equal(expected, ConfigSealKey.ClientMaySign(admin, pathOk, own, passwordOk));
     }
 
     [Fact]
