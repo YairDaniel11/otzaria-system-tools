@@ -28,11 +28,6 @@ public static class Program
     [STAThread]
     public static int Main(string[] args)
     {
-        string Arg(string name)
-        {
-            int i = Array.IndexOf(args, name);
-            return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
-        }
         bool Has(string name) => Array.IndexOf(args, name) >= 0;
 
         try
@@ -60,15 +55,25 @@ public static class Program
             if (Has("--unlock"))
             {
                 AttachConsole(-1);
-                bool ok = Kiosk.EmergencyUnlock(Arg("--unlock") ?? "");
-                ok = HardLock.EmergencyDisable(Arg("--unlock") ?? "") || ok;
+                // S1 ממצא 4: קוד השחזור מ-stdin/הקלדה מוסתרת (שורת פקודה נחשפת לכל משתמש). "--unlock CODE" נשאר לתאימות, עם אזהרה
+                string code = CliSecret.Resolve(args, "--unlock",
+                    Lang.T("קוד שחזור: ", "Recovery code: "),
+                    Lang.T("אזהרה: קוד בשורת הפקודה נחשף לתהליכים אחרים. העדיפו --unlock (בלי ערך) או --unlock - עם stdin.",
+                           "Warning: a code on the command line is visible to other processes. Prefer --unlock with no value, or --unlock - with stdin."));
+                bool ok = Kiosk.EmergencyUnlock(code);
+                ok = HardLock.EmergencyDisable(code) || ok;
                 Console.WriteLine(ok ? Lang.T("הנעילה בוטלה.", "Lock mode turned off.") : Lang.T("קוד שחזור שגוי.", "Wrong recovery code."));
                 return ok ? 0 : 2;
             }
             if (Has("--uninstall"))
             {
                 AttachConsole(-1);
-                string err = Installer.Uninstall(Arg("--password"));
+                // S1 ממצא 4: כמו --unlock: סיסמה מ-stdin/הקלדה מוסתרת; "--password X" נשאר לתאימות עם אזהרה
+                string pwd = CliSecret.Resolve(args, "--password",
+                    Lang.T("סיסמה: ", "Password: "),
+                    Lang.T("אזהרה: סיסמה בשורת הפקודה נחשפת לתהליכים אחרים. העדיפו --password (בלי ערך) או --password - עם stdin.",
+                           "Warning: a password on the command line is visible to other processes. Prefer --password with no value, or --password - with stdin."));
+                string err = Installer.Uninstall(pwd);
                 Console.WriteLine(err ?? Lang.T("הגשר הוסר.", "The bridge was removed."));
                 return err == null ? 0 : 2;
             }

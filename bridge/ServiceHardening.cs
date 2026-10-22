@@ -1,7 +1,11 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
+using System.Text.Json.Nodes;
+using Microsoft.Win32.SafeHandles;
 
 namespace OtzariaBridge;
 
@@ -155,14 +159,17 @@ internal sealed class AttemptLimiter
     }
 
     /// <summary>
-    /// האם מותר לבדוק סיסמה עכשיו. מחוץ להשהיה — תמיד. בתוך ההשהיה — רק ניסיון בדיקה אחד בכל probe (ומתעד אותו)
+    /// האם מותר לבדוק סיסמה עכשיו. מחוץ להשהיה — תמיד. בתוך ההשהיה — רק כשחלף מרווח ה-probe מאז הניסיון הכושל האחרון.
+    /// WHY (S1 ממצא 5): בעבר הבדיקה עצמה "שרפה" את חלון ה-probe, ולכן תוקף באותו SID שרק קורא ל-verify בלולאה תפס כל חלון
+    /// וסיסמה נכונה קיבלה too_many. עכשיו CanTry לא משנה מצב: את החלון צורך רק ניסיון שנכשל בפועל (Fail), והצלחה לא נחסמת ולא צורכת.
+    /// (הטיפול בשירות סדרתי תחת _gate, כך שניחושים מקבילים לא עוקפים את המרווח.)
     /// </summary>
     internal bool CanTry(string key, long nowMs, out int secondsLeft)
     {
         secondsLeft = 0;
         if (key == null || !_d.TryGetValue(key, out var e) || e.Until <= nowMs) return true;
         long probe = Math.Max(2000, (e.Until - e.Last) / 4);
-        if (nowMs - e.Probe >= probe) { e.Probe = nowMs; return true; }
+        if (nowMs - e.Probe >= probe) return true;
         secondsLeft = (int)Math.Ceiling(Math.Min(e.Until - nowMs, e.Probe + probe - nowMs) / 1000.0);
         return false;
     }
@@ -178,8 +185,8 @@ internal sealed class AttemptLimiter
         {
             int exp = Math.Min(e.Fails - _max, 20);
             e.Until = nowMs + Math.Min(_lockMs << exp, _maxLockMs);
-            e.Probe = nowMs;
         }
+        e.Probe = nowMs; // ניסיון כושל צורך את חלון ה-probe (ר' CanTry)
         _d[key] = e;
     }
 
@@ -409,8 +416,10 @@ internal static class ProcessDacl
     /// <summary>
     /// מקשיח את חוטי התהליכים הנתונים (THREAD_TERMINATE/SUSPEND_RESUME/SET_CONTEXT חסומים למשתמש). WHY: ה-DACL של חוט חדש
     /// נגזר מ-DefaultDacl של הטוקן ולא מה-DACL של התהליך — משתמש היה מקפיא/הורג חוט בודד של הגשר (למשל חוט הנעילה).
-    /// הסריקה חוזרת כל שנייה, ולכן חוט חדש חשוף עד שנייה אחת לכל היותר.
+    /// S1 ממצא 1: הסריקה רצה בטיימר ייעודי כל ThreadHardenIntervalMs (היה שנייה בתוך WatchBridge), ולכן חוט חדש חשוף עד ~200ms.
+    /// החלון לא נסגר לגמרי: סגירה מלאה דורשת TokenDefaultDacl (UseTokenDefaultDacl) שנשאר כבוי מאחורי דגל עד בדיקה בסשן חי.
     /// </summary>
+    internal const int ThreadHardenIntervalMs = 200;
     internal static void HardenThreads(ISet<int> pids)
     {
         if (pids.Count == 0) return;
@@ -512,5 +521,161 @@ internal static class InstallTrust
             return "העתקת ה-exe נכשלה: " + ex.Message;
         }
         return null;
+    }
+}
+
+// ============================================================================
+// S1: הקשחות שירות נוספות (QA עוין). לוגיקה טהורה ככל האפשר, לבדיקה ב-tests\OtzariaBridge.Tests\S1Tests.cs
+// ============================================================================
+
+/// <summary>מדיניות סיסמה אחת לשירות ולגשר (WHY: בשירות היה מינימום 6 מול 10 בגשר, ומי שפונה ישירות ל-pipe עקף את המינימום)</summary>
+internal static class PasswordPolicy
+{
+    internal const int MinLength = 10;
+    internal static bool IsValid(string pw) => pw != null && pw.Length >= MinLength;
+}
+
+/// <summary>
+/// מפתח דלי ניסיונות סיסמה. WHY (S1 ממצא 5): תוקף באותו SID עם סקריפט גולמי לא יכול לשרוף את הדלי של הגשר המוגן שהשירות עצמו הפעיל
+/// (תהליך עם DACL, נתיב = ServiceExe, PID ברשימת הגשרים של השירות). מנהל מורם: דלי נפרד כמו קודם.
+/// </summary>
+internal static class ClientBuckets
+{
+    internal static string Key(string sid, bool admin, bool ownBridge) =>
+        (sid ?? "unknown") + (admin ? "|elevated" : "") + (ownBridge ? "|bridge" : "");
+}
+
+internal enum StateLoad { Missing, Ok, Corrupt }
+
+/// <summary>
+/// שמירה/טעינה אטומית של hardlock.json. WHY (S1 ממצא 6): Save בלי Flush ובלי גיבוי, ו-Load שבולע חריגה והופך קובץ פגום ל"לא מוגדר" (= פתוח).
+/// עכשיו: כתיבה לקובץ זמני + Flush(true) + גיבוי של הקובץ התקין האחרון (.bak) + החלפה; קובץ קיים ופגום ללא גיבוי = Corrupt (נשארים נעולים).
+/// </summary>
+internal static class StateStore
+{
+    internal static string BackupPath(string path) => path + ".bak";
+
+    private static JsonObject TryParse(string path)
+    {
+        try { return File.Exists(path) ? JsonNode.Parse(File.ReadAllText(path)) as JsonObject : null; }
+        catch { return null; }
+    }
+
+    internal static JsonObject Read(string path, out StateLoad status, out bool restoredFromBackup)
+    {
+        restoredFromBackup = false;
+        string bak = BackupPath(path);
+        bool mainExists = File.Exists(path), bakExists = File.Exists(bak);
+        var main = TryParse(path);
+        if (main != null) { status = StateLoad.Ok; return main; }
+        var b = TryParse(bak);
+        if (b != null) { status = StateLoad.Ok; restoredFromBackup = true; return b; }
+        status = (mainExists || bakExists) ? StateLoad.Corrupt : StateLoad.Missing;
+        return null;
+    }
+
+    internal static void WriteAtomic(string path, string json)
+    {
+        string dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        string tmp = path + ".tmp";
+        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            var bytes = new UTF8Encoding(false).GetBytes(json);
+            fs.Write(bytes, 0, bytes.Length);
+            fs.Flush(true); // לדיסק, לא רק למטמון מערכת ההפעלה
+        }
+        if (TryParse(path) != null) File.Copy(path, BackupPath(path), true); // מגבים רק קובץ תקין (לא דורסים גיבוי טוב בפגום)
+        File.Move(tmp, path, true);
+    }
+}
+
+/// <summary>
+/// כלים שהשירות הורג כשהנעילה נאכפת. WHY (S1 ממצא 2): חסימת taskmgr/regedit דרך HKU\SID\...\Policies\System היא מפתח שהמשתמש בעלים שלו
+/// ויכול לשים עליו Deny ל-SYSTEM (הכתיבה נכשלת בשקט). ההריגה בשירות היא שכבה שלא תלויה במפתח. תהליך מורם (מנהל שהזדהה ב-UAC) נחסך: מסלול חירום.
+/// נתיב מ-System32/SysWOW64/%windir% בלבד: חתימה לא נבדקת כי התיקיות האלה כתיבות למנהלים בלבד.
+/// </summary>
+internal static class ToolGuard
+{
+    internal static readonly string[] Names = { "taskmgr", "regedit", "mmc" };
+
+    internal static bool ShouldKill(string name, string imagePath, bool elevated, string windowsDir)
+    {
+        if (elevated || string.IsNullOrEmpty(imagePath) || string.IsNullOrEmpty(windowsDir)) return false;
+        if (!Names.Contains(name, StringComparer.OrdinalIgnoreCase)) return false;
+        string exe = name + ".exe";
+        foreach (string sub in new[] { "System32", "SysWOW64", "" })
+            if (BridgeProcs.SamePath(imagePath, Path.Combine(windowsDir, sub, exe))) return true;
+        return false;
+    }
+}
+
+/// <summary>
+/// אכיפת אתחול (Safe Mode/WinRE/bcd) ללא תלות בנעילה "נאכפת". WHY (S1 ממצא 3): בזמן פתיחה זמנית/מחוץ לחלון תזמון Safe Mode ו-WinRE היו נפתחים,
+/// ואתחול ל-Safe Mode בחלון כזה עוקף את הגשר. עכשיו: כל עוד השירות Configured (או מצבו פגום) ההקשחה נשארת. שחרור רק בהסרה מלאה (uninstall בסיסמה).
+/// </summary>
+internal static class BootPolicy
+{
+    internal static bool ShouldHarden(bool configured, bool uninstalling) => configured && !uninstalling;
+}
+
+/// <summary>סודות משורת הפקודה (S1 ממצא 4): שורת פקודה נחשפת לכל משתמש (Task Manager/WMI/היסטוריה); מעדיפים stdin/הקלדה מוסתרת</summary>
+internal static class CliSecret
+{
+    /// <summary>הערך שאחרי הדגל בשורת הפקודה, או null אם אין / "-" (stdin) / הערך הבא הוא דגל</summary>
+    internal static string InlineValue(string[] args, string name)
+    {
+        int i = Array.IndexOf(args, name);
+        if (i < 0 || i + 1 >= args.Length) return null;
+        string v = args[i + 1];
+        return v == "-" || v.StartsWith("--") ? null : v;
+    }
+
+    [DllImport("kernel32.dll")] private static extern IntPtr GetStdHandle(int n);
+    [DllImport("kernel32.dll")] private static extern uint GetFileType(IntPtr h);
+    [DllImport("kernel32.dll")] private static extern bool GetConsoleMode(IntPtr h, out uint mode);
+    [DllImport("kernel32.dll")] private static extern bool SetConsoleMode(IntPtr h, uint mode);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ReadConsoleW(IntPtr h, char[] buf, uint n, out uint read, IntPtr reserved);
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr h);
+
+    /// <summary>קורא סוד: stdin כשהוא מופנה (pipe/קובץ), אחרת הקלדה בלי הד מהקונסול (CONIN$). null = לא התקבל</summary>
+    internal static string ReadSecret(string prompt)
+    {
+        try
+        {
+            IntPtr h = GetStdHandle(-10);
+            uint ft = h == IntPtr.Zero || h == new IntPtr(-1) ? 0 : GetFileType(h);
+            if (ft == 1 || ft == 3) // DISK / PIPE
+            {
+                using var sr = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
+                return sr.ReadLine()?.TrimEnd('\r');
+            }
+            Console.Write(prompt);
+            IntPtr con = CreateFileW("CONIN$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+            if (con == IntPtr.Zero || con == new IntPtr(-1)) return null;
+            try
+            {
+                bool hadMode = GetConsoleMode(con, out uint mode);
+                if (hadMode) SetConsoleMode(con, mode & ~0x4u); // בלי ECHO
+                var buf = new char[512];
+                bool ok = ReadConsoleW(con, buf, (uint)buf.Length, out uint n, IntPtr.Zero);
+                if (hadMode) SetConsoleMode(con, mode);
+                Console.WriteLine();
+                return ok ? new string(buf, 0, (int)n).TrimEnd('\r', '\n') : null;
+            }
+            finally { CloseHandle(con); }
+        }
+        catch { return null; }
+    }
+
+    /// <summary>ערך מהדגל (עם אזהרה כשמופיע בשורת הפקודה: תאימות לאחור), אחרת stdin/הקלדה. לעולם לא null</summary>
+    internal static string Resolve(string[] args, string name, string prompt, string warning)
+    {
+        string inline = InlineValue(args, name);
+        if (inline != null) { Console.WriteLine(warning); return inline; }
+        return ReadSecret(prompt) ?? "";
     }
 }

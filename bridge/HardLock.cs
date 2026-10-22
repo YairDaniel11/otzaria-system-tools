@@ -591,8 +591,7 @@ public static class HardLock
     {
         try
         {
-            Directory.CreateDirectory(DataDir);
-            SecureDir(DataDir);
+            SecureDir(DataDir); // יוצר ומאבטח אטומית (בלי CreateDirectory קודם)
             SvcLog("install: מתחיל, גרסה " + Program.Version);
             RepairUserPoliciesKeyAcl();
 
@@ -718,33 +717,64 @@ public static class HardLock
         SvcLog("sc " + args.Split(' ')[0] + ": " + outp.Trim().Replace("\r\n", " "));
     }
 
-    /// <summary>התיקייה: SYSTEM ומנהלים — שליטה מלאה; משתמשים — קריאה בלבד</summary>
-    private static void SecureDir(string dir)
+    /// <summary>ה-ACL של DataDir: SYSTEM ומנהלים בלבד, בעלים = מנהלים, בלי ירושה</summary>
+    internal static DirectorySecurity BuildDirSecurity()
     {
-        // junction/symlink שנוצר מראש (מיועד להפנות את ה-ACL של השירות ליעד אחר): מסירים את הקישור עצמו (לא רקורסיבי — לא נוגע ביעד)
-        try
-        {
-            if (IsReparse(dir)) { Directory.Delete(dir, false); Directory.CreateDirectory(dir); SvcLog("secure-dir: הוסר reparse point מ-" + dir); }
-        }
-        catch (Exception ex) { SvcLog("secure-dir reparse: " + ex.Message); }
-        // תיקייה שנוצרה מראש בידי משתמש רגיל (הוא נשאר הבעלים ויכול לשנות הרשאות) — מוחקים ויוצרים מחדש
-        try
-        {
-            var owner = new DirectoryInfo(dir).GetAccessControl().GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-            if (owner != null && !owner.IsWellKnown(WellKnownSidType.LocalSystemSid) && !owner.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid))
-            {
-                Directory.Delete(dir, true);
-                Directory.CreateDirectory(dir);
-            }
-        }
-        catch (Exception ex) { SvcLog("secure-dir owner: " + ex.Message); }
         var ds = new DirectorySecurity();
         ds.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
         ds.SetAccessRuleProtection(true, false);
         var inherit = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
         ds.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
         ds.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
-        new DirectoryInfo(dir).SetAccessControl(ds);
+        return ds;
+    }
+
+    /// <summary>בעלים מהימן של DataDir: SYSTEM או מנהלים. כל בעלים אחר יכול לשנות הרשאות</summary>
+    internal static bool IsTrustedOwner(SecurityIdentifier owner) =>
+        owner != null && (owner.IsWellKnown(WellKnownSidType.LocalSystemSid) || owner.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid));
+
+    /// <summary>
+    /// התיקייה: SYSTEM ומנהלים בלבד. WHY (S1 ממצא 7): קודם delete+create+set השאיר חלון שבו התיקייה החדשה ירשה הרשאות של ProgramData
+    /// (משתמשים יוצרים/כותבים) ותוקף יכול היה לזרוע בה קבצים/junction. עכשיו היא נוצרת עם ה-DACL כבר ברגע היצירה (Create(DirectorySecurity)),
+    /// תיקייה קיימת עם בעלים לא מהימן או reparse מוזזת הצידה, ואחרי היצירה מאמתים שוב (מרוץ: תוקף שיצר אותה מחדש) בלולאה חסומה.
+    /// </summary>
+    private static void SecureDir(string dir)
+    {
+        var ds = BuildDirSecurity();
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                if (Directory.Exists(dir))
+                {
+                    bool bad = IsReparse(dir);
+                    if (!bad)
+                    {
+                        var owner = new DirectoryInfo(dir).GetAccessControl().GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+                        bad = !IsTrustedOwner(owner);
+                    }
+                    if (bad)
+                    {
+                        // reparse: מסירים את הקישור עצמו (לא נוגעים ביעד). תיקייה זרה: מזיזים הצידה (לא רקורסיבית דרך junction פנימי), ואם לא הצליח מוחקים
+                        if (IsReparse(dir)) Directory.Delete(dir, false);
+                        else
+                        {
+                            try { Directory.Move(dir, dir + ".untrusted-" + Guid.NewGuid().ToString("N")); }
+                            catch { Directory.Delete(dir, true); }
+                        }
+                        SvcLog("secure-dir: תיקייה לא מהימנה הוסרה/הוזזה: " + dir);
+                    }
+                }
+                if (!Directory.Exists(dir)) new DirectoryInfo(dir).Create(ds); // ה-DACL נקבע אטומית ביצירה
+                // אימות אחרי היצירה: אם תוקף הקדים ויצר אותה, הלולאה תחזור ותזיז אותה
+                var after = new DirectoryInfo(dir).GetAccessControl().GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+                if (IsReparse(dir) || !IsTrustedOwner(after)) continue;
+                new DirectoryInfo(dir).SetAccessControl(ds); // idempotent: מיישר גם תיקייה קיימת מהימנה
+                return;
+            }
+            catch (Exception ex) { SvcLog("secure-dir: " + ex.Message); }
+        }
+        throw new InvalidOperationException("לא ניתן לאבטח את תיקיית הנתונים " + dir);
     }
 
     /// <summary>האם התיקיה היא reparse point (junction/symlink)</summary>
@@ -818,6 +848,14 @@ public class HardLockService : ServiceBase
 
     private readonly object _gate = new();
     private JsonObject _state;
+    // S1 ממצא 6: קובץ המצב קיים אך פגום (ואין גיבוי תקין) => fail-closed: נחשב מוגדר ונעול, שום סיסמה לא עובדת, ורק מנהל מורם יכול להסיר/להגדיר מחדש
+    private volatile bool _corrupt;
+    private volatile bool _uninstalling; // S1 ממצא 3: מפסיק את אכיפת האתחול בהסרה מלאה
+    private System.Threading.Timer _threadTimer;
+    private readonly object _threadGate = new();
+    private volatile HashSet<int> _guardPids = new(); // PIDs של גשרים אמיתיים (נתיב = ServiceExe) לחוטים; מוחלף כולו (copy-on-write)
+    private volatile HashSet<int> _ownSnapshot = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _policyIssues = new(); // sid -> סיבה; ממצא גלוי בסטטוס
     private System.Threading.Timer _timer;
     private CancellationTokenSource _cts;
     // הגבלת ניסיונות סיסמה לפי לקוח (SID + מורם), לא גלובלית — ר' AttemptLimiter. נקרא תחת _gate
@@ -869,6 +907,7 @@ public class HardLockService : ServiceBase
         for (int i = 0; i < PipeListeners; i++) Task.Run(() => PipeLoop(_cts.Token));
         _timer = new System.Threading.Timer(_ => Tick(), null, 2000, 5000);
         _bridgeTimer = new System.Threading.Timer(_ => WatchBridge(), null, 1000, 1000);
+        _threadTimer = new System.Threading.Timer(_ => ThreadGuardTick(), null, 200, ProcessDacl.ThreadHardenIntervalMs);
         HardLock.SvcLog("service: עלה (גרסה " + Program.Version + "), נעילה " + (Active ? "פעילה" : "כבויה"));
     }
 
@@ -877,10 +916,12 @@ public class HardLockService : ServiceBase
         _cts?.Cancel();
         _timer?.Dispose();
         _bridgeTimer?.Dispose();
+        _threadTimer?.Dispose();
         // עצירה יזומה של השירות (sc stop): אף אחד אחר כבר לא יאכוף, ו-HKEY_USERS של המשתמשים נשאר עם
         // DisableTaskMgr/DisableRegistryTools (וחסימת USB) - מנהל המשימות ועורך הרישום חסומים בלי שום נעילה.
         // מנקים בעצירה. הנעילה השמורה (active) לא משתנה, ולכן כשהשירות יעלה שוב ה-Tick הראשון יאכוף מחדש
-        try { EnforcePolicies(false); EnforceUsb(false); BootHardening.Enforce(false); } // BOOTHARDENING: מחזיר SafeBoot/WinRE ומאפס _lastActive
+        // S1 ממצא 3: הקשחת האתחול (SafeBoot/WinRE/bcd) לא משתחררת בעצירה; רק בהסרה מלאה (SelfUninstall)
+        try { EnforcePolicies(false); EnforceUsb(false); }
         catch (Exception ex) { HardLock.SvcLog("stop cleanup: " + ex.Message); }
         HardLock.SvcLog("service: נעצר");
     }
@@ -891,14 +932,15 @@ public class HardLockService : ServiceBase
         _cts?.Cancel();
         _timer?.Dispose();
         _bridgeTimer?.Dispose();
+        _threadTimer?.Dispose();
         HardLock.SvcLog("service: כיבוי מחשב");
     }
 
     // ---------- מצב ----------
 
     /// <summary>הנעילה "דלוקה" (ידנית או בתזמון). האכיפה בפועל — Enforced, שמתחשב גם בפתיחה זמנית</summary>
-    private bool Active => _state["active"]?.GetValue<bool>() == true;
-    private bool Configured => !string.IsNullOrEmpty(_state["passwordHash"]?.ToString());
+    private bool Active => _corrupt || _state["active"]?.GetValue<bool>() == true;
+    private bool Configured => _corrupt || !string.IsNullOrEmpty(_state["passwordHash"]?.ToString());
 
     // ---------- פתיחה זמנית: השירות הוא מקור האמת לסוד ולזמן הסיום ----------
     // tempUnlockUntil נשמר רק כאן (hardlock.json, כתיב רק ל-SYSTEM ולמנהלים), ולכן עריכת config.json לא מאריכה.
@@ -978,8 +1020,20 @@ public class HardLockService : ServiceBase
 
     private void Load()
     {
-        try { _state = File.Exists(StateFile) ? JsonNode.Parse(File.ReadAllText(StateFile)) as JsonObject : null; }
-        catch (Exception ex) { HardLock.SvcLog("load: " + ex.Message); }
+        _state = StateStore.Read(StateFile, out var st, out bool restored);
+        _corrupt = st == StateLoad.Corrupt;
+        if (_corrupt)
+        {
+            // לא דורסים ולא מוחקים: משמרים עותק לבדיקה. נשארים נעולים (Configured+Active) עד שמנהל מורם מגדיר מחדש/מסיר
+            try { if (File.Exists(StateFile)) File.Copy(StateFile, StateFile + ".corrupt", true); } catch { }
+            HardLock.SvcLog("load: קובץ המצב פגום ואין גיבוי תקין. נשארים נעולים (fail-closed); נדרש מנהל מורם (setup/uninstall)");
+        }
+        else if (restored)
+        {
+            HardLock.SvcLog("load: קובץ המצב הראשי חסר/פגום; שוחזר מהגיבוי");
+            _state ??= new JsonObject();
+            try { Save(); } catch (Exception ex) { HardLock.SvcLog("load: כתיבת השחזור: " + ex.Message); }
+        }
         _state ??= new JsonObject();
     }
 
@@ -991,10 +1045,10 @@ public class HardLockService : ServiceBase
 
     private void Save()
     {
-        Directory.CreateDirectory(HardLock.DataDir);
-        string tmp = StateFile + ".tmp";
-        File.WriteAllText(tmp, _state.ToJsonString(SaveOptions));
-        File.Move(tmp, StateFile, true);
+        // במצב פגום לא כותבים (לא דורסים את הראיה/הגיבוי); setup של מנהל מורם מנקה את הדגל לפני Save
+        if (_corrupt) return;
+        // אטומי: זמני + Flush(true) + גיבוי של התקין האחרון + החלפה (ר' StateStore)
+        StateStore.WriteAtomic(StateFile, _state.ToJsonString(SaveOptions));
     }
 
     // החישוב הקריפטוגרפי הטהור (Hash/Matches/נורמליזציה) משותף עם Kiosk דרך Secret.cs
@@ -1005,6 +1059,7 @@ public class HardLockService : ServiceBase
     /// <summary>null = תקין; אחרת תשובת שגיאה</summary>
     private JsonObject Check(string password, bool allowRecovery)
     {
+        if (_corrupt) return Err("corrupt", "קובץ המצב של רכיב ההקשחה פגום והמערכת נשארת נעולה. נדרש מנהל מורם להגדרה מחדש/הסרה");
         if (!Configured) return Err("bad_request", "רכיב ההקשחה עדיין לא הוגדר");
         if (!_limiter.CanTry(_clientKey, NowMs, out int wait))
             return Err("too_many", $"יותר מדי ניסיונות שגויים. נסו שוב בעוד {wait} שניות");
@@ -1272,7 +1327,15 @@ public class HardLockService : ServiceBase
                 catch { admin = false; }
                 _clientAdmin = admin;
                 // דלי ניסיונות: SID + מורם/לא מורם (לא PID — תהליך חדש היה מאפס את החסימה); SID לא ידוע → דלי משותף
-                _clientKey = (sidText ?? "unknown") + (admin ? "|elevated" : "");
+                // S1 ממצא 5: גשר שהשירות עצמו הפעיל (PID ברשימה + נתיב = ServiceExe) מקבל דלי נפרד, ולכן סקריפט גולמי באותו SID לא שורף את הדלי שלו
+                bool ownBridge = false;
+                try
+                {
+                    if (GetNamedPipeClientProcessId(pipe.SafePipeHandle.DangerousGetHandle(), out uint bp) && _ownSnapshot.Contains((int)bp))
+                        ownBridge = BridgeProcs.SamePath(BridgeProcs.ImagePath((int)bp), HardLock.ServiceExe);
+                }
+                catch { }
+                _clientKey = ClientBuckets.Key(sidText, admin, ownBridge);
                 _clientPid = 0; _clientSession = 0;
                 try
                 {
@@ -1318,11 +1381,13 @@ public class HardLockService : ServiceBase
                         ["otzariaPath"] = _state["otzariaPath"]?.ToString() ?? "", ["sessions"] = _sessions,
                         ["policy"] = PolicyNode(),
                         ["tempUnlock"] = TempNode(),
+                        ["stateCorrupt"] = _corrupt,
+                        ["enforcementIssues"] = new JsonArray(_policyIssues.Select(kv => (JsonNode)(kv.Key + ": " + kv.Value)).ToArray()),
                     };
 
                 case "setup":
-                    if (Configured) return Err("bad_request", "כבר הוגדר");
-                    // ביקורת #30 ממצא 2: רק מנהל (תהליך מורם) רשאי להגדיר לראשונה
+                    if (Configured && !_corrupt) return Err("bad_request", "כבר הוגדר");
+                    // ביקורת #30 ממצא 2: רק מנהל (תהליך מורם) רשאי להגדיר לראשונה (וגם לשחזר מצב פגום: S1 ממצא 6)
                     if (!_clientAdmin) return Err("forbidden", "הגדרה ראשונה דורשת הרשאות מנהל");
                     foreach (var k in new[] { "passwordHash", "salt", "recoveryHash", "recoverySalt" })
                     {
@@ -1331,6 +1396,7 @@ public class HardLockService : ServiceBase
                         _state[k] = v;
                     }
                     if (q["twoFactor"] is JsonValue tfSetup) _state["twoFactor"] = tfSetup.GetValue<bool>();
+                    _corrupt = false; // הגדרה מחדש בידי מנהל מורם מחליפה את המצב הפגום
                     Save();
                     HardLock.SvcLog("service: הוגדרו סיסמה וקוד שחזור");
                     return Ok();
@@ -1370,7 +1436,7 @@ public class HardLockService : ServiceBase
                     if ((e = Check(q["old"]?.ToString(), true)) != null) return e;
                     if ((e = Need2fa(q, q["old"]?.ToString())) != null) return e;
                     string np = q["new"]?.ToString() ?? "";
-                    if (np.Length < 6) return Err("bad_request", "הסיסמה חייבת להכיל לפחות 6 תווים");
+                    if (!PasswordPolicy.IsValid(np)) return Err("bad_request", $"הסיסמה חייבת להכיל לפחות {PasswordPolicy.MinLength} תווים"); // S1 ממצא 8: זהה לגשר
                     if (Matches(np, "tempUnlockHash", "tempUnlockSalt")) return Err("bad_request", "סיסמת הנעילה חייבת להיות שונה מסיסמת הפתיחה הזמנית");
                     byte[] salt = RandomNumberGenerator.GetBytes(16);
                     _state["salt"] = Convert.ToBase64String(salt);
@@ -1511,8 +1577,17 @@ public class HardLockService : ServiceBase
                     return Ok();
 
                 case "uninstall":
-                    if (Configured && (e = Check(pw, true)) != null) return e;
-                    if (Configured && (e = Need2fa(q, pw)) != null) return e;
+                    // S1 ממצא 6: מצב לא מוגדר/פגום כבר לא פותח בלי אימות: נדרש מנהל מורם (מסלול חירום: cmd מורם עם --uninstall, או sc delete)
+                    if (_corrupt || !Configured)
+                    {
+                        if (!_clientAdmin) return Err("forbidden", "הסרה כשהרכיב לא מוגדר/פגום דורשת הרשאות מנהל מורם");
+                    }
+                    else
+                    {
+                        if ((e = Check(pw, true)) != null) return e;
+                        if ((e = Need2fa(q, pw)) != null) return e;
+                    }
+                    _uninstalling = true; // עוצר את אכיפת האתחול (BootPolicy) לפני ההסרה
                     _state["active"] = false;
                     _state["uninstalling"] = true;
                     Save();
@@ -1534,18 +1609,20 @@ public class HardLockService : ServiceBase
         if (Interlocked.Exchange(ref _tickBusy, 1) == 1) return;
         try
         {
-            bool active, blockUsb;
+            bool active, blockUsb, hardenBoot;
             lock (_gate)
             {
                 CheckClockJump();     // שעון שהוזז מעבר ל-2 דקות מבטל פתיחה זמנית (fail-closed)
                 EvaluateSchedule();   // תזמון לפי שעות — עשוי להפעיל/לבטל את הנעילה
                 ExpireTempUnlock();   // פתיחה זמנית שהסתיימה — האכיפה חוזרת כבר בטיק הזה
                 active = Enforced;
+                hardenBoot = BootPolicy.ShouldHarden(Configured, _uninstalling);
                 blockUsb = _state["blockUsbStorage"]?.GetValue<bool>() == true;
             }
             EnforcePolicies(active);
             EnforceUsb(active && blockUsb);
-            BootHardening.Enforce(active); // BOOTHARDENING: SafeBoot/WinRE/bcdedit בזמן נעילה, והחזרה בשחרור (לא זורקת)
+            // S1 ממצא 3: Safe Mode/WinRE/bcd נשארים מוקשחים כל עוד השירות Configured (לא רק כשהנעילה נאכפת); שחרור בהסרה מלאה בלבד
+            BootHardening.Enforce(hardenBoot);
             // הגשר נבדק ב-WatchBridge (כל שנייה) ולא כאן (כל 5 שניות): חלון ההרמה מחדש קוצר
         }
         catch (Exception ex) { HardLock.SvcLog("tick: " + ex.Message); }
@@ -1629,9 +1706,7 @@ public class HardLockService : ServiceBase
             {
                 if (active)
                 {
-                    using var k = Registry.Users.CreateSubKey(sid + "\\" + PoliciesSub);
-                    foreach (var name in new[] { "DisableTaskMgr", "DisableRegistryTools" })
-                        if (!(k.GetValue(name) is int v && v == 1)) k.SetValue(name, 1, RegistryValueKind.DWord);
+                    if (!ApplyPolicyValues(sid)) { RepairPolicyKeyAcl(sid); ApplyPolicyValues(sid); }
                     if (touched.Add(sid)) changed = true;
                 }
                 else if (touched.Contains(sid))
@@ -1643,7 +1718,7 @@ public class HardLockService : ServiceBase
                     changed = true;
                 }
             }
-            catch (Exception ex) { HardLock.SvcLog("policy " + sid + ": " + ex.Message); }
+            catch (Exception ex) { _policyIssues[sid] = ex.Message; HardLock.SvcLog("policy " + sid + ": " + ex.Message); }
         }
         if (changed)
         {
@@ -1653,6 +1728,43 @@ public class HardLockService : ServiceBase
                 Save();
             }
         }
+    }
+
+    /// <summary>כותב ומאמת (קריאה חוזרת) את ערכי החסימה. כשל = ממצא גלוי ב-status (enforcementIssues), לא נבלע. true = אומת</summary>
+    private bool ApplyPolicyValues(string sid)
+    {
+        try
+        {
+            using var k = Registry.Users.CreateSubKey(sid + "\\" + PoliciesSub);
+            foreach (var name in new[] { "DisableTaskMgr", "DisableRegistryTools" })
+            {
+                if (!(k.GetValue(name) is int v && v == 1)) k.SetValue(name, 1, RegistryValueKind.DWord);
+                if (!(k.GetValue(name) is int v2 && v2 == 1)) { _policyIssues[sid] = name + " לא אומת"; return false; }
+            }
+            _policyIssues.TryRemove(sid, out _);
+            return true;
+        }
+        catch (Exception ex) { _policyIssues[sid] = ex.Message; return false; }
+    }
+
+    /// <summary>
+    /// ניסיון תיקון (best effort): המשתמש בעלים של המפתח ויכול לשים Deny ל-SYSTEM. מסירים Deny ומחזירים Allow ל-SYSTEM. אם הבעלים יחזור על כך,
+    /// GuardTools (הריגה בשירות) הוא הגיבוי. לא נבדק בחי.
+    /// </summary>
+    private static void RepairPolicyKeyAcl(string sid)
+    {
+        try
+        {
+            using var k = Registry.Users.OpenSubKey(sid + "\\" + PoliciesSub, RegistryKeyPermissionCheck.ReadWriteSubTree, RegistryRights.ChangePermissions | RegistryRights.ReadPermissions);
+            if (k == null) return;
+            var acl = k.GetAccessControl();
+            foreach (RegistryAccessRule r in acl.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                if (r.AccessControlType == AccessControlType.Deny) acl.RemoveAccessRuleSpecific(r);
+            acl.AddAccessRule(new RegistryAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), RegistryRights.FullControl, InheritanceFlags.ContainerInherit, PropagationFlags.None, AccessControlType.Allow));
+            k.SetAccessControl(acl);
+            HardLock.SvcLog("policy " + sid + ": תוקן ACL של Policies\\System");
+        }
+        catch (Exception ex) { HardLock.SvcLog("policy repair " + sid + ": " + ex.Message); }
     }
 
     private void EnforceUsb(bool block)
@@ -1693,7 +1805,7 @@ public class HardLockService : ServiceBase
         {
             bool enforced;
             lock (_gate) enforced = Configured && Enforced;
-            if (enforced) EnsureBridgeInSessions();
+            if (enforced) { EnsureBridgeInSessions(); GuardTools(); }
         }
         catch (Exception ex) { HardLock.SvcLog("bridge watch: " + ex.Message); }
         finally { Monitor.Exit(_bridgeGate); }
@@ -1724,7 +1836,9 @@ public class HardLockService : ServiceBase
         }
         if (untrusted.Count > 0) { procs = procs.Where(p => !untrusted.Any(u => u.Pid == p.Pid)).ToList(); running = BridgeProcs.SessionsRunning(procs, HardLock.ServiceExe); }
         var real = procs.Where(p => BridgeProcs.SamePath(p.Path, HardLock.ServiceExe)).ToList();
-        ProcessDacl.HardenThreads(real.Select(p => p.Pid).ToHashSet());
+        // חוטים: טיימר ייעודי (ThreadGuardTick) כל ~200ms במקום פעם בשנייה (S1 ממצא 1)
+        _guardPids = real.Select(p => p.Pid).Concat(_ownBridges.Keys).ToHashSet();
+        _ownSnapshot = _ownBridges.Keys.ToHashSet();
 
         var now = DateTime.UtcNow;
         foreach (int sid in active)
@@ -1745,10 +1859,55 @@ public class HardLockService : ServiceBase
             _lastLaunch[sid] = now;
             _launchStreak[sid] = streak + 1;
             bool ok = Native.LaunchInSession(sid, "\"" + HardLock.ServiceExe + "\" --background --portable --from-service", out int newPid);
-            if (ok) TrackOwn(newPid);
+            if (ok) { TrackOwn(newPid); _guardPids = _guardPids.Append(newPid).ToHashSet(); _ownSnapshot = _ownBridges.Keys.ToHashSet(); }
             HardLock.SvcLog("service: הגשר לא רץ בחשבון (session " + sid + ") — " + (ok ? "הופעל מחדש" : "ההפעלה נכשלה"));
         }
         foreach (int gone in _sessionSeen.Keys.Except(active).ToList()) { _sessionSeen.Remove(gone); _launchStreak.Remove(gone); _lastLaunch.Remove(gone); }
+    }
+
+    /// <summary>
+    /// S1 ממצא 1: מקשיח את חוטי הגשרים האמיתיים כל ~200ms (היה שנייה). נתיב התמונה נבדק בכל סבב, כדי שמזהה שהוחזר לתהליך אחר לא יקבל DACL.
+    /// נשאר חלון קצר: סגירה מלאה = TokenDefaultDacl (ProcessDacl.UseTokenDefaultDacl), כבוי מאחורי דגל עד בדיקה בסשן Windows חי
+    /// (משפיע על תהליכי-בן ואובייקטי סנכרון של הגשר).
+    /// </summary>
+    private void ThreadGuardTick()
+    {
+        var pids = _guardPids;
+        if (pids == null || pids.Count == 0) return;
+        if (!Monitor.TryEnter(_threadGate)) return;
+        try
+        {
+            var ok = pids.Where(p => BridgeProcs.SamePath(BridgeProcs.ImagePath(p), HardLock.ServiceExe)).ToHashSet();
+            ProcessDacl.HardenThreads(ok);
+        }
+        catch (Exception ex) { HardLock.SvcLog("thread guard: " + ex.Message); }
+        finally { Monitor.Exit(_threadGate); }
+    }
+
+    /// <summary>
+    /// S1 ממצא 2: כשהנעילה נאכפת מורג taskmgr/regedit/mmc של משתמש רגיל (נתיב System32; מורם נחסך). לא תלוי במפתח Policies\System
+    /// שהמשתמש בעלים שלו ויכול לחסום ממנו את SYSTEM.
+    /// </summary>
+    private void GuardTools()
+    {
+        string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        foreach (string name in ToolGuard.Names)
+        {
+            Process[] ps;
+            try { ps = Process.GetProcessesByName(name); } catch { continue; }
+            foreach (var p in ps)
+                using (p)
+                {
+                    try
+                    {
+                        var (_, elevated) = ClientIdentity(p.Id);
+                        if (!ToolGuard.ShouldKill(name, BridgeProcs.ImagePath(p.Id), elevated, win)) continue;
+                        p.Kill();
+                        HardLock.SvcLog($"service: נהרג {name} (pid {p.Id}) בזמן נעילה");
+                    }
+                    catch (Exception ex) { HardLock.SvcLog("tool guard " + name + ": " + ex.Message); }
+                }
+        }
     }
 
     private void TrackOwn(int pid)

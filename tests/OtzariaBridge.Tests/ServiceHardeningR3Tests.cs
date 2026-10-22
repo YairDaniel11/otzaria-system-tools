@@ -49,6 +49,7 @@ public class ServiceHardeningR3Tests
         Assert.False(l.CanTry("u", t + 100, out int wait));      // מיד אחרי: מוגבל קצב
         Assert.True(wait > 0);
         Assert.True(l.CanTry("u", t + 20_000, out _));           // ניסיון בדיקה מותר גם בתוך ההשהיה (סיסמה נכונה לא נחסמת ל-DoS)
+        l.Fail("u", t + 20_000);                                 // S1: את חלון ה-probe צורך רק ניסיון שנכשל בפועל (CanTry לא משנה מצב)
         Assert.False(l.CanTry("u", t + 20_100, out _));          // אבל לא ברצף
         l.Success("u");
         Assert.True(l.CanTry("u", t + 20_200, out _));
