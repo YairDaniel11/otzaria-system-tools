@@ -90,11 +90,77 @@ public static class UpdateApi
     /// גרסת המפתח החתומה ("# keyver=N", ברירת מחדל 1). הגשר דוחה הוצאה שגרסת המפתח שלה נמוכה מ-<see cref="MinKeyVersion"/>:
     /// ביטול: מגדילים את MinKeyVersion בגשר חדש וחותמים ממפתח חדש. אחרי שמפתח דלף, הגשרים הישנים עדיין מוגנים רק אם עודכנו.
     /// </summary>
+    /// <remarks>
+    /// WHY (S4): ברירת מחדל חסר=1 עם Min=1 אומרת שאין ביטול בפועל: תוקף עם מפתח ישן שדלף פשוט משמיט את השורה.
+    /// עכשיו שורת keyver חסרה = 0 (נדחית כשהמינימום >= 1), וה-CI (build.yml) תמיד כותב אותה במפורש.
+    /// נוהל ביטול: (1) מפתח חדש + secret חדש, (2) מעלים כאן MinKeyVersion ל-N+1 ומעלים KEY_VERSION ב-build.yml
+    /// לאותו ערך, (3) משחררים גשר חדש חתום במפתח החדש (גשר ישן לא מכיר את המפתח החדש, ולכן גשר המעבר נחתם במפתח הישן ומכיל
+    /// "ישן;חדש" ב-PublicKeySpkiBase64, ר' רוטציה ב-VerifySignature). ר' docs\SECURITY_NOTES.md.
+    /// </remarks>
     public const int MinKeyVersion = 1;
     public static int SignedKeyVersion(string sums)
     {
         var m = Regex.Match(sums ?? "", @"^#\s*keyver=(\d{1,6})\s*$", RegexOptions.Multiline);
-        return m.Success && int.TryParse(m.Groups[1].Value, out int v) ? v : 1;
+        return m.Success && int.TryParse(m.Groups[1].Value, out int v) ? v : 0;
+    }
+
+    // ===== הורדה מוגבלת (S4) =====
+    // WHY: בלי תקרה, הוצאה זדונית/פגומה (או הפניה לשרת אחר) גורמת להורדת קובץ ענק לזיכרון (GetByteArrayAsync) = DoS,
+    // ובלי allowlist browser_download_url יכול להצביע על מארח כלשהו (SSRF/הדלפת IP) עוד לפני אימות החתימה.
+    public const long MaxSmallDownload = 1L << 20;       // sums/sig/BRIDGE_VERSION: 1MB
+    public const long MaxExeDownload = 300L << 20;       // OtzariaBridge.exe (self-contained, single-file): 300MB
+    private static readonly string[] AllowedHosts =
+    {
+        "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "github-releases.githubusercontent.com",
+    };
+
+    /// <summary>https בלבד, בלי פורט/משתמש חריגים, ומארח מה-allowlist. ל-github.com גם הנתיב חייב להיות הוצאות הריפו הזה</summary>
+    public static bool IsAllowedDownloadUrl(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var u)) return false;
+        if (u.Scheme != Uri.UriSchemeHttps || !u.IsDefaultPort || !string.IsNullOrEmpty(u.UserInfo)) return false;
+        string host = u.IdnHost.ToLowerInvariant();
+        if (!AllowedHosts.Contains(host)) return false;
+        if (host == "github.com")
+            return u.AbsolutePath.StartsWith("/" + Repo + "/releases/download/", StringComparison.OrdinalIgnoreCase);
+        return true;
+    }
+
+    private static readonly HttpClient NoRedirect = CreateNoRedirect();
+    private static HttpClient CreateNoRedirect()
+    {
+        var c = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(10) };
+        c.DefaultRequestHeaders.UserAgent.ParseAdd("OtzariaBridge/" + Program.Version);
+        return c;
+    }
+
+    /// <summary>מוריד עם תקרת גודל (כותרת וגם בפועל), בודק כל קפיצת הפניה מול ה-allowlist (עד 5)</summary>
+    public static async Task<byte[]> DownloadCapped(string url, long maxBytes)
+    {
+        for (int hop = 0; hop < 6; hop++)
+        {
+            if (!IsAllowedDownloadUrl(url)) throw new InvalidOperationException("כתובת הורדה אינה מורשית: " + url);
+            using var res = await NoRedirect.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+            if ((int)res.StatusCode is >= 300 and < 400)
+            {
+                var loc = res.Headers.Location;
+                if (loc == null) throw new InvalidOperationException("הפניה בלי יעד");
+                url = new Uri(new Uri(url), loc).ToString();
+                continue;
+            }
+            res.EnsureSuccessStatusCode();
+            if (res.Content.Headers.ContentLength is long cl && cl > maxBytes) throw new InvalidOperationException("הקובץ גדול מהמותר");
+            using var ms = new MemoryStream();
+            await using var st = await res.Content.ReadAsStreamAsync();
+            var buf = new byte[81920]; int n;
+            while ((n = await st.ReadAsync(buf)) > 0)
+            {
+                if (ms.Length + n > maxBytes) throw new InvalidOperationException("הקובץ גדול מהמותר");
+                ms.Write(buf, 0, n);
+            }
+            return ms.ToArray();
+        }
+        throw new InvalidOperationException("יותר מדי הפניות");
     }
 
     /// <summary>הוצאה שנבחרה מתוך תשובת GitHub</summary>
@@ -126,6 +192,7 @@ public static class UpdateApi
                     string name = a.TryGetProperty("name", out var n) ? n.GetString() : null;
                     string dl = a.TryGetProperty("browser_download_url", out var du) ? du.GetString() : null;
                     if (name == null || dl == null) continue;
+                    if (!IsAllowedDownloadUrl(dl)) continue; // WHY: מארח/נתיב לא מורשים = כאילו הנכס לא קיים (fail-closed ב-Install)
                     if (string.Equals(name, "OtzariaBridge.exe", StringComparison.OrdinalIgnoreCase)) exe = dl;
                     else if (string.Equals(name, SumsAssetName, StringComparison.OrdinalIgnoreCase)) sums = dl;
                     else if (string.Equals(name, SigAssetName, StringComparison.OrdinalIgnoreCase)) sig = dl;
@@ -274,7 +341,7 @@ public static class UpdateApi
             if (rel?.BridgeVerUrl != null)
             {
                 // להצגה בלבד: ההחלטה האמיתית (ב-Install) נשענת על הגרסה החתומה, לא על ההורדה הזו
-                try { latestBridgeVer = Parse((await Http.GetStringAsync(rel.BridgeVerUrl)).Trim()); }
+                try { latestBridgeVer = Parse(System.Text.Encoding.ASCII.GetString(await DownloadCapped(rel.BridgeVerUrl, MaxSmallDownload)).Trim()); }
                 catch { /* ההשוואה תיכשל בבטחה (לא "newer") אם זה נכשל */ }
             }
             var cur = Parse(Program.Version);
@@ -290,6 +357,11 @@ public static class UpdateApi
     public static async Task<object> Install()
     {
         if (Kiosk.IsActive) throw BridgeException.Locked("עדכון הגשר אינו זמין בזמן נעילה. בטלו את הנעילה, עדכנו, והפעילו אותה שוב.");
+        // WHY (S4): כשהשירות מותקן, ה-exe שרץ הוא זה שב-Program Files (רק מנהל כותב). --install של המתקין מעדכן רק את עותק
+        // LOCALAPPDATA, והגשר ממשיך לעלות מ-Program Files: "עדכון מצליח" בלי להחליף כלום. עד שיהיה נתיב עדכון דרך השירות
+        // (op "update-service" ב-pipe, ר' docs\SECURITY_NOTES.md) מציגים כשל ברור במקום הצלחה מדומה.
+        if (Installer.ServiceOwnsRunningExe())
+            throw new BridgeException("failed", "הגשר מותקן כשירות (Program Files). עדכון אוטומטי אינו נתמך במצב זה: הריצו את קובץ ההתקנה העדכני כמנהל (או הסירו והתקינו מחדש את רכיב ההקשחה).", 409);
         var info = await Check(true);
         if (!info.Newer) return new { started = false, message = "הגשר מעודכן (" + info.Current + ")" };
         if (info.ExeUrl == null) throw BridgeException.NotFound("בהוצאה " + info.Tag + " אין קובץ OtzariaBridge.exe");
@@ -300,10 +372,10 @@ public static class UpdateApi
         byte[] sums, bv, data; string sig;
         try
         {
-            sums = await Http.GetByteArrayAsync(info.SumsUrl);
-            sig = await Http.GetStringAsync(info.SigUrl);
-            bv = await Http.GetByteArrayAsync(info.BridgeVerUrl);
-            data = await Http.GetByteArrayAsync(info.ExeUrl);
+            sums = await DownloadCapped(info.SumsUrl, MaxSmallDownload);
+            sig = System.Text.Encoding.ASCII.GetString(await DownloadCapped(info.SigUrl, MaxSmallDownload));
+            bv = await DownloadCapped(info.BridgeVerUrl, MaxSmallDownload);
+            data = await DownloadCapped(info.ExeUrl, MaxExeDownload);
         }
         catch (Exception ex) { throw new BridgeException("internal", "ההורדה נכשלה: " + ex.Message, 502); }
 

@@ -1,14 +1,15 @@
 name: בנייה — גשר + תוספים + קובץ התקנה (Inno Setup)
 
-# שרשרת אספקה (הקשחה): dotnet test חוסם לפני האריזה; Release נוצר רק מ-main או מתגית v*, ורק בג'וב נפרד
-# (release) שהוא היחיד שרואה את סוד החתימה; SHA256SUMS.txt נחתם ב-ECDSA (UPDATE_SIGNING_KEY) והגשר
-# דוחה עדכון בלי חתימה תקפה. ענפים אחרים רק בונים ומעלים artifact להורדה.
+# שרשרת אספקה (הקשחה): dotnet test חוסם לפני האריזה (גם על push לענפים ועל pull_request, בלי סודות).
+# workflow זה רק בונה ובודק: אין בו חתימה ואין Release, ותגית לא מפעילה אותו. שחרור וחתימה נמצאים רק ב-
+# release.yml (workflow_dispatch מ-main בלבד, ר' שם), שקורא ל-workflow הזה כ-workflow_call.
+# WHY: workflow מופעל מתגית נלקח מה-commit של התגית, כלומר מי שיכול לדחוף תגית שולט בקוד ה-workflow ובבדיקות שבו.
 # actions מוצמדים ל-SHA מלא (ההערה ליד כל אחד היא התגית שממנה נלקח). לעדכון: git ls-remote <repo> refs/tags/<tag>.
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - "**"
     paths:
       - "bridge/**"
       - "system-settings/**"
@@ -17,8 +18,20 @@ on:
       - "tests/**"
       - "tools/**"
       - "RELEASE_VERSION.txt"
-      - ".github/workflows/build.yml"
+      - ".github/workflows/**"
+  # WHY: pull_request (לא pull_request_target): ב-PR מפורק אין גישה לסודות, ו-dotnet test רץ על הקוד של ה-PR
+  pull_request: {}
   workflow_dispatch: {}
+  workflow_call:
+    inputs:
+      ref:
+        description: "ה-commit (SHA מלא) לבנייה, מאומת מראש כאבא-קדמון של main"
+        type: string
+        required: true
+      tag:
+        description: "תגית ה-Release (vX.Y.Z), מאומתת מראש"
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -31,6 +44,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
           fetch-depth: 0 # נדרש היסטוריה מלאה (לא שכפול רדוד) לחישוב גרסת התוספים למטה
 
       # גרסת התוספים (file-explorer/system-settings): עצמאית מגרסת הגשר ומגרסת ה-Release, ומסונכרנת
@@ -57,18 +72,17 @@ jobs:
         # WHY: ref_name/run_number עוברים דרך env ולא אינטרפולציה ישירה של ${{ }} בתוך הסקריפט
         # (שם תגית כמו v1$(calc) היה מוזרק כקוד pwsh). בנוסף התגית מאומתת בתבנית קפדנית.
         env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
+          TAG_INPUT: ${{ inputs.tag }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           $base = (Get-Content RELEASE_VERSION.txt -Raw).Trim()
           $parts = $base -split '\.'
           $majorMinor = "$($parts[0]).$($parts[1])"
           $full = "$majorMinor.$($env:RUN_NUMBER)"
-          # בהרצה מתגית v* משתמשים בתגית עצמה (אחרת ייווצר Release בתגית שונה מזו שנדחפה)
-          if ($env:REF_TYPE -eq "tag") {
-            if ($env:REF_NAME -notmatch '^v\d{1,4}\.\d{1,4}\.\d{1,6}$') { throw "שם תגית לא תקין: רק vX.Y.Z" }
-            $tag = $env:REF_NAME; $full = $tag.TrimStart('v')
+          # תגית מגיעה רק מ-release.yml (workflow_call, אחרי אימות שה-commit ב-main); בהרצות אחרות התגית היא רק תווית לבנייה
+          if ($env:TAG_INPUT) {
+            if ($env:TAG_INPUT -notmatch '^v\d{1,4}\.\d{1,4}\.\d{1,6}$') { throw "שם תגית לא תקין: רק vX.Y.Z" }
+            $tag = $env:TAG_INPUT; $full = $tag.TrimStart('v')
           } else { $tag = "v$full" }
           "version=$full" >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT
@@ -149,10 +163,12 @@ jobs:
         shell: pwsh
         env:
           TAG: ${{ steps.ver.outputs.tag }}
+          # WHY: גרסת מפתח מפורשת (הגשר דוחה keyver חסר או נמוך מ-UpdateApi.MinKeyVersion). בביטול מפתח מעלים כאן ובקוד יחד.
+          KEY_VERSION: "1"
         run: |
           $setup = Get-ChildItem installer\Output\*.exe | Select-Object -First 1 -ExpandProperty FullName
           $files = @($setup, "out/OtzariaBridge.exe", "bridge/plugins/system-settings.otzplugin", "bridge/plugins/file-explorer.otzplugin", "BRIDGE_VERSION.txt")
-          $lines = @("# tag=$($env:TAG)") + (foreach ($f in $files) { "{0}  {1}" -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), (Split-Path $f -Leaf) })
+          $lines = @("# tag=$($env:TAG)", "# keyver=$($env:KEY_VERSION)") + (foreach ($f in $files) { "{0}  {1}" -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), (Split-Path $f -Leaf) })
           $lines | Set-Content SHA256SUMS.txt -Encoding ascii
           Get-Content SHA256SUMS.txt
 
@@ -166,63 +182,3 @@ jobs:
             SHA256SUMS.txt
             BRIDGE_VERSION.txt
           if-no-files-found: error
-
-  # Release: רק מ-main או מתגית v* שה-commit שלה נמצא בהיסטוריית main, בג'וב נפרד עם environment בשם
-  # "release" (ב-GitHub: Settings > Environments > release: Required reviewers + Deployment branches
-  # and tags = main ו-v*; סוד UPDATE_SIGNING_KEY מוגדר כ-Environment secret שם בלבד, לא כ-Repository secret).
-  # WHY: בלי זה כל כותב לריפו יכול לדחוף ענף/תגית עם סקריפט חתימה משלו ולהדליף את המפתח.
-  release:
-    needs: build
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    runs-on: windows-latest
-    environment: release
-    permissions:
-      contents: write
-    steps:
-      # סקריפט החתימה נלקח תמיד מ-main (ref מפורש), לא מה-commit שהפעיל את ה-workflow: ענף/תגית לא
-      # מהימנים לא יכולים להחליף אותו. fetch-depth 0 לבדיקת השושלת בשלב הבא.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: refs/heads/main
-          fetch-depth: 0
-
-      # תגית חייבת להצביע על commit שכבר ב-main (נבדק אחרי ביקורת), אחרת נכשלים.
-      - name: אימות שה-commit ב-main
-        shell: pwsh
-        env:
-          TRIGGER_SHA: ${{ github.sha }}
-        run: |
-          git merge-base --is-ancestor $env:TRIGGER_SHA origin/main
-          if ($LASTEXITCODE -ne 0) { throw "ה-commit $($env:TRIGGER_SHA) אינו בהיסטוריית main - לא משחררים" }
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: OtzariaBridge-Setup
-          path: dist
-
-      # fail-closed: בלי סוד לא משחררים. שחרור בלי חתימה נדחה ממילא על ידי הגשר.
-      - name: חתימת SHA256SUMS.txt
-        shell: pwsh
-        env:
-          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:UPDATE_SIGNING_KEY)) { throw "הסוד UPDATE_SIGNING_KEY לא מוגדר - לא משחררים בלי חתימה" }
-          ./tools/Sign-Sums.ps1 -Sums dist/SHA256SUMS.txt
-          Get-ChildItem dist -Recurse -File | ForEach-Object { $_.FullName }
-
-      - name: Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          tag_name: ${{ needs.build.outputs.tag }}
-          name: OtzariaBridge ${{ needs.build.outputs.tag }}
-          prerelease: false
-          make_latest: true
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            dist/installer/Output/*.exe
-            dist/out/OtzariaBridge.exe
-            dist/bridge/plugins/*.otzplugin
-            dist/SHA256SUMS.txt
-            dist/SHA256SUMS.txt.sig
-            dist/BRIDGE_VERSION.txt
