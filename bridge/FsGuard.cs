@@ -32,6 +32,7 @@ public static class FsGuard
         ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".tif", ".tiff", ".ico", ".heic",
         ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".wma", ".mp4", ".mkv", ".avi", ".mov", ".webm", ".wmv",
         ".zip", ".7z", ".rar", ".tmp", ".bak",
+        ".db", ".sqlite", ".sqlite3", ".hive", // נתוני אוצריא (seforim.db, cache.db, personal_notes.db ועוד): לא ניתנים להרצה
     };
 
     /// <summary>פורמטי מסמך עם מאקרו: חסומים לפתיחה בנעילה, גם אם המנהל הוסיף אותם לרשימת הסיומות</summary>
