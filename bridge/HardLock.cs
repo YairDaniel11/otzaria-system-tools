@@ -91,15 +91,25 @@ public static class HardLock
         var res = _installed ? Call(new JsonObject { ["op"] = "status" }, 1000) : null;
         // תמונת המדיניות מפוענחת כאן, בחוט שקרא, ונשמרת כאובייקט שאינו משתנה — הקוראים (השומר, בקשות HTTP)
         // לא נוגעים ב-JsonNode המשותף, שאינו בטוח לקריאה מקבילה
-        _policy = PolicySnapshot.From(res?["policy"] as JsonObject);
+        // pipe לא עונה והשירות מותקן: שומרים את תמונת המדיניות האחרונה (fail-closed) במקום ליפול ל-config.json שהמשתמש כותב אליו;
+        // הפתיחה הזמנית מתאפסת (לא מניחים שהיא עדיין בתוקף)
+        if (res != null || !_installed) _policy = PolicySnapshot.From(res?["policy"] as JsonObject);
         _temp = TempSnapshot.From(res?["tempUnlock"] as JsonObject, res?["twoFactor"]?.GetValue<bool>() == true);
         _cache = res;
         _cacheAt = DateTime.UtcNow;
         return _cache;
     }
 
-    /// <summary>השירות מותקן, רץ ויש לו סיסמה — מקור האמת לסיסמה ולמצב הנעילה</summary>
-    public static bool Available => ServiceStatus()?["configured"]?.GetValue<bool>() == true;
+    /// <summary>
+    /// השירות הוא מקור האמת לסיסמה ולמצב הנעילה. כשהוא מותקן אבל ה-pipe לא עונה (קרס, נתקע, או מוצף בחיבורים) — עדיין "זמין":
+    /// הקוראים (Kiosk.Verify ועוד) יקבלו 503 ולא ייפלו ל-hash המקומי ב-config.json, שהמשתמש יכול לערוך (fail-closed).
+    /// שירות שמותקן ועונה אך עדיין לא הוגדר (configured=false) — לא זמין, כמו קודם (התקנה שנקטעה באמצע).
+    /// חירום: --unlock (קוד שחזור) ממשיך לעבוד מקומית גם כשהשירות למטה.
+    /// </summary>
+    public static bool Available => DecideAvailable(ServiceStatus()?["configured"]?.GetValue<bool>(), _installed);
+
+    /// <summary>configuredFromPipe: null = ה-pipe לא ענה. installed: השירות רשום ב-SCM</summary>
+    internal static bool DecideAvailable(bool? configuredFromPipe, bool installed) => configuredFromPipe ?? installed;
 
     // ---------- מדיניות הנעילה שהשירות מחזיק ----------
     // config.json נמצא בפרופיל של המשתמש המחובר וכתיב לו, ולכן הגדרות שהנעילה אוכפת (רשימת התוכנות
@@ -385,7 +395,9 @@ public static class HardLock
         Kiosk.RequirePassword(b.Str("password"));
         try
         {
-            using var p = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, "--install-service")
+            // גיבוב ה-exe הנוכחי מועבר לתהליך המורם, שמאמת שהוא מעתיק בדיוק את הקובץ הזה (ר' InstallTrust)
+            string srcHash = InstallTrust.Sha256File(Environment.ProcessPath!);
+            using var p = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, "--install-service --src-sha256 " + srcHash + " --parent-pid " + Environment.ProcessId)
             {
                 UseShellExecute = true,
                 Verb = "runas",
@@ -460,6 +472,7 @@ public static class HardLock
             try
             {
                 var s = ServiceStatus(fresh: true);
+                SyncOwnDacl(s);
                 if (s == null) { RestoreOrphanedPolicies(); return; }
                 bool active = s["active"]?.GetValue<bool>() == true;
                 if (active)
@@ -491,6 +504,32 @@ public static class HardLock
             }
             catch (Exception ex) { Config.Log("hardlock sync: " + ex.Message); }
         }, null, 3000, 5000);
+    }
+
+    // ---------- DACL של תהליך הגשר (מוקשח כשהנעילה נאכפת, משוחרר כשלא) ----------
+    // הגשר שהשירות מפעיל נולד מוקשח (Native.Launch). כשהנעילה לא נאכפת (בוטלה, פתיחה זמנית, מחוץ לחלון התזמון) הגשר משחרר את
+    // ה-DACL של עצמו, כדי שהמנגנון המורשה (יציאה מהמגש, taskkill של Installer/הסרה, מנהל) יעבוד ולא תיווצר "נעילה תקועה".
+    // בלי תשובה מהשירות: מותקן → נשארים כמו שהיינו (fail-closed); לא מותקן יותר (sc delete) → משחררים.
+
+    private static readonly bool FromService = Environment.GetCommandLineArgs().Contains("--from-service");
+    private static bool? _daclHardened;
+
+    internal static bool? DecideDacl(bool fromService, JsonObject status, bool installed)
+    {
+        if (!fromService) return null; // גשר שהמשתמש הפעיל בעצמו: לא נוגעים (השירות מקשיח מבחוץ כשצריך)
+        if (status == null) return installed ? null : false;
+        return status["active"]?.GetValue<bool>() == true;
+    }
+
+    private static void SyncOwnDacl(JsonObject status)
+    {
+        bool? want = DecideDacl(FromService, status, ServiceInstalled());
+        if (want == null || _daclHardened == want) return;
+        if (ProcessDacl.ApplyToSelf(want.Value))
+        {
+            _daclHardened = want;
+            Config.Log("hardlock: DACL של תהליך הגשר " + (want.Value ? "הוקשח" : "שוחרר"));
+        }
     }
 
     /// <summary>
@@ -553,11 +592,29 @@ public static class HardLock
             RepairUserPoliciesKeyAcl();
 
             bool exists = ServiceInstalled();
-            if (exists) StopService();
+            if (exists)
+            {
+                StopService();
+                // הגשר שהפעיל אותנו (אם רץ מ-Program Files) לא נהרג — ה-exe שלו מוחלף בהעברה-הצידה (CopyVerified)
+                string[] a0 = Environment.GetCommandLineArgs();
+                int pi0 = Array.IndexOf(a0, "--parent-pid");
+                int.TryParse(pi0 >= 0 && pi0 + 1 < a0.Length ? a0[pi0 + 1] : "", out int parentPid);
+                StopBridgesAt(ServiceExe, parentPid);
+            } // אחרת ההעתקה נכשלת על exe נעול (הגשר רץ מ-Program Files ומוגן מהריגה)
 
             Directory.CreateDirectory(ProgDir);
-            if (!string.Equals(Path.GetFullPath(Environment.ProcessPath!), Path.GetFullPath(ServiceExe), StringComparison.OrdinalIgnoreCase))
-                File.Copy(Environment.ProcessPath!, ServiceExe, overwrite: true);
+            // לא מעתיקים exe מנתיב שמשתמש רגיל כותב אליו בלי אימות גיבוב (ר' InstallTrust): אחרת החלפת הקובץ ב-LOCALAPPDATA
+            // לפני ההעתקה הייתה מריצה קוד כ-SYSTEM. הבדיקה לפני עצירת השירות/שינוי כלשהו נוסף — כשל משאיר את המצב הקיים
+            string[] cmd = Environment.GetCommandLineArgs();
+            int hi = Array.IndexOf(cmd, "--src-sha256");
+            string expectedHash = hi >= 0 && hi + 1 < cmd.Length ? cmd[hi + 1] : null;
+            string copyErr = InstallTrust.CopyVerified(Environment.ProcessPath!, ServiceExe, expectedHash);
+            if (copyErr != null)
+            {
+                SvcLog("install: " + copyErr);
+                return 4;
+            }
+            RegisterMachineRun();
 
             string bin = "\"" + ServiceExe + "\" --service";
             if (!exists)
@@ -599,6 +656,39 @@ public static class HardLock
             SvcLog("install failed: " + ex);
             return 3;
         }
+    }
+
+    /// <summary>
+    /// Run של HKLM (כל המשתמשים) מ-Program Files במקום Run של HKCU מ-%LOCALAPPDATA%. WHY: ה-exe ב-LOCALAPPDATA כתיב למשתמש —
+    /// הוא יכול להחליף אותו, ו-Run של HKCU בכלל ניתן למחיקה. עכשיו הגשר עולה בכניסה מקובץ שרק מנהל כותב
+    /// (וחשבונות Windows נוספים מקבלים אותו בלי התקנה לכל אחד). Installer.Install מסיר את הערך של HKCU כשזה קיים
+    /// </summary>
+    private static void RegisterMachineRun()
+    {
+        try
+        {
+            using var k = Registry.LocalMachine.CreateSubKey(Installer.RunKey);
+            k.SetValue(Installer.RunValue, Installer.MachineRunCommand);
+            SvcLog("install: Run של HKLM הוגדר");
+        }
+        catch (Exception ex) { SvcLog("install: Run של HKLM נכשל (ממשיך עם HKCU): " + ex.Message); }
+    }
+
+    internal static void UnregisterMachineRun()
+    {
+        try { using var k = Registry.LocalMachine.OpenSubKey(Installer.RunKey, true); k?.DeleteValue(Installer.RunValue, false); }
+        catch (Exception ex) { SvcLog("uninstall: מחיקת Run של HKLM: " + ex.Message); }
+    }
+
+    /// <summary>הורג תהליכי גשר שרצים מהנתיב הנתון (שירות/מורם בלבד — הם מוגנים מהריגה ע"י המשתמש)</summary>
+    internal static void StopBridgesAt(string exe, int skipPid = 0)
+    {
+        try
+        {
+            foreach (var p in BridgeProcs.Scan().Where(x => x.Pid != skipPid && BridgeProcs.SamePath(x.Path, exe)))
+                try { using var pr = Process.GetProcessById(p.Pid); pr.Kill(); pr.WaitForExit(3000); } catch { }
+        }
+        catch (Exception ex) { SvcLog("stop bridges: " + ex.Message); }
     }
 
     private static void StopService()
@@ -669,11 +759,25 @@ public class HardLockService : ServiceBase
     private JsonObject _state;
     private System.Threading.Timer _timer;
     private CancellationTokenSource _cts;
-    private int _failures;
-    private DateTime _lockoutUntil = DateTime.MinValue;
+    // הגבלת ניסיונות סיסמה לפי לקוח (SID + מורם), לא גלובלית — ר' AttemptLimiter. נקרא תחת _gate
+    private readonly AttemptLimiter _limiter = new();
+    [ThreadStatic] private static string _clientKey;
+    private static long NowMs => Environment.TickCount64;
+
     private readonly Dictionary<int, DateTime> _sessionSeen = new();
     private readonly Dictionary<int, DateTime> _lastLaunch = new();
+    private readonly Dictionary<int, int> _launchStreak = new(); // הפעלות רצופות מאז שהגשר נראה רץ בסשן
+    private readonly object _bridgeGate = new();
+    private System.Threading.Timer _bridgeTimer;
     private int _sessions;
+
+    // פתיחה זמנית: סיום מונוטוני בזיכרון בלבד (0 = אין). לא נשמר בדיסק — אחרי אתחול/הפעלה מחדש של השירות הנעילה חוזרת
+    private long _tempEndTick;
+    private readonly ClockGuard _clock = new();
+
+    // חיבורי pipe: מופעי האזנה, ומגבלת חיבורים במקביל (סך הכול / לפי PID)
+    private const int PipeListeners = 4, PipeMaxInstances = 32;
+    private readonly ConnLimiter _conns = new();
 
     private static string StateFile => Path.Combine(HardLock.DataDir, "hardlock.json");
 
@@ -687,9 +791,17 @@ public class HardLockService : ServiceBase
     protected override void OnStart(string[] args)
     {
         Load();
+        // פתיחה זמנית לא שורדת אתחול/הפעלה מחדש: אין לנו נקודת סיום מונוטונית אמינה מעבר לתהליך הזה, ושעון הקיר ניתן להזזה
+        if (!string.IsNullOrEmpty(_state["tempUnlockUntil"]?.ToString()))
+        {
+            _state["tempUnlockUntil"] = "";
+            try { Save(); } catch (Exception ex) { HardLock.SvcLog("load: ניקוי פתיחה זמנית: " + ex.Message); }
+            HardLock.SvcLog("service: פתיחה זמנית שנשארה מלפני הפעלת השירות נוקתה");
+        }
         _cts = new CancellationTokenSource();
-        for (int i = 0; i < 3; i++) Task.Run(() => PipeLoop(_cts.Token));
+        for (int i = 0; i < PipeListeners; i++) Task.Run(() => PipeLoop(_cts.Token));
         _timer = new System.Threading.Timer(_ => Tick(), null, 2000, 5000);
+        _bridgeTimer = new System.Threading.Timer(_ => WatchBridge(), null, 1000, 1000);
         HardLock.SvcLog("service: עלה (גרסה " + Program.Version + "), נעילה " + (Active ? "פעילה" : "כבויה"));
     }
 
@@ -697,6 +809,7 @@ public class HardLockService : ServiceBase
     {
         _cts?.Cancel();
         _timer?.Dispose();
+        _bridgeTimer?.Dispose();
         // עצירה יזומה של השירות (sc stop): אף אחד אחר כבר לא יאכוף, ו-HKEY_USERS של המשתמשים נשאר עם
         // DisableTaskMgr/DisableRegistryTools (וחסימת USB) - מנהל המשימות ועורך הרישום חסומים בלי שום נעילה.
         // מנקים בעצירה. הנעילה השמורה (active) לא משתנה, ולכן כשהשירות יעלה שוב ה-Tick הראשון יאכוף מחדש
@@ -710,6 +823,7 @@ public class HardLockService : ServiceBase
     {
         _cts?.Cancel();
         _timer?.Dispose();
+        _bridgeTimer?.Dispose();
         HardLock.SvcLog("service: כיבוי מחשב");
     }
 
@@ -731,7 +845,11 @@ public class HardLockService : ServiceBase
     private int TempUnlockMinutes =>
         TempUnlock.ClampMinutes(_state["tempUnlockMinutes"] is JsonValue mv && mv.TryGetValue<int>(out int m) ? m : TempUnlock.DefaultMinutes);
 
-    private int TempSecondsLeft => TempUnlockUsable ? TempUnlock.SecondsLeft(_state["tempUnlockUntil"]?.ToString(), DateTimeOffset.Now) : 0;
+    // נקודת הסיום המונוטונית (_tempEndTick) היא הקובעת, לא שעון הקיר: הזזת שעון/אזור זמן לא מאריכה ולא מקצרת. הערך השמור
+    // (tempUnlockUntil) משמש לתצוגה ולסימון "יש פתיחה" בלבד — מחיקתו מסיימת את הפתיחה
+    private int TempSecondsLeft =>
+        TempUnlockUsable && !string.IsNullOrEmpty(_state["tempUnlockUntil"]?.ToString())
+            ? TempUnlock.MonoSecondsLeft(_tempEndTick, NowMs) : 0;
 
     /// <summary>האם הנעילה נאכפת עכשיו: דלוקה, ולא בתוך פתיחה זמנית</summary>
     private bool Enforced => Active && TempSecondsLeft == 0;
@@ -821,12 +939,12 @@ public class HardLockService : ServiceBase
     private JsonObject Check(string password, bool allowRecovery)
     {
         if (!Configured) return Err("bad_request", "רכיב ההקשחה עדיין לא הוגדר");
-        if (DateTime.UtcNow < _lockoutUntil)
-            return Err("too_many", $"יותר מדי ניסיונות שגויים. נסו שוב בעוד {(int)Math.Ceiling((_lockoutUntil - DateTime.UtcNow).TotalSeconds)} שניות");
+        if (_limiter.IsLocked(_clientKey, NowMs, out int wait))
+            return Err("too_many", $"יותר מדי ניסיונות שגויים. נסו שוב בעוד {wait} שניות");
         bool ok = Matches(password, "passwordHash", "salt") ||
                   (allowRecovery && Matches(Secret.NormalizeRecovery(password), "recoveryHash", "recoverySalt"));
-        if (ok) { _failures = 0; return null; }
-        if (++_failures >= 5) { _failures = 0; _lockoutUntil = DateTime.UtcNow.AddSeconds(60); }
+        if (ok) { _limiter.Success(_clientKey); return null; }
+        _limiter.Fail(_clientKey, NowMs);
         return Err("wrong_password", "סיסמה שגויה");
     }
 
@@ -923,23 +1041,37 @@ public class HardLockService : ServiceBase
 
     // ---------- Named Pipe ----------
 
+    private static PipeSecurity MakePipeSecurity()
+    {
+        var ps = new PipeSecurity();
+        // חיבור מרוחק (SMB) נדחה במפורש; הגשר והמשתמשים המקומיים בלבד
+        ps.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.NetworkSid, null), PipeAccessRights.FullControl, AccessControlType.Deny));
+        ps.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null), PipeAccessRights.ReadWrite, AccessControlType.Allow));
+        ps.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
+        ps.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
+        return ps;
+    }
+
     private async Task PipeLoop(CancellationToken ct)
     {
+        var ps = MakePipeSecurity();
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                var ps = new PipeSecurity();
-                ps.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null), PipeAccessRights.ReadWrite, AccessControlType.Allow));
-                ps.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
-                ps.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
-                var pipe = NamedPipeServerStreamAcl.Create(HardLock.PipeName, PipeDirection.InOut, 8,
+                // כמה מאזינים במקביל ומופעים מרביים גבוהים (היה 3 לולאות / 8 מופעים): לקוח תוקע לא ממלא את כל המופעים וגורם
+                // ל-"pipe לא עונה" אצל הגשר
+                var pipe = NamedPipeServerStreamAcl.Create(HardLock.PipeName, PipeDirection.InOut, PipeMaxInstances,
                     PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 4096, 4096, ps);
                 try { await pipe.WaitForConnectionAsync(ct); }
                 catch { pipe.Dispose(); throw; }
+                // מגבלת חיבורים במקביל (סך הכול ולפי PID): מעבר לה החיבור נסגר מיד, בלי לתפוס חוט/מופע
+                int cpid = 0;
+                try { if (GetNamedPipeClientProcessId(pipe.SafePipeHandle.DangerousGetHandle(), out uint u)) cpid = (int)u; } catch { }
+                if (!_conns.TryEnter(cpid)) { pipe.Dispose(); continue; }
                 // ביקורת #30 ממצא 5: כל חיבור מטופל בנפרד, עם מגבלת אורך ודדליין, כך שלקוח תקוע
                 // לא חוסם את הבאים אחריו (ולא דוחף את הגשר ל-fallback של config.json)
-                _ = Task.Run(() => ServeOne(pipe, ct));
+                _ = Task.Run(async () => { try { await ServeOne(pipe, ct); } finally { _conns.Leave(cpid); } });
             }
             catch (OperationCanceledException) { return; }
             catch (Exception ex) { HardLock.SvcLog("pipe loop: " + ex.Message); await Task.Delay(1000); }
@@ -1016,16 +1148,20 @@ public class HardLockService : ServiceBase
                 if (!done && line.Length == 0) return;
                 string text = Encoding.UTF8.GetString(line.ToArray()).TrimEnd('\r');
                 bool admin = false;
+                string sidText = null;
                 try
                 {
                     pipe.RunAsClient(() =>
                     {
                         using var id = WindowsIdentity.GetCurrent();
                         admin = new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator);
+                        sidText = id.User?.Value;
                     });
                 }
                 catch { admin = false; }
                 _clientAdmin = admin;
+                // דלי ניסיונות: SID + מורם/לא מורם (לא PID — תהליך חדש היה מאפס את החסימה); SID לא ידוע → דלי משותף
+                _clientKey = (sidText ?? "unknown") + (admin ? "|elevated" : "");
                 _clientPid = 0; _clientSession = 0;
                 try
                 {
@@ -1066,6 +1202,7 @@ public class HardLockService : ServiceBase
                         ["scheduleEnabled"] = _state["scheduleEnabled"]?.GetValue<bool>() == true,
                         ["scheduleStart"] = _state["scheduleStart"]?.ToString() ?? "",
                         ["scheduleEnd"] = _state["scheduleEnd"]?.ToString() ?? "",
+                        ["scheduleTz"] = _state["scheduleTz"]?.ToString() ?? "",
                         ["twoFactor"] = TwoFactorOn,
                         ["otzariaPath"] = _state["otzariaPath"]?.ToString() ?? "", ["sessions"] = _sessions,
                         ["policy"] = PolicyNode(),
@@ -1110,8 +1247,9 @@ public class HardLockService : ServiceBase
                     // ביטול בתוך חלון תזמון (גם בקוד שחזור) היה ננעל מחדש תוך שניות כי EvaluateSchedule מפעיל אותו
                     // שוב - מדלגים עד סוף החלון הנוכחי, כמו "ביטול הנעילה" באזהרת התזמון
                     if (_state["scheduleEnabled"]?.GetValue<bool>() == true &&
-                        Sched.CurrentWindowEnd(_state["scheduleStart"]?.ToString(), _state["scheduleEnd"]?.ToString(), DateTime.Now) is DateTime winEnd)
-                        _state["skipUntil"] = new DateTimeOffset(winEnd).ToString("o");
+                        Sched.CurrentWindowEnd(_state["scheduleStart"]?.ToString(), _state["scheduleEnd"]?.ToString(), DateTimeOffset.UtcNow,
+                            Sched.ResolveTz(_state["scheduleTz"]?.ToString())) is DateTimeOffset winEnd)
+                        _state["skipUntil"] = winEnd.ToString("o");
                     Save();
                     HardLock.SvcLog("service: נעילה בוטלה");
                     Task.Run(Tick);
@@ -1141,6 +1279,9 @@ public class HardLockService : ServiceBase
                     if (wantTf != null) _state["twoFactor"] = wantTf.Value;
                     foreach (var kv in temp) _state[kv.Key] = kv.Value;
                     if (q["blockUsbStorage"] is JsonValue bu) _state["blockUsbStorage"] = bu.GetValue<bool>();
+                    // שמירת אזור הזמן ברגע הגדרת התזמון (גם כשרק חלק מהשדות נשלח): מהנקודה הזו החישוב לפיו
+                    if (q.ContainsKey("scheduleEnabled") || q.ContainsKey("scheduleStart") || q.ContainsKey("scheduleEnd"))
+                        _state["scheduleTz"] = Sched.LocalTzId();
                     if (q["scheduleEnabled"] is JsonValue se) _state["scheduleEnabled"] = se.GetValue<bool>();
                     if (q["scheduleStart"]?.ToString() is string ss && Sched.IsValid(ss)) _state["scheduleStart"] = ss;
                     if (q["scheduleEnd"]?.ToString() is string ee && Sched.IsValid(ee)) _state["scheduleEnd"] = ee;
@@ -1157,20 +1298,21 @@ public class HardLockService : ServiceBase
                     // הסיסמה כאן היא סיסמת הפתיחה הזמנית בלבד — לא סיסמת הנעילה ולא קוד השחזור. בלי Windows Hello:
                     // זו בדיוק הסיסמה שנמסרת למי שאין לו את זהות המנהל (ולכן היא קיימת רק כשהאימות הדו-שלבי פעיל)
                     if (!Configured) return Err("bad_request", "רכיב ההקשחה עדיין לא הוגדר");
-                    if (DateTime.UtcNow < _lockoutUntil)
-                        return Err("too_many", $"יותר מדי ניסיונות שגויים. נסו שוב בעוד {(int)Math.Ceiling((_lockoutUntil - DateTime.UtcNow).TotalSeconds)} שניות");
+                    if (_limiter.IsLocked(_clientKey, NowMs, out int tuWait))
+                        return Err("too_many", $"יותר מדי ניסיונות שגויים. נסו שוב בעוד {tuWait} שניות");
                     if (!TwoFactorOn) return Err("forbidden", "פתיחה זמנית פועלת רק כשהאימות הדו-שלבי (Windows Hello) מופעל");
                     if (!TempUnlockUsable) return Err("bad_request", "הפתיחה הזמנית כבויה או שלא הוגדרה לה סיסמה");
                     if (!Matches(pw, "tempUnlockHash", "tempUnlockSalt"))
                     {
-                        if (++_failures >= 5) { _failures = 0; _lockoutUntil = DateTime.UtcNow.AddSeconds(60); }
+                        _limiter.Fail(_clientKey, NowMs);
                         return Err("wrong_password", "סיסמת הפתיחה הזמנית שגויה");
                     }
-                    _failures = 0;
+                    _limiter.Success(_clientKey);
                     if (!Active) return Err("bad_request", "המחשב אינו נעול כרגע");
                     if (TempSecondsLeft > 0) return Err("bad_request", "המחשב כבר פתוח זמנית");
                     int minutes = TempUnlockMinutes;
                     var until = TempUnlock.Until(DateTimeOffset.Now, minutes);
+                    _tempEndTick = TempUnlock.EndTick(NowMs, minutes);
                     _state["tempUnlockUntil"] = until.ToString("o");
                     Save();
                     HardLock.SvcLog($"service: פתיחה זמנית ל-{minutes} דקות (עד {until:HH:mm:ss})");
@@ -1212,7 +1354,7 @@ public class HardLockService : ServiceBase
                     if (_clientSession <= 0) return Err("bad_request", "לא זוהה סשן משתמש לחלון האימות");
                     lock (_helloGate) { PruneHello(); if (_hello.Count >= 4) return Err("too_many", "יותר מדי בקשות אימות פתוחות"); }
                     string hn = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
-                    if (!Native.LaunchInSession(_clientSession, "\"" + HardLock.ServiceExe + "\" --hello-helper " + hn, out int hpid))
+                    if (!Native.LaunchInSession(_clientSession, "\"" + HardLock.ServiceExe + "\" --hello-helper " + hn, out int hpid, protect: false))
                         return Err("internal", "לא ניתן להפעיל את חלון האימות בסשן של המשתמש");
                     lock (_helloGate) _hello[hn] = new HelloReq { Pid = hpid, Expires = DateTime.UtcNow.AddSeconds(80) };
                     return new JsonObject { ["ok"] = true, ["nonce"] = hn };
@@ -1278,6 +1420,7 @@ public class HardLockService : ServiceBase
             bool active, blockUsb;
             lock (_gate)
             {
+                CheckClockJump();     // שעון שהוזז מעבר ל-2 דקות מבטל פתיחה זמנית (fail-closed)
                 EvaluateSchedule();   // תזמון לפי שעות — עשוי להפעיל/לבטל את הנעילה
                 ExpireTempUnlock();   // פתיחה זמנית שהסתיימה — האכיפה חוזרת כבר בטיק הזה
                 active = Enforced;
@@ -1285,7 +1428,7 @@ public class HardLockService : ServiceBase
             }
             EnforcePolicies(active);
             EnforceUsb(active && blockUsb);
-            if (active) EnsureBridgeInSessions();
+            // הגשר נבדק ב-WatchBridge (כל שנייה) ולא כאן (כל 5 שניות): חלון ההרמה מחדש קוצר
         }
         catch (Exception ex) { HardLock.SvcLog("tick: " + ex.Message); }
         finally { Interlocked.Exchange(ref _tickBusy, 0); }
@@ -1304,7 +1447,9 @@ public class HardLockService : ServiceBase
         // מושווה כרגע מוחלט (DateTimeOffset) — חסין למעבר שעון קיץ/חורף ולסוג ה-Kind
         bool skip = DateTimeOffset.TryParse(_state["skipUntil"]?.ToString(), null,
             System.Globalization.DateTimeStyles.RoundtripKind, out var su) && DateTimeOffset.Now < su;
-        bool inWindow = _state["scheduleEnabled"]?.GetValue<bool>() == true && !skip && Sched.InWindow(start, end, DateTime.Now);
+        // החלון מחושב לפי אזור הזמן ששמרנו בהגדרת התזמון, לא לפי אזור הזמן הנוכחי של Windows (שמשתמש רגיל רשאי לשנות)
+        var tz = Sched.ResolveTz(_state["scheduleTz"]?.ToString());
+        bool inWindow = _state["scheduleEnabled"]?.GetValue<bool>() == true && !skip && Sched.InWindow(start, end, DateTimeOffset.UtcNow, tz);
         bool active = Active;
         string by = _state["activatedBy"]?.ToString() ?? "manual";
         if (inWindow && !active)
@@ -1320,6 +1465,20 @@ public class HardLockService : ServiceBase
             Save();
             HardLock.SvcLog("service: תזמון — מחוץ לחלון, נעילה בוטלה");
         }
+    }
+
+    /// <summary>
+    /// נקרא תחת _gate מתוך Tick (כל 5 שניות). אם שעון הקיר התקדם שונה מהמונוטוני ביותר מ-2 דקות — מישהו הזיז את השעון
+    /// (או שהמחשב ישן; גם זה מסיים את הפתיחה, הכיוון הבטוח) — הפתיחה הזמנית מבוטלת והנעילה חוזרת.
+    /// </summary>
+    private void CheckClockJump()
+    {
+        bool jumped = _clock.Sample(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), NowMs);
+        if (!jumped || string.IsNullOrEmpty(_state["tempUnlockUntil"]?.ToString())) return;
+        _state["tempUnlockUntil"] = "";
+        _tempEndTick = 0;
+        Save();
+        HardLock.SvcLog("service: זוהתה קפיצת שעון (מעל 2 דקות) — הפתיחה הזמנית בוטלה והנעילה חוזרת");
     }
 
     /// <summary>
@@ -1404,25 +1563,60 @@ public class HardLockService : ServiceBase
         catch (Exception ex) { HardLock.SvcLog("usb: " + ex.Message); }
     }
 
-    /// <summary>בכל חשבון מחובר (כולל חשבון שני) הגשר חייב לרוץ; אם נסגר — מופעל מחדש תוך כמה שניות</summary>
+    /// <summary>טיימר של שנייה: כשהנעילה נאכפת — מוודא שהגשר רץ בכל סשן, ומקשיח את התהליכים שלו</summary>
+    private void WatchBridge()
+    {
+        if (!Monitor.TryEnter(_bridgeGate)) return;
+        try
+        {
+            bool enforced;
+            lock (_gate) enforced = Configured && Enforced;
+            if (enforced) EnsureBridgeInSessions();
+        }
+        catch (Exception ex) { HardLock.SvcLog("bridge watch: " + ex.Message); }
+        finally { Monitor.Exit(_bridgeGate); }
+    }
+
+    /// <summary>
+    /// בכל חשבון מחובר (כולל חשבון שני) הגשר חייב לרוץ; אם נסגר — מופעל מחדש תוך 3 שניות (היה 15 שניות חסד ו-20 בין ניסיונות).
+    /// "רץ" = תהליך שנתיב ה-exe שלו הוא ה-exe של השירות (Program Files), לא רק שם תהליך זהה. תהליך בשם הגשר מנתיב אחר
+    /// הוא מתחזה/עותק משתמש שמחזיק את ה-mutex של הסשן — נהרג, והגשר האמיתי עולה במקומו.
+    /// </summary>
     private void EnsureBridgeInSessions()
     {
         if (!File.Exists(HardLock.ServiceExe)) return;
-        var running = Process.GetProcessesByName("OtzariaBridge").Select(p => { try { return p.SessionId; } catch { return -1; } }).ToHashSet();
         var active = Native.ActiveSessions();
         _sessions = active.Count;
+        var procs = BridgeProcs.Scan();
+        var running = BridgeProcs.SessionsRunning(procs, HardLock.ServiceExe);
+
+        // הגשר האמיתי שכבר רץ: מקשיחים (גם אם עלה מ-Run של המשתמש, בלי ה-DACL שהשירות נותן) — תהליך וחוטים
+        var real = procs.Where(p => BridgeProcs.SamePath(p.Path, HardLock.ServiceExe)).ToList();
+        foreach (var p in real) ProcessDacl.HardenExisting(p.Pid);
+        ProcessDacl.HardenThreads(real.Select(p => p.Pid).ToHashSet());
+
+        var now = DateTime.UtcNow;
         foreach (int sid in active)
         {
-            if (!_sessionSeen.ContainsKey(sid)) _sessionSeen[sid] = DateTime.UtcNow;
-            if (running.Contains(sid)) continue;
-            // חסד אחרי הכניסה (הגשר עולה גם מ-Run של המשתמש), ולא יותר מניסיון אחד ב-20 שניות
-            if (DateTime.UtcNow - _sessionSeen[sid] < TimeSpan.FromSeconds(15)) continue;
-            if (_lastLaunch.TryGetValue(sid, out var last) && DateTime.UtcNow - last < TimeSpan.FromSeconds(20)) continue;
-            _lastLaunch[sid] = DateTime.UtcNow;
+            if (!_sessionSeen.ContainsKey(sid)) _sessionSeen[sid] = now;
+            if (running.Contains(sid)) { _launchStreak.Remove(sid); continue; }
+
+            // תהליכים בשם הגשר מנתיב אחר בסשן הזה — מחזיקים את ה-mutex ומונעים מהאמיתי לעלות
+            foreach (var imp in BridgeProcs.Impostors(procs, HardLock.ServiceExe).Where(p => p.Session == sid))
+            {
+                try { using var pr = Process.GetProcessById(imp.Pid); pr.Kill(); HardLock.SvcLog($"service: נהרג תהליך בשם הגשר מנתיב אחר ({imp.Path}, session {sid})"); }
+                catch (Exception ex) { HardLock.SvcLog("service: הריגת תהליך בשם הגשר מנתיב אחר נכשלה: " + ex.Message); }
+            }
+
+            _launchStreak.TryGetValue(sid, out int streak);
+            DateTime? last = _lastLaunch.TryGetValue(sid, out var l) ? l : null;
+            if (!RelaunchPolicy.ShouldLaunch(now, _sessionSeen[sid], last, streak)) continue;
+            _lastLaunch[sid] = now;
+            _launchStreak[sid] = streak + 1;
             bool ok = Native.LaunchInSession(sid, "\"" + HardLock.ServiceExe + "\" --background --portable --from-service");
             HardLock.SvcLog("service: הגשר לא רץ בחשבון (session " + sid + ") — " + (ok ? "הופעל מחדש" : "ההפעלה נכשלה"));
         }
-        foreach (int gone in _sessionSeen.Keys.Except(active).ToList()) _sessionSeen.Remove(gone);
+        foreach (int gone in _sessionSeen.Keys.Except(active).ToList()) { _sessionSeen.Remove(gone); _launchStreak.Remove(gone); _lastLaunch.Remove(gone); }
     }
 
     private void SelfUninstall()
@@ -1433,7 +1627,11 @@ public class HardLockService : ServiceBase
             EnforcePolicies(false);
             EnforceUsb(false);
             HardLock.SvcLog("service: הסרה");
+            HardLock.UnregisterMachineRun();
             Config.Run("sc.exe", "delete " + HardLock.ServiceName, 10000);
+            // הגשר רץ מ-Program Files ומוגן מהריגה ע"י המשתמש (DACL) — בלי זה rmdir להלן נכשל על exe נעול
+            Thread.Sleep(2500); // לגשר/לתהליך ההסרה זמן לסיים את הזרימה שלהם לפני ההריגה
+            HardLock.StopBridgesAt(HardLock.ServiceExe);
             // מחיקת הקבצים אחרי שהשירות ייעצר
             Process.Start(new ProcessStartInfo("cmd.exe",
                 $"/c ping -n 6 127.0.0.1 >nul & rmdir /s /q \"{HardLock.ProgDir}\" & rmdir /s /q \"{HardLock.DataDir}\"")
@@ -1492,25 +1690,68 @@ internal static class Native
 
     public static bool LaunchInSession(int sessionId, string commandLine) => LaunchInSession(sessionId, commandLine, out _);
 
-    public static bool LaunchInSession(int sessionId, string commandLine, out int pid)
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool CreateProcessW(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit,
+        uint flags, IntPtr env, string dir, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+
+    /// <summary>
+    /// protect=true (ברירת מחדל): התהליך והחוט הראשי נוצרים עם DACL מצומצם (ProcessDacl) — המשתמש לא יכול להרוג/להזריק/להקפיא.
+    /// protect=false רק לתהליך העזר של Windows Hello: רכיבי Hello (CredentialUIBroker) עשויים לדרוש גישה לתהליך הקורא,
+    /// ולא ניתן לבדוק זאת אוטומטית — כשל שם היה חוסם את כל פעולות ה-2FA. (העזר חי עד 80 שניות והשירות מקבל ממנו תשובה רק מה-PID שלו)
+    /// </summary>
+    public static bool LaunchInSession(int sessionId, string commandLine, out int pid, bool protect = true)
     {
         pid = 0;
         if (!WTSQueryUserToken(sessionId, out IntPtr token)) return false;
-        IntPtr env = IntPtr.Zero;
+        try { return Launch(token, commandLine, HardLock.ProgDir, protect, out pid, out _); }
+        finally { CloseHandle(token); }
+    }
+
+    /// <summary>
+    /// הפעלה בפועל. token==Zero → CreateProcess רגיל (לבדיקות). עם protect מועבר ל-CreateProcess SECURITY_ATTRIBUTES של תהליך וחוט.
+    /// הסביבה: הבלוק של המשתמש מסונן מ-DOTNET_*/COMPlus_*/COR_*/CORECLR_* (ר' EnvBlock). hProcess מוחזר לקורא (לבדיקות) או נסגר
+    /// </summary>
+    internal static bool Launch(IntPtr token, string commandLine, string dir, bool protect, out int pid, out IntPtr hProcessOut, bool closeHandles = true, string procSddl = null)
+    {
+        pid = 0; hProcessOut = IntPtr.Zero;
+        IntPtr env = IntPtr.Zero, rawEnv = IntPtr.Zero, paProc = IntPtr.Zero, paThr = IntPtr.Zero, sdProc = IntPtr.Zero, sdThr = IntPtr.Zero;
         try
         {
-            CreateEnvironmentBlock(out env, token, false);
-            var si = new STARTUPINFO { cb = Marshal.SizeOf<STARTUPINFO>(), lpDesktop = @"winsta0\default" };
+            if (token != IntPtr.Zero && CreateEnvironmentBlock(out rawEnv, token, false))
+                env = EnvBlock.Build(EnvBlock.Filter(EnvBlock.Parse(rawEnv)));
+            if (protect)
+            {
+                paProc = ProcessDacl.AllocAttributes(procSddl ?? ProcessDacl.Sddl(ProcessDacl.UserProcessMask, true), out sdProc);
+                paThr = ProcessDacl.AllocAttributes(ProcessDacl.Sddl(ProcessDacl.UserThreadMask, true), out sdThr);
+                // לא מצליחים לבנות DACL → לא מפעילים בלי הגנה בשקט; מנסים בלי (עדיף גשר רץ מגשר שלא עולה) ורושמים ביומן
+                if (paProc == IntPtr.Zero || paThr == IntPtr.Zero)
+                {
+                    HardLock.SvcLog("launch: בניית DACL נכשלה — הגשר יופעל בלי הגנת תהליך");
+                    ProcessDacl.FreeAttributes(paProc, sdProc); ProcessDacl.FreeAttributes(paThr, sdThr);
+                    paProc = paThr = sdProc = sdThr = IntPtr.Zero;
+                }
+            }
+            var si = new STARTUPINFO { cb = Marshal.SizeOf<STARTUPINFO>(), lpDesktop = token != IntPtr.Zero ? @"winsta0\default" : null };
             const uint CREATE_UNICODE_ENVIRONMENT = 0x400, CREATE_NO_WINDOW = 0x08000000;
-            bool ok = CreateProcessAsUser(token, null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false,
-                CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, env, HardLock.ProgDir, ref si, out var pi);
-            if (ok) { pid = pi.dwProcessId; CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+            uint flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
+            PROCESS_INFORMATION pi;
+            bool ok = token != IntPtr.Zero
+                ? CreateProcessAsUser(token, null, new StringBuilder(commandLine), paProc, paThr, false, flags, env, dir, ref si, out pi)
+                : CreateProcessW(null, new StringBuilder(commandLine), paProc, paThr, false, flags, env, dir, ref si, out pi);
+            if (ok)
+            {
+                pid = pi.dwProcessId;
+                CloseHandle(pi.hThread);
+                if (closeHandles) CloseHandle(pi.hProcess); else hProcessOut = pi.hProcess;
+            }
             return ok;
         }
         finally
         {
-            if (env != IntPtr.Zero) DestroyEnvironmentBlock(env);
-            CloseHandle(token);
+            if (rawEnv != IntPtr.Zero) DestroyEnvironmentBlock(rawEnv);
+            if (env != IntPtr.Zero) Marshal.FreeHGlobal(env);
+            ProcessDacl.FreeAttributes(paProc, sdProc);
+            ProcessDacl.FreeAttributes(paThr, sdThr);
         }
     }
 }
