@@ -7,8 +7,8 @@ namespace OtzariaBridge;
 /// <summary>התקנה עצמית ל-%LOCALAPPDATA%\OtzariaBridge, הפעלה אוטומטית, קיצור דרך ופריסת התוספים</summary>
 public static class Installer
 {
-    private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string RunValue = "OtzariaBridge";
+    internal const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    internal const string RunValue = "OtzariaBridge";
     private const string ShortcutName = "קיוסק אוצריא.lnk";
     private static readonly string[] OldShortcutNames = { "גשר אוצריא.lnk", "תורת אסתר.lnk", "תוכנת חסימת אוצריא.lnk" }; // שמות קודמים, עד שינויי השם
 
@@ -20,10 +20,24 @@ public static class Installer
     public static bool IsRunningFromInstallDir() =>
         string.Equals(Path.GetFullPath(Environment.ProcessPath ?? ""), Path.GetFullPath(InstalledExe), StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>פקודת ה-Run של HKLM: ה-exe של השירות (Program Files). --portable: בלי התקנה עצמית מחדש ל-LOCALAPPDATA</summary>
+    internal static string MachineRunCommand => "\"" + HardLock.ServiceExe + "\" --background --portable";
+
+    /// <summary>האם Run של HKLM (שהשירות מגדיר בהתקנה המוגברת) מצביע על ה-exe של השירות</summary>
+    internal static bool MachineRunPointsToService()
+    {
+        try
+        {
+            using var k = Registry.LocalMachine.OpenSubKey(RunKey);
+            return k?.GetValue(RunValue) is string v && v.StartsWith("\"" + HardLock.ServiceExe + "\"", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
     public static bool HasAutoStart()
     {
         using var k = Registry.CurrentUser.OpenSubKey(RunKey);
-        return k?.GetValue(RunValue) != null;
+        return k?.GetValue(RunValue) != null || MachineRunPointsToService();
     }
 
     public static void Install(bool showMessage)
@@ -40,8 +54,14 @@ public static class Installer
             catch (Exception ex) { Config.Log("install: העתקת exe נכשלה (ימשיך עם הגרסה הקיימת): " + ex.Message); }
         }
 
+        // כשהשירות מותקן ו-Run של HKLM מצביע על Program Files — הגשר עולה משם (קובץ שרק מנהל כותב), וערך HKCU מיותר ומוסר.
+        // אחרת (בלי שירות) — כמו קודם: HKCU מ-LOCALAPPDATA
+        bool machineRun = HardLock.ServiceInstalled() && File.Exists(HardLock.ServiceExe) && MachineRunPointsToService();
         using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
-            k.SetValue(RunValue, "\"" + InstalledExe + "\" --background");
+        {
+            if (machineRun) k.DeleteValue(RunValue, false);
+            else k.SetValue(RunValue, "\"" + InstalledExe + "\" --background");
+        }
 
         foreach (string old in OldShortcutNames)
             try { string p = Path.Combine(Path.GetDirectoryName(ShortcutPath)!, old); if (File.Exists(p)) File.Delete(p); } catch { }
@@ -51,7 +71,8 @@ public static class Installer
         int plugins = DeployPlugins();
         bool canInstall = plugins > 0 && OtzariaProtocolRegistered();
 
-        Process.Start(new ProcessStartInfo(InstalledExe, "--background") { UseShellExecute = false, WorkingDirectory = Config.Dir });
+        if (machineRun) Process.Start(new ProcessStartInfo(HardLock.ServiceExe, "--background --portable") { UseShellExecute = false, WorkingDirectory = HardLock.ProgDir });
+        else Process.Start(new ProcessStartInfo(InstalledExe, "--background") { UseShellExecute = false, WorkingDirectory = Config.Dir });
 
         if (showMessage)
         {
@@ -158,10 +179,20 @@ public static class Installer
     private static void StopOtherInstances()
     {
         int self = Environment.ProcessId;
-        foreach (var p in Process.GetProcessesByName("OtzariaBridge"))
+        // גשר שהשירות הפעיל מוגן מהריגה ע"י המשתמש (DACL) כל עוד הנעילה נאכפת. כשהיא לא נאכפת הוא משחרר את ההגנה בתוך ~5 שניות
+        // (HardLock.SyncOwnDacl) — לכן ניסיונות חוזרים, ולא כשל מיידי. נעילה נאכפת = ההתקנה/הסרה לא אמורות לקרות ממילא
+        for (int attempt = 0; attempt < 4; attempt++)
         {
-            if (p.Id == self) continue;
-            try { p.Kill(); p.WaitForExit(3000); } catch { }
+            bool denied = false;
+            foreach (var p in Process.GetProcessesByName("OtzariaBridge"))
+            {
+                if (p.Id == self) continue;
+                try { p.Kill(); p.WaitForExit(3000); }
+                catch (System.ComponentModel.Win32Exception) { denied = true; }
+                catch { }
+            }
+            if (!denied) return;
+            Thread.Sleep(2000);
         }
     }
 

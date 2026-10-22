@@ -21,6 +21,8 @@
     <InvariantGlobalization>false</InvariantGlobalization>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <NoWarn>$(NoWarn);CA1416;CS8632</NoWarn>
+    <!-- חוסם DOTNET_STARTUP_HOOKS: משתמש רגיל היה מזריק קוד לגשר דרך משתנה סביבה (HKCU\Environment). גם מסוננים ב-Native.Launch -->
+    <StartupHookSupport>false</StartupHookSupport>
   </PropertyGroup>
 
   <ItemGroup>
