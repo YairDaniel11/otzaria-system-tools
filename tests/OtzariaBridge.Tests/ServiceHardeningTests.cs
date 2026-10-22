@@ -151,15 +151,16 @@ public class ServiceHardeningTests
     }
 
     [Fact]
-    public void DecideDacl_hardens_only_when_enforced_and_fails_closed()
+    public void DecideDacl_never_releases()
     {
         var active = new System.Text.Json.Nodes.JsonObject { ["active"] = true };
         var inactive = new System.Text.Json.Nodes.JsonObject { ["active"] = false };
         Assert.Null(HardLock.DecideDacl(false, active, true));      // לא גשר-שירות — לא נוגעים
         Assert.True(HardLock.DecideDacl(true, active, true));
-        Assert.False(HardLock.DecideDacl(true, inactive, true));    // לא נאכף → משחררים (יציאה/הסרה עובדים)
-        Assert.Null(HardLock.DecideDacl(true, null, true));         // שירות מותקן ולא עונה → נשארים כמו שהיינו
-        Assert.False(HardLock.DecideDacl(true, null, false));       // שירות הוסר (sc delete) → משחררים, אין נעילה תקועה
+        // r3: ה-DACL לעולם לא משתחרר (handle מלא שנפתח בחלון השחרור היה מנוצל אחר כך); יציאה מורשית דרך op=stop-bridges
+        Assert.True(HardLock.DecideDacl(true, inactive, true));
+        Assert.True(HardLock.DecideDacl(true, null, true));
+        Assert.True(HardLock.DecideDacl(true, null, false));
     }
 
     // ---------- 4. fail-closed, מגבלות, lockout לפי לקוח ----------

@@ -35,6 +35,14 @@ internal static class BridgeProcs
     internal static List<ProcInfo> Impostors(IEnumerable<ProcInfo> procs, string serviceExe) =>
         procs.Where(p => !string.IsNullOrEmpty(p.Path) && !SamePath(p.Path, serviceExe)).ToList();
 
+    /// <summary>
+    /// גשרים "אמיתיים" (נתיב זהה) שהשירות לא יצר בעצמו: עלו מ-Run/explorer/המשתמש, ולכן למשתמש יש handle מלא אליהם
+    /// (HardenExisting לא מבטל handle קיים). נעילה נאכפת → נהרגים והשירות מעלה גשר משלו (עם DACL מרגע היצירה).
+    /// WHY: DACL שנקבע בדיעבד לא סוגר handle שכבר נפתח; רק תהליך שנולד מוגן בטוח.
+    /// </summary>
+    internal static List<ProcInfo> Untrusted(IEnumerable<ProcInfo> procs, string serviceExe, ISet<int> ownPids) =>
+        procs.Where(p => SamePath(p.Path, serviceExe) && !ownPids.Contains(p.Pid)).ToList();
+
     [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool QueryFullProcessImageName(IntPtr h, int flags, StringBuilder name, ref int size);
@@ -70,6 +78,32 @@ internal static class BridgeProcs
 }
 
 /// <summary>
+/// אימות צד השרת של ה-pipe (בצד הלקוח), לפני שליחת סיסמה. WHY: תהליך משתמש שיצר את ה-pipe "OtzariaBridgeService" לפני
+/// השירות היה מקבל את הסיסמאות בטקסט גלוי. השרת האמיתי = תהליך בסשן 0 (שירות) שנתיב ה-exe שלו הוא ServiceExe (Program Files). תהליך משתמש לעולם לא בסשן 0, ולכן נתיב לא קריא
+/// (אין גישת query) לא מפיל את החיבור — אחרת כשל קריאה היה חוסם גם את קוד השחזור (נעילה תקועה).
+/// </summary>
+internal static class PipePeer
+{
+    internal static bool IsTrustedServer(string imagePath, int session, string serviceExe) =>
+        session == 0 && (string.IsNullOrEmpty(imagePath) || BridgeProcs.SamePath(imagePath, serviceExe));
+
+    [DllImport("kernel32.dll")] private static extern bool GetNamedPipeServerProcessId(IntPtr pipe, out uint pid);
+    [DllImport("kernel32.dll")] private static extern bool ProcessIdToSessionId(uint pid, out uint session);
+
+    /// <summary>הלקוח מאמת את השרת של ה-pipe המחובר. כל כשל (pid/נתיב/סשן לא ידועים) = לא מהימן (fail-closed)</summary>
+    internal static bool ServerIsService(IntPtr pipeHandle)
+    {
+        try
+        {
+            if (!GetNamedPipeServerProcessId(pipeHandle, out uint pid) || pid == 0) return false;
+            if (!ProcessIdToSessionId(pid, out uint sess)) return false;
+            return IsTrustedServer(BridgeProcs.ImagePath((int)pid), (int)sess, HardLock.ServiceExe);
+        }
+        catch { return false; }
+    }
+}
+
+/// <summary>
 /// מדיניות הפעלה מחדש של הגשר בנעילה. קודם: 15 שניות חסד אחרי כניסה ו-20 שניות בין ניסיונות — חלון של עד חצי דקה
 /// בלי גשר. עכשיו: 3 שניות (השירות סורק כל שנייה). ניסיונות רצופים שלא הצליחו להשאיר גשר רץ נעשים איטיים יותר,
 /// כדי שגשר שקורס בעלייה (או mutex תפוס) לא ייצור לולאה חמה.
@@ -91,39 +125,61 @@ internal static class RelaunchPolicy
 }
 
 /// <summary>
-/// הגבלת ניסיונות סיסמה לפי לקוח (SID + האם מורם), לא גלובלית.
+/// הגבלת ניסיונות סיסמה לפי לקוח (SID + האם מורם), לא גלובלית, עם backoff מדורג.
 /// WHY: ה-lockout הגלובלי איפשר לכל תהליך מקומי לשלוח 5 סיסמאות שגויות ולחסום את המנהל לדקה, שוב ושוב (DoS).
-/// מפתח לפי SID חוסם עקיפה על ידי תהליכים חדשים (PID חדש לא מאפס), ומנהל מורם מקבל דלי נפרד מהמשתמש הלא-מורם.
-/// הזמן מונוטוני (TickCount64) — העברת שעון לא מאפסת חסימה.
+/// עכשיו: אחרי maxFailures כישלונות ההשהיה גדלה אקספוננציאלית (lockSeconds, x2, ... עד maxLockSeconds), ובזמן ההשהיה
+/// עדיין מותר "ניסיון בדיקה" אחד בכל probe (רבע מההשהיה, לפחות 2 שניות) — סיסמה נכונה עוברת (לא DoS), וניחוש נכשל מאריך את ההשהיה.
+/// מפתח לפי SID חוסם עקיפה על ידי תהליכים חדשים, ומנהל מורם מקבל דלי נפרד. הזמן מונוטוני (TickCount64).
 /// </summary>
 internal sealed class AttemptLimiter
 {
     private readonly int _max;
-    private readonly long _lockMs, _forgetMs;
+    private readonly long _lockMs, _maxLockMs, _forgetMs;
     private readonly int _cap;
-    private readonly Dictionary<string, (int fails, long until, long last)> _d = new();
+    private sealed class Entry { public int Fails; public long Until, Last, Probe; }
+    private readonly Dictionary<string, Entry> _d = new();
 
-    internal AttemptLimiter(int maxFailures = 5, int lockSeconds = 60, int forgetMinutes = 10, int cap = 256)
+    internal AttemptLimiter(int maxFailures = 5, int lockSeconds = 60, int forgetMinutes = 10, int cap = 256, int maxLockSeconds = 900)
     {
         _max = maxFailures; _lockMs = lockSeconds * 1000L; _forgetMs = forgetMinutes * 60_000L; _cap = cap;
+        _maxLockMs = Math.Max(_lockMs, maxLockSeconds * 1000L);
     }
 
+    /// <summary>האם בהשהיה כרגע (קשיח; לבדיקות/תצוגה). הכרעת הבקשה בפועל — CanTry</summary>
     internal bool IsLocked(string key, long nowMs, out int secondsLeft)
     {
         secondsLeft = 0;
-        if (key == null || !_d.TryGetValue(key, out var e) || e.until <= nowMs) return false;
-        secondsLeft = (int)Math.Ceiling((e.until - nowMs) / 1000.0);
+        if (key == null || !_d.TryGetValue(key, out var e) || e.Until <= nowMs) return false;
+        secondsLeft = (int)Math.Ceiling((e.Until - nowMs) / 1000.0);
         return true;
+    }
+
+    /// <summary>
+    /// האם מותר לבדוק סיסמה עכשיו. מחוץ להשהיה — תמיד. בתוך ההשהיה — רק ניסיון בדיקה אחד בכל probe (ומתעד אותו)
+    /// </summary>
+    internal bool CanTry(string key, long nowMs, out int secondsLeft)
+    {
+        secondsLeft = 0;
+        if (key == null || !_d.TryGetValue(key, out var e) || e.Until <= nowMs) return true;
+        long probe = Math.Max(2000, (e.Until - e.Last) / 4);
+        if (nowMs - e.Probe >= probe) { e.Probe = nowMs; return true; }
+        secondsLeft = (int)Math.Ceiling(Math.Min(e.Until - nowMs, e.Probe + probe - nowMs) / 1000.0);
+        return false;
     }
 
     internal void Fail(string key, long nowMs)
     {
         if (key == null) return;
         Prune(nowMs);
-        _d.TryGetValue(key, out var e);
-        if (e.last != 0 && nowMs - e.last > _forgetMs) e = default; // ניסיון ישן — מתחילים ספירה חדשה
-        e.fails++; e.last = nowMs;
-        if (e.fails >= _max) { e.fails = 0; e.until = nowMs + _lockMs; }
+        if (!_d.TryGetValue(key, out var e)) e = new Entry();
+        if (e.Last != 0 && nowMs - e.Last > _forgetMs + Math.Max(0, e.Until - e.Last)) e = new Entry(); // ניסיון ישן — מתחילים ספירה חדשה
+        e.Fails++; e.Last = nowMs;
+        if (e.Fails >= _max)
+        {
+            int exp = Math.Min(e.Fails - _max, 20);
+            e.Until = nowMs + Math.Min(_lockMs << exp, _maxLockMs);
+            e.Probe = nowMs;
+        }
         _d[key] = e;
     }
 
@@ -132,40 +188,50 @@ internal sealed class AttemptLimiter
     private void Prune(long nowMs)
     {
         if (_d.Count < _cap) return;
-        foreach (var k in _d.Where(kv => kv.Value.until <= nowMs && nowMs - kv.Value.last > _forgetMs).Select(kv => kv.Key).ToList())
+        foreach (var k in _d.Where(kv => kv.Value.Until <= nowMs && nowMs - kv.Value.Last > _forgetMs).Select(kv => kv.Key).ToList())
             _d.Remove(k);
         if (_d.Count >= _cap) _d.Clear(); // הצפה מכוונת בהרבה מפתחות: עדיף לאפס מאשר לגדול ללא גבול
     }
 }
 
-/// <summary>הגבלת חיבורי צינור במקביל: סך הכול ולפי PID. דוחה (false) מעבר לגבול — הלקוח רואה חיבור שנסגר</summary>
+/// <summary>
+/// הגבלת חיבורי צינור במקביל: סך הכול, לפי PID ולפי SID. מקום שמור (reservedElevated) לחיבורים מורמים בלבד —
+/// משתמש רגיל שממלא את המכסה לא חוסם מנהל/התקנה. דוחה (false) מעבר לגבול — הלקוח רואה חיבור שנסגר
+/// </summary>
 internal sealed class ConnLimiter
 {
-    private readonly int _total, _perPid;
+    private readonly int _total, _perPid, _perSid, _reserved;
     private readonly Dictionary<int, int> _byPid = new();
+    private readonly Dictionary<string, int> _bySid = new();
     private int _count;
     private readonly object _g = new();
 
-    internal ConnLimiter(int total = 24, int perPid = 4) { _total = total; _perPid = perPid; }
+    internal ConnLimiter(int total = 24, int perPid = 4, int perSid = 8, int reservedElevated = 0)
+    { _total = total; _perPid = perPid; _perSid = perSid; _reserved = Math.Min(reservedElevated, Math.Max(0, total - 1)); }
 
-    internal bool TryEnter(int pid)
+    internal bool TryEnter(int pid, string sid = null, bool elevated = false)
     {
         lock (_g)
         {
             _byPid.TryGetValue(pid, out int n);
-            if (_count >= _total || n >= _perPid) return false;
+            int s = 0;
+            if (sid != null) _bySid.TryGetValue(sid, out s);
+            int limit = elevated ? _total : _total - _reserved;
+            if (_count >= limit || n >= _perPid || (sid != null && !elevated && s >= _perSid)) return false;
             _byPid[pid] = n + 1; _count++;
+            if (sid != null) _bySid[sid] = s + 1;
             return true;
         }
     }
 
-    internal void Leave(int pid)
+    internal void Leave(int pid, string sid = null)
     {
         lock (_g)
         {
             if (!_byPid.TryGetValue(pid, out int n)) return;
             if (n <= 1) _byPid.Remove(pid); else _byPid[pid] = n - 1;
             _count--;
+            if (sid != null && _bySid.TryGetValue(sid, out int s)) { if (s <= 1) _bySid.Remove(sid); else _bySid[sid] = s - 1; }
         }
     }
 }
@@ -190,6 +256,19 @@ internal static class EnvBlock
             string name = eq > 0 ? e[..eq] : e;
             return !IsBlocked(name);
         }).ToList();
+
+    /// <summary>
+    /// מכריח DOTNET_BUNDLE_EXTRACT_BASE_DIR לתיקיה שכתיבה אליה רק למנהלים (אחרי הסינון). WHY: חילוץ הספריות הנייטיב של ה-single-file
+    /// הולך ל-%TEMP%\.net — כתיב למשתמש, והחלפת DLL שם = הזרקת קוד לגשר. dirReady=false (התיקיה עוד לא הוכנה/לא מחולצת בשירות)
+    /// → לא נוגעים (אחרת הגשר לא היה עולה). לא ניתן לבטל את החילוץ: ה-publish פולט אז 6 DLL נפרדים (WPF) וההתקנה מעתיקה exe בלבד
+    /// </summary>
+    internal static List<string> WithBundleDir(List<string> filtered, string dir, bool dirReady)
+    {
+        if (!dirReady || string.IsNullOrEmpty(dir)) return filtered;
+        var l = filtered.Where(e => !e.StartsWith("DOTNET_BUNDLE_EXTRACT_BASE_DIR=", StringComparison.OrdinalIgnoreCase)).ToList();
+        l.Add("DOTNET_BUNDLE_EXTRACT_BASE_DIR=" + dir);
+        return l;
+    }
 
     /// <summary>מפענח בלוק סביבה בפורמט Unicode (מחרוזות מסתיימות ב-NUL, סיום בריקה)</summary>
     internal static List<string> Parse(IntPtr block)
@@ -279,6 +358,32 @@ internal static class ProcessDacl
         finally { LocalFree(sd); }
     }
 
+    /// <summary>
+    /// SDDL ל-TokenDefaultDacl (חוטים/אובייקטים חדשים של התהליך נולדים מוקשחים). כבוי כברירת מחדל (UseTokenDefaultDacl):
+    /// ה-DACL הזה חל גם על תהליכי-בן של הגשר (אוצריא ותוכנות מותרות), שיהפכו בלתי-ניתנים לסגירה/גישה למשתמש, ועל אובייקטי
+    /// סנכרון משותפים — דורש בדיקה בסשן חי לפני הפעלה. חוטים חדשים מוקשחים ממילא ע"י HardenThreads כל שנייה
+    /// </summary>
+    internal const bool UseTokenDefaultDacl = false;
+    internal static string TokenDefaultSddl() => Sddl(UserProcessMask, true);
+
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool SetTokenInformation(IntPtr token, int cls, IntPtr info, int len);
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetSecurityDescriptorDacl(IntPtr sd, out bool present, out IntPtr dacl, out bool defaulted);
+
+    /// <summary>מגדיר TokenDefaultDacl (TOKEN_ADJUST_DEFAULT) בטוקן הנתון. נקרא רק כש-UseTokenDefaultDacl</summary>
+    internal static bool SetTokenDefault(IntPtr token, string sddl)
+    {
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, 1, out IntPtr sd, IntPtr.Zero)) return false;
+        IntPtr buf = IntPtr.Zero;
+        try
+        {
+            if (!GetSecurityDescriptorDacl(sd, out bool present, out IntPtr dacl, out _) || !present) return false;
+            buf = Marshal.AllocHGlobal(IntPtr.Size);
+            Marshal.WriteIntPtr(buf, dacl);
+            return SetTokenInformation(token, 6 /*TokenDefaultDacl*/, buf, IntPtr.Size);
+        }
+        finally { if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf); LocalFree(sd); }
+    }
+
     /// <summary>הגשר על עצמו (הקשחה או שחרור). ה-pseudo handle נושא את כל ההרשאות, ולכן אין תלות ב-DACL הנוכחי</summary>
     internal static bool ApplyToSelf(bool hardened) => SetDacl(GetCurrentProcess(), Sddl(UserProcessMask, hardened));
 
@@ -338,6 +443,16 @@ internal static class ProcessDacl
 /// </summary>
 internal static class InstallTrust
 {
+    // גיבוב ה-exe נתפס פעם אחת בעליית הגשר (לפני שמשתמש הספיק להחליף את הקובץ בנתיב אחרי rename של התמונה הרצה).
+    // WHY: חישוב הגיבוב בלחיצת "התקן" היה מאמת את הקובץ המוחלף עצמו ולא את מה שרץ
+    private static Task<string> _self;
+    internal static void CaptureSelf()
+    {
+        string p = Environment.ProcessPath;
+        _self ??= Task.Run(() => { try { return Sha256File(p!); } catch { return null; } });
+    }
+    internal static string SelfSha256() { CaptureSelf(); return _self.Result; }
+
     internal static string Sha256(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
 
     internal static string Sha256File(string path)

@@ -132,6 +132,7 @@ public static class Server
                     platform = "windows",
                     auth = "token",
                     paired = Pairing.IsValid(req.Headers[Pairing.TokenHeader].ToString()),
+                    proofs = Pairing.Proofs(req.Headers["X-Otzaria-Challenge"].ToString()), // אתגר-תגובה נגד גשר מזויף (ר' Pairing.Proofs)
                 });
                 return;
             }

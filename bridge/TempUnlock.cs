@@ -12,8 +12,8 @@ public static class TempUnlock
 {
     public const int MinMinutes = 1, MaxMinutes = 60, DefaultMinutes = 30;
 
-    /// <summary>אורך מינימלי לסיסמת הפתיחה הזמנית (כמו סיסמת הנעילה)</summary>
-    public const int MinSecretLength = 6;
+    /// <summary>אורך מינימלי לסיסמת הפתיחה הזמנית: 8 (מועדפת על ניחוש מקומי; השירות מגביל קצב באקספוננציאלית עד שעה)</summary>
+    public const int MinSecretLength = 8;
 
     /// <summary>משך הפתיחה מוגבל ל-1–60 דקות</summary>
     public static int ClampMinutes(long minutes) => (int)Math.Clamp(minutes, MinMinutes, MaxMinutes);

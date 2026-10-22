@@ -192,6 +192,8 @@ public static class Installer
                 catch { }
             }
             if (!denied) return;
+            // גשר שהשירות הפעיל מוגן מהריגה: בקשה מאומתת לשירות (הוא עצמו הורג), מותרת רק כשהנעילה לא נאכפת
+            HardLock.Call(new System.Text.Json.Nodes.JsonObject { ["op"] = "stop-bridges" });
             Thread.Sleep(2000);
         }
     }
