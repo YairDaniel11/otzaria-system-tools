@@ -1,6 +1,7 @@
 using System.Management;
 using System.Text.Json;
 using System.Linq;
+using System.Text.Json.Nodes;
 
 namespace OtzariaBridge;
 
@@ -22,7 +23,7 @@ public static class BiosHardening
 {
     public static void Register()
     {
-        Server.Route("/bios/status", _ => Status());
+        Server.Route("/bios/status", _ => StatusWithBoot());
         Server.Route("/bios/harden", Harden);
     }
 
@@ -55,6 +56,15 @@ public static class BiosHardening
 
     // ---------- /bios/status: זיהוי + מה שזמין בפועל במחשב הזה, בלי לשנות כלום ----------
 
+    /// <summary>הסטטוס של היצרן + מצב אתחול כללי (BitLocker/TPM/Secure Boot, ר' BootHardening) תחת "boot"</summary>
+    private static object StatusWithBoot()
+    {
+        var node = JsonSerializer.SerializeToNode(Status(), Server.Json) as JsonObject ?? new JsonObject();
+        try { node["boot"] = BootHardening.StatusNode(); }
+        catch (Exception ex) { node["boot"] = new JsonObject { ["error"] = ex.Message }; }
+        return node;
+    }
+
     private static object Status()
     {
         var (vendor, raw, model) = Identify();
@@ -75,8 +85,9 @@ public static class BiosHardening
                     wmiError = err,
                     usbBootSetting = usb.name == null ? null : new { name = usb.name, currentValue = usb.value, possibleValues = usb.possible },
                     bootMenuAuthSetting = bootMenu.name == null ? null : new { name = bootMenu.name, currentValue = bootMenu.value, possibleValues = bootMenu.possible },
-                    note = "ב-Lenovo מרבית הדגמים דורשים שתהיה כבר מוגדרת סיסמת Supervisor לפני ששינוי הגדרות אחרות (כמו חסימת USB) יתקבל ב-firmware. " +
-                           "לכן מוצע קודם להגדיר סיסמת BIOS, ורק אחר כך לחסום אתחול USB/לנעול את תפריט האתחול.",
+                    note = "סדר הפעולות בהקשחה: קודם כל החסימות (USB/רשת/Legacy/סדר ותפריט אתחול), ורק בסוף קביעת הסיסמה - אחרי שנקבעת סיסמה, " +
+                           "שינוי הגדרות בלי להזין אותה נכשל ב-Access Denied. אם כבר מוגדרת סיסמת Supervisor, יש להזין אותה כסיסמה נוכחית.",
+                    supervisorPasswordSet = LenovoSupervisorSet(),
                 };
             }
             case "hp":
@@ -114,7 +125,7 @@ public static class BiosHardening
                         model,
                         supported = true,
                         note = "Dell Command | Configure מותקן: אפשר להגדיר סיסמת BIOS אוטומטית (לא נבדק על דגם Dell אמיתי, ולכן מומלץ לוודא ב-F2 באתחול). " +
-                               "חסימת אתחול USB ונעילת תפריט האתחול ב-Dell ידניות בלבד.",
+                               "חסימת UEFI Network Stack ו-Legacy ROM אוטומטית דרך cctk; חסימת אתחול USB ונעילת תפריט/סדר האתחול ב-Dell ידניות בלבד.",
                     };
                 return new
                 {
@@ -151,6 +162,36 @@ public static class BiosHardening
 
     // ---------- /bios/harden: הפעולה בפועל (דורש סיסמת מנהל + 2FA, כמו FxPolicy.AdminGate) ----------
 
+    internal const int MinBiosPassword = 12;
+
+    /// <summary>
+    /// בקשת הקשחה: חסימות (USB/רשת/Legacy/סדר אתחול/תפריט אתחול) ו/או קביעת סיסמה.
+    /// WHY הסדר: אחרי שנקבעת סיסמת BIOS, כתיבת כל הגדרה אחרת בלי הסיסמה נכשלת ב-Access Denied (ב-HP/Lenovo/Dell).
+    /// לכן החסימות קודם, והסיסמה תמיד אחרונה. אם כבר מוגדרת סיסמה, מעבירים אותה (currentBiosPassword) גם לחסימות.
+    /// </summary>
+    internal sealed class HardenRequest
+    {
+        public bool SetPassword, UsbBoot, NetworkBoot, Legacy, BootOrder, BootMenu;
+        public bool Any => SetPassword || UsbBoot || NetworkBoot || Legacy || BootOrder || BootMenu;
+    }
+
+    /// <summary>סדר השלבים: כל החסימות לפי סדר קבוע, ואז סיסמה. טהור, ניתן לבדיקה</summary>
+    internal static List<string> StageOrder(HardenRequest r)
+    {
+        var l = new List<string>();
+        if (r.UsbBoot) l.Add("usbBoot");
+        if (r.NetworkBoot) l.Add("networkBoot");
+        if (r.Legacy) l.Add("legacy");
+        if (r.BootOrder) l.Add("bootOrder");
+        if (r.BootMenu) l.Add("bootMenuAuth");
+        if (r.SetPassword) l.Add("password");
+        return l;
+    }
+
+    /// <summary>null אם תקינה, אחרת הסיבה לדחייה</summary>
+    internal static string ValidateBiosPassword(string pw) =>
+        (pw ?? "").Length < MinBiosPassword ? "סיסמת ה-BIOS חייבת להכיל לפחות " + MinBiosPassword + " תווים" : null;
+
     private static object Harden(JsonElement b)
     {
         if (!Kiosk.PasswordConfigured)
@@ -159,14 +200,22 @@ public static class BiosHardening
         Kiosk.RequirePasswordOrRecovery(pw);
         if (!Kiosk.IsRecoveryCode(pw)) TwoFactor.Require("הקשחת BIOS/UEFI");
 
-        bool wantPassword = b.Bool("setPassword");
-        bool wantUsbBlock = b.Bool("blockUsbBoot");
-        bool wantBootMenuAuth = b.Bool("lockBootMenu");
+        bool all = b.Bool("all");
+        var req = new HardenRequest
+        {
+            SetPassword = b.Bool("setPassword") || all,
+            UsbBoot = b.Bool("blockUsbBoot") || all,
+            NetworkBoot = b.Bool("blockNetworkBoot") || all,
+            Legacy = b.Bool("blockLegacy") || all,
+            BootOrder = b.Bool("lockBootOrder") || all,
+            BootMenu = b.Bool("lockBootMenu") || all,
+        };
         string newBios = b.Str("biosPassword") ?? "";
-        if (!wantPassword && !wantUsbBlock && !wantBootMenuAuth)
-            throw BridgeException.BadRequest("יש לבחור לפחות פעולה אחת: הגדרת סיסמת BIOS, חסימת אתחול USB, או נעילת תפריט האתחול");
-        if (wantPassword && newBios.Length < 4)
-            throw BridgeException.BadRequest("סיסמת ה-BIOS חייבת להכיל לפחות 4 תווים");
+        string curBios = b.Str("currentBiosPassword") ?? "";
+        if (!req.Any)
+            throw BridgeException.BadRequest("יש לבחור לפחות פעולה אחת: חסימת אתחול (USB/רשת/Legacy), נעילת סדר/תפריט אתחול, או הגדרת סיסמת BIOS");
+        if (req.SetPassword && ValidateBiosPassword(newBios) is string bad)
+            throw BridgeException.BadRequest(bad);
 
         var (vendor, raw, model) = Identify();
         bool dellOk = vendor == "dell" && DellCctkPath() != null;
@@ -175,38 +224,33 @@ public static class BiosHardening
                 ") אינו נתמך להקשחה אוטומטית. ר' /bios/status להסבר ולאפשרויות הידניות");
 
         var steps = new List<object>();
-        if (dellOk)
+        var failedIds = new List<string>();
+        void Add(string id, (bool attempted, bool success, string settingName, string message) r)
         {
-            // ב-Dell נתמכת רק סיסמת BIOS (דרך cctk); חסימת USB/תפריט אתחול ידנית ב-BIOS (F2 באתחול)
-            if (wantPassword)
+            steps.Add(new { id, attempted = r.attempted, success = r.success, settingName = r.settingName, message = r.message });
+            if (!r.success) failedIds.Add(id);
+            Config.Log("bios harden: " + id + " vendor=" + vendor + " setting=" + r.settingName + " success=" + r.success + " msg=" + r.message);
+        }
+
+        foreach (string stage in StageOrder(req))
+        {
+            if (stage == "password")
             {
-                var r = DellSetPassword(newBios);
-                steps.Add(new { id = "password", attempted = r.attempted, success = r.success, message = r.message });
-                Config.Log("bios harden: password vendor=dell success=" + r.success + " msg=" + r.message);
+                var r = dellOk ? DellSetPassword(newBios, curBios) : vendor == "lenovo" ? LenovoSetPassword(newBios, curBios) : HpSetPassword(newBios, curBios);
+                Add("password", (r.attempted, r.success, null, r.message));
             }
-            if (wantUsbBlock) steps.Add(new { id = "usbBoot", attempted = false, success = false, settingName = (string)null, message = "ב-Dell חסימת אתחול USB מוגדרת ידנית ב-BIOS (F2 באתחול) - לא נתמכת אוטומטית" });
-            if (wantBootMenuAuth) steps.Add(new { id = "bootMenuAuth", attempted = false, success = false, settingName = (string)null, message = "ב-Dell נעילת תפריט האתחול מוגדרת ידנית ב-BIOS (F2 באתחול) - לא נתמכת אוטומטית" });
-            return new { vendor, manufacturer = raw, model, steps };
+            else if (dellOk) Add(stage, DellApplyStage(stage, curBios));
+            else Add(stage, vendor == "lenovo" ? LenovoApplyStage(stage, curBios) : HpApplyStage(stage, curBios));
         }
-        if (wantPassword)
-        {
-            var r = vendor == "lenovo" ? LenovoSetPassword(newBios) : HpSetPassword(newBios);
-            steps.Add(new { id = "password", attempted = r.attempted, success = r.success, message = r.message });
-            Config.Log("bios harden: password vendor=" + vendor + " success=" + r.success + " msg=" + r.message);
-        }
-        if (wantUsbBlock)
-        {
-            var r = vendor == "lenovo" ? LenovoBlockUsbBoot() : HpBlockUsbBoot();
-            steps.Add(new { id = "usbBoot", attempted = r.attempted, success = r.success, settingName = r.settingName, message = r.message });
-            Config.Log("bios harden: usbBoot vendor=" + vendor + " setting=" + r.settingName + " success=" + r.success + " msg=" + r.message);
-        }
-        if (wantBootMenuAuth)
-        {
-            var r = vendor == "lenovo" ? LenovoLockBootMenu() : HpLockBootMenu();
-            steps.Add(new { id = "bootMenuAuth", attempted = r.attempted, success = r.success, settingName = r.settingName, message = r.message });
-            Config.Log("bios harden: bootMenuAuth vendor=" + vendor + " setting=" + r.settingName + " success=" + r.success + " msg=" + r.message);
-        }
-        return new { vendor, manufacturer = raw, model, steps };
+
+        // כשל בשלב אינו שקט: הקשחה חלקית נראית חלקית, והמנהל מקבל הוראה ברורה
+        bool failed = failedIds.Count > 0;
+        string summary = failed
+            ? "הקשחה לא הושלמה: " + string.Join(", ", failedIds) +
+              ". יש לטפל ידנית ב-BIOS או לנסות שוב (אם כבר מוגדרת סיסמת BIOS, יש להזין אותה בשדה הסיסמה הנוכחית)."
+            : "ההקשחה הושלמה (השינויים נכנסים לתוקף באתחול הבא)";
+        if (failed) Config.Log("bios harden: " + summary);
+        return new { vendor, manufacturer = raw, model, complete = !failed, summary, steps };
     }
 
     // ---------- זיהוי הגדרת "אתחול מ-USB" בלי להניח שם קבוע (משתנה בין דגמים) ----------
@@ -217,7 +261,7 @@ public static class BiosHardening
         "usb storage boot", "legacy usb boot", "boot external devices", "external boot device",
     };
 
-    private static bool LooksLikeUsbBootSetting(string name)
+    internal static bool LooksLikeUsbBootSetting(string name)
     {
         if (string.IsNullOrEmpty(name)) return false;
         string n = name.ToLowerInvariant();
@@ -229,7 +273,42 @@ public static class BiosHardening
     }
 
     /// <summary>
-    /// הגדרה שדורשת סיסמת מנהל כדי בכלל להיכנס לתפריט האתחול (F9/F12 וכו') - נמצאה בפועל על HP EliתeBook
+    /// אתחול מהרשת: PXE / UEFI Network Stack / Boot from LAN. מוציאים Wake-on-LAN/WLAN/Bluetooth: אלה לא אתחול מהרשת,
+    /// וכיבוי שלהם עלול לפגוע בניהול (WoL) בלי להועיל. "network" לבדו לא מספיק: חייב גם boot/stack/pxe.
+    /// </summary>
+    internal static bool LooksLikeNetworkBootSetting(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        string n = name.ToLowerInvariant();
+        if (n.Contains("wake") || n.Contains("wol") || n.Contains("wlan") || n.Contains("wifi") || n.Contains("wi-fi") || n.Contains("bluetooth")) return false;
+        if (n.Contains("pxe") || n.Contains("network stack") || n.Contains("netstack")) return true;
+        bool net = n.Contains("network") || System.Text.RegularExpressions.Regex.IsMatch(n, @"\blan\b");
+        return net && (n.Contains("boot") || n.Contains("stack"));
+    }
+
+    /// <summary>
+    /// Legacy/CSM: מאפשרים אתחול ללא Secure Boot ואתחול OROM ישן. לא נוגעים ב"Legacy USB Support" (מקלדת USB לפני אתחול;
+    /// כיבויו עלול לנעול את המנהל מחוץ ל-BIOS); כל שם עם "usb" מוחרג כאן.
+    /// </summary>
+    internal static bool LooksLikeLegacySetting(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        string n = name.ToLowerInvariant();
+        if (n.Contains("usb")) return false;
+        return n.Contains("csm") || n.Contains("compatibility support") || n.Contains("legacy boot") || n.Contains("legacy support")
+            || n.Contains("legacy mode") || n.Contains("legacy option rom") || n.Contains("legacy rom");
+    }
+
+    /// <summary>נעילת סדר האתחול (מניעת שינוי סדר/הוספת התקן): הגדרה שמכילה "boot order" יחד עם lock/prevent/protect</summary>
+    internal static bool LooksLikeBootOrderLockSetting(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        string n = name.ToLowerInvariant();
+        return n.Contains("boot order") && (n.Contains("lock") || n.Contains("prevent") || n.Contains("protect") || n.Contains("disallow"));
+    }
+
+    /// <summary>
+    /// הגדרה שדורשת סיסמת מנהל כדי בכלל להיכנס לתפריט האתחול (F9/F12 וכו') - נמצאה בפועל על HP EliteBook
     /// 840 G8 בשם "Prompt for Admin authentication on F9 (Boot Menu)". חסימה חזקה יותר מחסימת USB בלבד:
     /// סוגרת גישה לכל תפריט האתחול, לא רק ל-USB. שם ההגדרה משתנה בין דגמים, אז חיפוש גמיש גם כאן.
     /// </summary>
@@ -239,7 +318,7 @@ public static class BiosHardening
         "require password for boot menu", "password for f9", "password for f12",
     };
 
-    private static bool LooksLikeBootMenuAuthSetting(string name)
+    internal static bool LooksLikeBootMenuAuthSetting(string name)
     {
         if (string.IsNullOrEmpty(name)) return false;
         string n = name.ToLowerInvariant();
@@ -249,24 +328,85 @@ public static class BiosHardening
         return hasBootMenu && hasAuth;
     }
 
-    /// <summary>מערך הערכים האפשריים לערך "חסום/כבוי" (disable/off/no/...); null אם לא ברור</summary>
+    /// <summary>ערכים שמשמעותם "חסום/כבוי". התאמה מדויקת בלבד</summary>
     private static readonly string[] DisableWords = { "disable", "disabled", "off", "no", "block", "blocked" };
-    /// <summary>מערך הערכים האפשריים לערך "מופעל" (enable/on/yes/require/...); null אם לא ברור</summary>
-    private static readonly string[] EnableWords = { "enable", "enabled", "on", "yes", "require", "prompt" };
+    /// <summary>ערכים שמשמעותם "מופעל" (דורש סיסמה/נעול). התאמה מדויקת בלבד</summary>
+    private static readonly string[] EnableWords = { "enable", "enabled", "on", "yes", "require", "required", "prompt", "lock", "locked" };
 
-    private static string PickValue(string[] possible, string[] words)
+    /// <summary>
+    /// בוחר ערך אפשרי לפי התאמה מדויקת (אחרי trim, הורדת כוכבית ואותיות קטנות), לא Contains:
+    /// WHY: Contains על "no" בחר בטעות את "Normal"/"Nothing" כ-disable. מחזיר את הערך כפי שמופיע ב-firmware.
+    /// </summary>
+    internal static string PickValue(string[] possible, string[] words)
     {
         if (possible == null) return null;
-        foreach (string p in possible)
-        {
-            string low = (p ?? "").ToLowerInvariant();
-            if (words.Any(low.Contains)) return p;
-        }
+        foreach (string w in words)
+            foreach (string p in possible)
+            {
+                string clean = (p ?? "").Trim().TrimStart('*').Trim();
+                if (string.Equals(clean, w, StringComparison.OrdinalIgnoreCase)) return clean;
+            }
         return null;
     }
 
-    private static string PickDisableValue(string[] possible) => PickValue(possible, DisableWords);
-    private static string PickEnableValue(string[] possible) => PickValue(possible, EnableWords);
+    internal static string PickDisableValue(string[] possible) => PickValue(possible, DisableWords);
+    internal static string PickEnableValue(string[] possible) => PickValue(possible, EnableWords);
+
+    internal sealed class StageSpecInfo
+    {
+        public Func<string, bool> Matcher;
+        public Func<string[], string> Picker;
+        public string NotFound, Label;
+    }
+
+    /// <summary>לכל שלב: אילו שמות הגדרות רלוונטיים ואיזה ערך לבחור</summary>
+    internal static StageSpecInfo StageSpec(string stage) => stage switch
+    {
+        "usbBoot" => new StageSpecInfo { Matcher = LooksLikeUsbBootSetting, Picker = PickDisableValue, Label = "חוסם אתחול USB",
+            NotFound = "לא נמצאה הגדרת BIOS לאתחול מהתקן USB/חיצוני. ייתכן שהדגם קורא לה בשם אחר או שאינה חשופה - יש לבדוק ידנית בתפריט ה-BIOS" },
+        "networkBoot" => new StageSpecInfo { Matcher = LooksLikeNetworkBootSetting, Picker = PickDisableValue, Label = "חוסם אתחול רשת",
+            NotFound = "לא נמצאה הגדרת BIOS לאתחול מהרשת (PXE / UEFI Network Stack). יש לבדוק ידנית בתפריט ה-BIOS" },
+        "legacy" => new StageSpecInfo { Matcher = LooksLikeLegacySetting, Picker = PickDisableValue, Label = "מכבה Legacy/CSM",
+            NotFound = "לא נמצאה הגדרת Legacy/CSM. ייתכן שהדגם UEFI בלבד (אז אין מה לכבות), או שיש לבדוק ידנית בתפריט ה-BIOS" },
+        "bootOrder" => new StageSpecInfo { Matcher = LooksLikeBootOrderLockSetting, Picker = PickEnableValue, Label = "נועל סדר אתחול",
+            NotFound = "לא נמצאה הגדרת נעילת סדר האתחול. יש לבדוק ידנית בתפריט ה-BIOS" },
+        "bootMenuAuth" => new StageSpecInfo { Matcher = LooksLikeBootMenuAuthSetting, Picker = PickEnableValue, Label = "דורש סיסמה לתפריט אתחול",
+            NotFound = "לא נמצאה הגדרה שדורשת סיסמת מנהל לתפריט האתחול (F9/F12). אומת בפועל ש-HP EliteBook 840 G8 חושפת הגדרה כזו תחת \"Prompt for Admin authentication on F9 (Boot Menu)\"" },
+        _ => throw new ArgumentException("שלב לא מוכר: " + stage),
+    };
+
+    /// <summary>
+    /// תכנון (טהור): עבור שלב והרשימה הנוכחית, אילו הגדרות לשנות ולאיזה ערך. מטפל בכל ההגדרות התואמות (למשל IPv4+IPv6 PXE),
+    /// לא רק בראשונה. הגדרה שכבר בערך הרצוי מסומנת alreadyOk; הגדרה בלי ערך מזוהה: newValue=null עם unknownMsg.
+    /// </summary>
+    internal static List<(string name, string newValue, bool alreadyOk, string unknownMsg)> PlanStage(string stage, IEnumerable<(string name, string value, string[] possible)> settings)
+    {
+        var spec = StageSpec(stage);
+        var list = new List<(string, string, bool, string)>();
+        foreach (var s in settings.Where(x => spec.Matcher(x.name)))
+        {
+            string nv = spec.Picker(s.possible);
+            if (nv == null)
+                list.Add((s.name, null, false, "נמצאה הגדרה \"" + s.name + "\" אך לא ניתן לזהות איזה מהערכים (" + string.Join(", ", s.possible ?? Array.Empty<string>()) + ") " + spec.Label + " - יש להגדיר ידנית"));
+            else
+            {
+                string v = s.value ?? "";
+                string cur = v.Split(',').Select(x => x.Trim()).FirstOrDefault(x => x.StartsWith("*"))?.TrimStart('*').Trim() ?? v.Trim();
+                list.Add((s.name, nv, string.Equals(cur, nv, StringComparison.OrdinalIgnoreCase), null));
+            }
+        }
+        return list;
+    }
+
+    /// <summary>איחוד תוצאות של כמה הגדרות בשלב אחד: הצלחה רק אם כולן הצליחו; ללא הגדרות כלל = כשל עם הודעת "לא נמצא"</summary>
+    internal static (bool attempted, bool success, string settingName, string message) Combine(
+        string notFound, List<(bool attempted, bool success, string name, string message)> parts)
+    {
+        if (parts.Count == 0) return (false, false, null, notFound);
+        bool ok = parts.All(p => p.success);
+        return (parts.Any(p => p.attempted), ok, string.Join(", ", parts.Select(p => p.name)),
+            string.Join(" | ", parts.Select(p => p.message)));
+    }
 
     // ---------- Lenovo: root\wmi ----------
 
@@ -296,7 +436,7 @@ public static class BiosHardening
         return list;
     }
 
-    private static (string name, string value, string[] possible) ParseLenovoLine(string line)
+    internal static (string name, string value, string[] possible) ParseLenovoLine(string line)
     {
         if (string.IsNullOrWhiteSpace(line)) return (null, null, null);
         // פורמטים: "שם,ערך;[Optional:א,ב,ג]" או "שם,ערך,[א,ב,ג]" - הראש נגמר ב-';' או ב-'[' הראשון
@@ -317,7 +457,27 @@ public static class BiosHardening
         return (name.Length == 0 ? null : name, value, possible);
     }
 
-    private static (bool attempted, bool success, string message) LenovoSetPassword(string newBiosPassword)
+    /// <summary>
+    /// מצב סיסמת Supervisor לפי Lenovo_BiosPasswordSettings.PasswordState (מסכת ביטים: 2 = Supervisor מוגדרת).
+    /// null אם לא ניתן לקרוא. לא נבדק על ThinkPad אמיתי (אין כזה בסביבת הפיתוח).
+    /// </summary>
+    private static bool? LenovoSupervisorSet()
+    {
+        try
+        {
+            using var s = new ManagementObjectSearcher(@"root\wmi", "SELECT PasswordState FROM Lenovo_BiosPasswordSettings");
+            foreach (ManagementObject o in s.Get())
+                using (o) return (Convert.ToInt32(o["PasswordState"]) & 2) != 0;
+        }
+        catch (Exception ex) { Config.Log("bios lenovo password state: " + ex.Message); }
+        return null;
+    }
+
+    /// <summary>סיומת הסיסמה הנוכחית לפרמטרים של Lenovo: ",pwd,ascii,us" כשמוגדרת סיסמה, אחרת ריק</summary>
+    internal static string LenovoPwdSuffix(string currentPassword) =>
+        string.IsNullOrEmpty(currentPassword) ? "" : "," + currentPassword + ",ascii,us";
+
+    private static (bool attempted, bool success, string message) LenovoSetPassword(string newBiosPassword, string currentPassword)
     {
         try
         {
@@ -326,15 +486,18 @@ public static class BiosHardening
             {
                 using (o)
                 {
-                    // "pap" = סיסמת Supervisor/Admin (שולטת גם בהגדרות אתחול). CurrentPassword ריק = אין סיסמה מוגדרת כרגע —
-                    // אם כבר מוגדרת סיסמה אחרת (לא ידועה לנו) הקריאה פשוט נכשלת; לא דורסים סיסמה קיימת בלי לדעת אותה
-                    string parameter = "pap,," + newBiosPassword + ",ascii,us";
+                    // "pap" = סיסמת Supervisor/Admin (שולטת גם בהגדרות אתחול). הפרמטר השני הוא הסיסמה הנוכחית (ריק = אין).
+                    // לא דורסים סיסמה קיימת שלא ידועה לנו: הקריאה פשוט נכשלת
+                    string parameter = "pap," + (currentPassword ?? "") + "," + newBiosPassword + ",ascii,us";
                     string text = LenovoCall(o, "SetBiosPassword", parameter);
                     bool ok = text.Equals("Success", StringComparison.OrdinalIgnoreCase);
-                    return (true, ok, ok
-                        ? "סיסמת ה-BIOS הוגדרה בהצלחה"
-                        : "הגדרת סיסמת ה-BIOS נכשלה: " + (string.IsNullOrEmpty(text) ? "תשובה לא ידועה מה-firmware" : text) +
-                          " — ייתכן שכבר מוגדרת סיסמה אחרת (לא נדרסת בלי לדעת אותה), או שהדגם אינו תומך בפרמטר הזה");
+                    if (!ok)
+                        return (true, false, "הגדרת סיסמת ה-BIOS נכשלה: " + (string.IsNullOrEmpty(text) ? "תשובה לא ידועה מה-firmware" : text) +
+                              " — ייתכן שכבר מוגדרת סיסמה אחרת (יש להזין אותה כסיסמה נוכחית), או שהדגם אינו תומך בפרמטר הזה");
+                    // אימות מצב (לא רק "Success"): הסיסמה אמורה להופיע כמוגדרת
+                    bool? set = LenovoSupervisorSet();
+                    if (set == false) return (true, false, "ה-firmware החזיר Success אך הסיסמה לא מופיעה כמוגדרת (PasswordState). יש לוודא ידנית בתפריט ה-BIOS");
+                    return (true, true, set == true ? "סיסמת ה-BIOS הוגדרה ואומתה (PasswordState)" : "סיסמת ה-BIOS הוגדרה (לא ניתן היה לאמת מול PasswordState - מומלץ לבדוק ידנית)");
                 }
             }
             return (false, false, "לא נמצא ממשק Lenovo_SetBiosPassword במחשב זה");
@@ -346,61 +509,61 @@ public static class BiosHardening
         }
     }
 
-    private static (bool attempted, bool success, string settingName, string message) LenovoBlockUsbBoot() =>
-        LenovoApplySetting(LooksLikeUsbBootSetting, PickDisableValue,
-            "לא נמצאה במחשב זה הגדרת BIOS שקשורה לאתחול מהתקן USB/חיצוני. ייתכן שהדגם קורא לה בשם אחר, " +
-                "או שאין הגדרה כזו בדגם הזה — יש לבדוק ידנית בתפריט ה-BIOS",
-            "חוסם אתחול");
-
-    private static (bool attempted, bool success, string settingName, string message) LenovoLockBootMenu() =>
-        LenovoApplySetting(LooksLikeBootMenuAuthSetting, PickEnableValue,
-            "לא נמצאה במחשב זה הגדרת BIOS שדורשת סיסמת מנהל לכניסה לתפריט האתחול (F9/F12). ייתכן שהדגם קורא לה בשם אחר, " +
-                "או שאין הגדרה כזו בדגם הזה — יש לבדוק ידנית בתפריט ה-BIOS",
-            "דורש סיסמה לתפריט אתחול");
-
-    /// <summary>הלוגיקה המשותפת: מוצא הגדרה לפי matcher, בוחר ערך לפי valuePicker, כותב ושומר (Lenovo דורש שלב שמירה נפרד)</summary>
-    private static (bool attempted, bool success, string settingName, string message) LenovoApplySetting(
-        Func<string, bool> matcher, Func<string[], string> valuePicker, string notFoundMsg, string kindLabel)
+    /// <summary>שלב חסימה אחד ב-Lenovo: כל ההגדרות התואמות (לא רק הראשונה), כל אחת נכתבת ונשמרת ומאומתת בקריאה חוזרת</summary>
+    private static (bool attempted, bool success, string settingName, string message) LenovoApplyStage(string stage, string currentPassword)
     {
+        var spec = StageSpec(stage);
         var settings = LenovoSettings(out string err);
         if (err != null) return (false, false, null, "קריאת הגדרות ה-BIOS נכשלה: " + err);
-        var setting = settings.FirstOrDefault(s => matcher(s.name));
-        if (setting.name == null) return (false, false, null, notFoundMsg);
-        string newValue = valuePicker(setting.possible);
-        if (newValue == null)
-            return (false, false, setting.name, "נמצאה הגדרה \"" + setting.name + "\" אך לא ניתן לזהות אוטומטית איזה מהערכים האפשריים (" +
-                string.Join(", ", setting.possible ?? Array.Empty<string>()) + ") " + kindLabel + " — יש להגדיר ידנית בתפריט ה-BIOS");
+        var plan = PlanStage(stage, settings);
+        var parts = new List<(bool attempted, bool success, string name, string message)>();
+        foreach (var p in plan)
+        {
+            if (p.newValue == null) { parts.Add((false, false, p.name, p.unknownMsg)); continue; }
+            if (p.alreadyOk) { parts.Add((false, true, p.name, "\"" + p.name + "\" כבר \"" + p.newValue + "\"")); continue; }
+            var r = LenovoWriteSetting(p.name, p.newValue, currentPassword);
+            parts.Add((r.attempted, r.success, p.name, r.message));
+        }
+        return Combine(spec.NotFound, parts);
+    }
 
+    private static (bool attempted, bool success, string message) LenovoWriteSetting(string name, string newValue, string currentPassword)
+    {
         try
         {
+            string suffix = LenovoPwdSuffix(currentPassword);
             string setText = "";
             using (var setS = new ManagementObjectSearcher(@"root\wmi", "SELECT * FROM Lenovo_SetBiosSetting"))
                 foreach (ManagementObject o in setS.Get())
                 {
-                    using (o) { setText = LenovoCall(o, "SetBiosSetting", setting.name + "," + newValue); }
+                    using (o) { setText = LenovoCall(o, "SetBiosSetting", name + "," + newValue + suffix); }
                     break;
                 }
-            bool setOk = setText.Equals("Success", StringComparison.OrdinalIgnoreCase);
-            if (!setOk)
-                return (true, false, setting.name, "שינוי ההגדרה \"" + setting.name + "\" נכשל: " + (string.IsNullOrEmpty(setText) ? "תשובה לא ידועה" : setText) +
-                    " — בדגמי Lenovo רבים נדרשת סיסמת Supervisor מוגדרת מראש לפני שינוי הגדרות דרך WMI");
+            if (!setText.Equals("Success", StringComparison.OrdinalIgnoreCase))
+                return (true, false, "שינוי ההגדרה \"" + name + "\" נכשל: " + (string.IsNullOrEmpty(setText) ? "תשובה לא ידועה" : setText) +
+                    " — אם כבר מוגדרת סיסמת Supervisor יש להזין אותה כסיסמה נוכחית (Access Denied אחרת)");
 
             string saveText = "";
+            string saveParam = string.IsNullOrEmpty(currentPassword) ? "" : currentPassword + ",ascii,us";
             using (var saveS = new ManagementObjectSearcher(@"root\wmi", "SELECT * FROM Lenovo_SaveBiosSettings"))
                 foreach (ManagementObject o in saveS.Get())
                 {
-                    using (o) { saveText = LenovoCall(o, "SaveBiosSettings", ""); }
+                    using (o) { saveText = LenovoCall(o, "SaveBiosSettings", saveParam); }
                     break;
                 }
-            bool saveOk = saveText.Equals("Success", StringComparison.OrdinalIgnoreCase);
-            return (true, saveOk, setting.name, saveOk
-                ? "ההגדרה \"" + setting.name + "\" הוגדרה ל-\"" + newValue + "\" ונשמרה. השינוי ייכנס לתוקף מההפעלה הבאה"
-                : "ההגדרה שונתה אבל השמירה (SaveBiosSettings) נכשלה: " + saveText);
+            if (!saveText.Equals("Success", StringComparison.OrdinalIgnoreCase))
+                return (true, false, "ההגדרה \"" + name + "\" שונתה אבל השמירה (SaveBiosSettings) נכשלה: " + saveText);
+
+            // אימות בקריאה חוזרת: ללא זה "Success" לא מוכיח שהערך באמת השתנה
+            var now = LenovoSettings(out _).FirstOrDefault(x => x.name == name);
+            if (now.name != null && !string.Equals(now.value, newValue, StringComparison.OrdinalIgnoreCase))
+                return (true, false, "ההגדרה \"" + name + "\" נשמרה אך הערך עדיין \"" + now.value + "\" (נדרש \"" + newValue + "\") - לא אומת");
+            return (true, true, "\"" + name + "\" הוגדרה ל-\"" + newValue + "\" ונשמרה. תיכנס לתוקף מההפעלה הבאה");
         }
         catch (Exception ex)
         {
             Config.Log("bios lenovo apply-setting: " + ex.Message);
-            return (true, false, setting.name, "שינוי ההגדרה נכשל: " + ex.Message);
+            return (true, false, "שינוי ההגדרה \"" + name + "\" נכשל: " + ex.Message);
         }
     }
 
@@ -427,24 +590,113 @@ public static class BiosHardening
     }
 
     /// <summary>
-    /// לא נבדק על מחשב Dell אמיתי (אין כזה בסביבת הפיתוח): מריץ את cctk ומדווח את הפלט שלו כפי שהוא, ומכריז
-    /// הצלחה רק אם הפלט מכיל "success" ואין בו שגיאה - ובכל מקרה ממליץ לאמת בכניסה ל-BIOS (F2 באתחול)
+    /// אפשרויות cctk לכל שלב (לא נבדק על Dell אמיתי). uefinetworkstack ו-legacyorom הם שמות האפשרויות ב-cctk; אין ל-Dell אפשרות
+    /// מתועדת לתפריט אתחול/סדר אתחול נעול, ולכן אלה נשארים ידניים.
     /// </summary>
-    private static (bool attempted, bool success, string message) DellSetPassword(string newBiosPassword)
+    internal static string DellOptionForStage(string stage) => stage switch
+    {
+        "networkBoot" => "uefinetworkstack=disabled",
+        "legacy" => "legacyorom=disabled",
+        _ => null,
+    };
+
+    /// <summary>
+    /// הפקודה של cctk: אפשרות רגילה בשורת הפקודה, אבל כל מה שמכיל סיסמה עובר בקובץ זמני (-i) כדי שלא יופיע בשורת
+    /// הפקודה של התהליך (נראית לכל משתמש ב-Task Manager/WMI). הקובץ נכתב עם ACL שמגביל ליוצר+SYSTEM+Administrators,
+    /// ובסיום נדרס באפסים ונמחק. פורמט הקובץ (שורה לכל אפשרות, בלי "--") לפי התיעוד של cctk; לא נבדק על Dell אמיתי.
+    /// </summary>
+    private static string DellRun(string cctk, IEnumerable<string> options, bool hasSecret)
+    {
+        var opts = options.ToList();
+        if (!hasSecret) return Config.Run(cctk, string.Join(" ", opts.Select(o => "--" + o)), 30000).Trim();
+
+        string dir = Path.Combine(HardLock.DataDir, "tmp");
+        Directory.CreateDirectory(dir);
+        string file = Path.Combine(dir, Guid.NewGuid().ToString("N") + ".cctk");
+        try
+        {
+            var fs = new System.Security.AccessControl.FileSecurity();
+            fs.SetAccessRuleProtection(true, false);
+            foreach (var sid in new[] { System.Security.Principal.WindowsIdentity.GetCurrent().User,
+                                        new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.LocalSystemSid, null),
+                                        new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null) })
+                fs.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(sid, System.Security.AccessControl.FileSystemRights.FullControl, System.Security.AccessControl.AccessControlType.Allow));
+            using (var f = System.IO.FileSystemAclExtensions.Create(new FileInfo(file), FileMode.CreateNew, System.Security.AccessControl.FileSystemRights.FullControl, FileShare.None, 4096, FileOptions.None, fs))
+            using (var w = new StreamWriter(f, new System.Text.UTF8Encoding(false)))
+                foreach (string o in opts) w.WriteLine(o);
+            return Config.Run(cctk, "-i \"" + file + "\"", 30000).Trim();
+        }
+        finally
+        {
+            try { long len = new FileInfo(file).Length; File.WriteAllBytes(file, new byte[Math.Max(len, 1)]); File.Delete(file); }
+            catch (Exception ex) { Config.Log("bios dell temp cleanup: " + ex.Message); }
+        }
+    }
+
+    internal static bool DellOutputOk(string text) =>
+        text.IndexOf("success", StringComparison.OrdinalIgnoreCase) >= 0 &&
+        text.IndexOf("error", StringComparison.OrdinalIgnoreCase) < 0 && text.IndexOf("fail", StringComparison.OrdinalIgnoreCase) < 0;
+
+    /// <summary>קריאת ערך נוכחי של אפשרות ב-cctk ("uefinetworkstack=Disabled" → "Disabled")</summary>
+    internal static string DellParseValue(string text, string option)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(text ?? "", @"^\s*" + System.Text.RegularExpressions.Regex.Escape(option) + @"\s*=\s*(\S+)", System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return m.Success ? m.Groups[1].Value : null;
+    }
+
+    private static (bool attempted, bool success, string settingName, string message) DellApplyStage(string stage, string currentPassword)
+    {
+        string cctk = DellCctkPath();
+        if (cctk == null) return (false, false, null, "Dell Command | Configure אינו מותקן במחשב זה");
+        string opt = DellOptionForStage(stage);
+        if (opt == null)
+            return (false, false, null, "ב-Dell השלב \"" + stage + "\" מוגדר ידנית ב-BIOS (F2 באתחול) - אין אפשרות cctk מתועדת");
+        try
+        {
+            string name = opt.Split('=')[0], want = opt.Split('=')[1];
+            var options = new List<string>();
+            bool secret = !string.IsNullOrEmpty(currentPassword);
+            if (secret) options.Add("valsetuppwd=" + currentPassword); // סיסמה נוכחית, בקובץ בלבד
+            options.Add(opt);
+            string text = DellRun(cctk, options, secret);
+            Config.Log("bios dell cctk " + name + ": " + text.Replace(currentPassword ?? "\u0001", "***"));
+            // אימות: קריאה חוזרת של האפשרות
+            string back = DellParseValue(Config.Run(cctk, "--" + name, 30000), name);
+            bool ok = back != null && string.Equals(back, want, StringComparison.OrdinalIgnoreCase);
+            if (back == null) ok = DellOutputOk(text); // אין קריאה חוזרת: נשענים על פלט הפקודה ומציינים
+            return (true, ok, name, ok ? name + " הוגדר ל-" + want + (back == null ? " (לא אומת בקריאה חוזרת; לא נבדק על Dell אמיתי)" : " (אומת)")
+                                       : name + " לא הוגדר: " + (text.Length == 0 ? "אין פלט" : text.Replace(currentPassword ?? "\u0001", "***")));
+        }
+        catch (Exception ex)
+        {
+            Config.Log("bios dell apply: " + ex.Message);
+            return (true, false, null, "הרצת cctk נכשלה: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// לא נבדק על מחשב Dell אמיתי: סיסמה בקובץ זמני מוגן (לא בשורת הפקודה), הצלחה רק אם הפלט מכיל "success" ואין שגיאה,
+    /// ובכל מקרה ממליץ לאמת בכניסה ל-BIOS (F2 באתחול)
+    /// </summary>
+    private static (bool attempted, bool success, string message) DellSetPassword(string newBiosPassword, string currentPassword)
     {
         string cctk = DellCctkPath();
         if (cctk == null) return (false, false, "Dell Command | Configure אינו מותקן במחשב זה");
-        if (!System.Text.RegularExpressions.Regex.IsMatch(newBiosPassword, @"^[A-Za-z0-9!@#_.\-]{4,32}$"))
-            return (false, false, "ב-Dell נתמכות רק אותיות באנגלית, ספרות והתווים ! @ # _ . - (4 עד 32 תווים)");
+        if (!System.Text.RegularExpressions.Regex.IsMatch(newBiosPassword, @"^[A-Za-z0-9!@#_.\-]{" + MinBiosPassword + @",32}$"))
+            return (false, false, "ב-Dell נתמכות רק אותיות באנגלית, ספרות והתווים ! @ # _ . - (" + MinBiosPassword + " עד 32 תווים)");
         try
         {
-            string text = Config.Run(cctk, "--setuppwd=" + newBiosPassword, 30000).Trim();
-            Config.Log("bios dell cctk: " + text);
-            bool ok = text.IndexOf("success", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                      text.IndexOf("error", StringComparison.OrdinalIgnoreCase) < 0 && text.IndexOf("fail", StringComparison.OrdinalIgnoreCase) < 0;
+            var options = new List<string>();
+            if (!string.IsNullOrEmpty(currentPassword)) options.Add("valsetuppwd=" + currentPassword);
+            options.Add("setuppwd=" + newBiosPassword);
+            string text = DellRun(cctk, options, true);
+            string safe = text.Replace(newBiosPassword, "***");
+            if (!string.IsNullOrEmpty(currentPassword)) safe = safe.Replace(currentPassword, "***");
+            Config.Log("bios dell cctk: " + safe);
+            bool ok = DellOutputOk(text);
             return (true, ok, ok
                 ? "cctk דיווח הצלחה. מומלץ לוודא בכניסה ל-BIOS (F2 באתחול) - הפעולה לא נבדקה על דגם Dell אמיתי"
-                : "cctk לא דיווח הצלחה: " + (text.Length == 0 ? "אין פלט" : text) + " — אפשר להגדיר ידנית ב-BIOS (F2 באתחול)");
+                : "cctk לא דיווח הצלחה: " + (safe.Length == 0 ? "אין פלט" : safe) + " — אפשר להגדיר ידנית ב-BIOS (F2 באתחול)");
         }
         catch (Exception ex)
         {
@@ -516,7 +768,10 @@ public static class BiosHardening
     /// האמיתית מול HP_BIOSPassword.IsSet אחרי הקריאה - כי קוד התשובה של SetBIOSSetting לבדו לא אמין:
     /// אומת בפועל על HP EliteBook 840 G8 שהקריאה יכולה "להצליח" (קוד 0) בעוד IsSet נשאר 0.
     /// </summary>
-    private static (bool attempted, bool success, string message) HpSetPassword(string newBiosPassword)
+    /// <summary>ארגומנט הסיסמה הנוכחית ל-HP: ריק אם אין; אחרת בקידוד Unicode (&lt;utf-16/&gt;)</summary>
+    internal static string HpPwdArg(string pw) => string.IsNullOrEmpty(pw) ? "" : "<utf-16/>" + pw;
+
+    private static (bool attempted, bool success, string message) HpSetPassword(string newBiosPassword, string currentPassword)
     {
         var (wasSet, requiresPhysical) = HpPasswordState();
         try
@@ -534,7 +789,7 @@ public static class BiosHardening
                     // (אומת מול הגדרת המחלקה: Get-CimClass ...| select CimClassMethods['SetBIOSSetting'].Parameters).
                     // סיסמה חדשה בקידוד Unicode עוטפים ב-"<utf-16/>"; בלי סיסמה נוכחית מוגדרת משאירים ריק —
                     // אם כבר מוגדרת סיסמה אחרת (לא ידועה לנו) הקריאה נכשלת (Access Denied) ולא דורסת אותה
-                    uint? code = HpSetCall(o, "Setup Password", "", "<utf-16/>" + newBiosPassword);
+                    uint? code = HpSetCall(o, "Setup Password", HpPwdArg(currentPassword), "<utf-16/>" + newBiosPassword);
                     if (code != 0)
                         return (true, false, code == null
                             ? "הגדרת סיסמת ה-BIOS נכשלה: ה-BIOS לא החזיר קוד תשובה"
@@ -590,60 +845,55 @@ public static class BiosHardening
         return s.value;
     }
 
-    private static (bool attempted, bool success, string settingName, string message) HpBlockUsbBoot() =>
-        HpApplySetting(LooksLikeUsbBootSetting, PickDisableValue,
-            "לא נמצאה במחשב זה הגדרת BIOS שקשורה לאתחול מהתקן USB/חיצוני. ייתכן שהדגם קורא לה בשם אחר, " +
-                "או שהיא אינה חשופה ב-WMI בדגם הזה — יש לבדוק ידנית בתפריט ה-BIOS (F10 באתחול)",
-            "חוסם אתחול");
-
-    private static (bool attempted, bool success, string settingName, string message) HpLockBootMenu() =>
-        HpApplySetting(LooksLikeBootMenuAuthSetting, PickEnableValue,
-            "לא נמצאה במחשב זה הגדרת BIOS שדורשת סיסמת מנהל לכניסה לתפריט האתחול (F9/F12). ייתכן שהדגם קורא לה בשם אחר, " +
-                "או שהיא אינה חשופה ב-WMI בדגם הזה — יש לבדוק ידנית בתפריט ה-BIOS (F10 באתחול). " +
-                "אומת בפועל ש-HP EliteBook 840 G8 חושפת הגדרה כזו תחת השם \"Prompt for Admin authentication on F9 (Boot Menu)\".",
-            "דורש סיסמה לתפריט אתחול");
-
-    private static (bool attempted, bool success, string settingName, string message) HpApplySetting(
-        Func<string, bool> matcher, Func<string[], string> valuePicker, string notFoundMsg, string kindLabel)
+    /// <summary>שלב חסימה אחד ב-HP: כל ההגדרות התואמות (למשל IPv4 PXE + IPv6 PXE), כל אחת מאומתת בקריאה חוזרת</summary>
+    private static (bool attempted, bool success, string settingName, string message) HpApplyStage(string stage, string currentPassword)
     {
+        var spec = StageSpec(stage);
         var settings = HpSettings(out string err);
         if (err != null) return (false, false, null, "קריאת הגדרות ה-BIOS נכשלה: " + err);
-        var setting = settings.FirstOrDefault(s => matcher(s.name));
-        if (setting.name == null) return (false, false, null, notFoundMsg);
-        string newValue = valuePicker(setting.possible);
-        if (newValue == null)
-            return (false, false, setting.name, "נמצאה הגדרה \"" + setting.name + "\" אך לא ניתן לזהות אוטומטית איזה מהערכים האפשריים (" +
-                string.Join(", ", setting.possible ?? Array.Empty<string>()) + ") " + kindLabel + " — יש להגדיר ידנית בתפריט ה-BIOS");
+        var plan = PlanStage(stage, settings);
+        var parts = new List<(bool attempted, bool success, string name, string message)>();
+        foreach (var p in plan)
+        {
+            if (p.newValue == null) { parts.Add((false, false, p.name, p.unknownMsg)); continue; }
+            if (p.alreadyOk) { parts.Add((false, true, p.name, "\"" + p.name + "\" כבר \"" + p.newValue + "\"")); continue; }
+            var r = HpWriteSetting(p.name, p.newValue, currentPassword);
+            parts.Add((r.attempted, r.success, p.name, r.message));
+        }
+        return Combine(spec.NotFound, parts);
+    }
 
+    private static (bool attempted, bool success, string message) HpWriteSetting(string name, string newValue, string currentPassword)
+    {
         try
         {
-            // ר' הערה זהה ב-HpSetPassword: ManagementObjectSearcher הוא הדפוס המוכח-עובד כאן, לא GetInstances()
+            // ר' הערה ב-HpSetPassword: ManagementObjectSearcher הוא הדפוס המוכח-עובד כאן, לא GetInstances()
             using var s = new ManagementObjectSearcher(@"root\hp\instrumentedBIOS", "SELECT * FROM HP_BIOSSettingInterface");
             foreach (ManagementObject o in s.Get())
             {
                 using (o)
                 {
                     // סדר הפרמטרים האמיתי הוא (Name, Password-נוכחית, Value-חדש) - ר' הערה ב-HpSetPassword
-                    uint? code = HpSetCall(o, setting.name, "", newValue);
+                    uint? code = HpSetCall(o, name, HpPwdArg(currentPassword), newValue);
                     if (code != 0)
-                        return (true, false, setting.name, code == null
-                            ? "שינוי ההגדרה נכשל: ה-BIOS לא החזיר קוד תשובה"
-                            : "שינוי ההגדרה נכשל (קוד " + code + "): " + HpErrorText(code.Value));
-                    // קוד 0 לבדו לא הספיק: בעבר הקריאה הוחזרה ריקה (הפרמטר Return הוא פרמטר פלט) ונספרה כהצלחה בלי שהערך
-                    // השתנה בפועל (USB Storage Boot נשאר *Enable). מוודאים בקריאה חוזרת של הערך עצמו
-                    string now = HpCurrentValue(setting.name);
+                        return (true, false, code == null
+                            ? "שינוי \"" + name + "\" נכשל: ה-BIOS לא החזיר קוד תשובה"
+                            : "שינוי \"" + name + "\" נכשל (קוד " + code + "): " + HpErrorText(code.Value) +
+                              (code == 6 ? " — אם כבר מוגדרת סיסמת BIOS, יש להזין אותה כסיסמה נוכחית" : ""));
+                    // קוד 0 לבדו לא הספיק: בעבר הקריאה נספרה כהצלחה בלי שהערך השתנה בפועל. מוודאים בקריאה חוזרת
+                    string now = HpCurrentValue(name);
                     bool ok = string.Equals(now, newValue, StringComparison.OrdinalIgnoreCase);
-                    return (true, ok, setting.name, ok
-                        ? "ההגדרה \"" + setting.name + "\" שונתה ל-\"" + newValue + "\" (אומת בקריאה חוזרת). השינוי ייכנס לתוקף מההפעלה הבאה"
-                        : "ה-BIOS החזיר הצלחה אבל הערך לא השתנה בפועל (עכשיו: \"" + (now ?? "לא ידוע") + "\", נדרש: \"" + newValue + "\")");
+                    return (true, ok, ok
+                        ? "\"" + name + "\" שונתה ל-\"" + newValue + "\" (אומת בקריאה חוזרת). תיכנס לתוקף מההפעלה הבאה"
+                        : "ה-BIOS החזיר הצלחה אבל \"" + name + "\" לא השתנתה בפועל (עכשיו: \"" + (now ?? "לא ידוע") + "\", נדרש: \"" + newValue + "\")");
                 }
             }
-            return (false, false, setting.name, "לא נמצא ממשק HP_BIOSSettingInterface במחשב זה");
+            return (false, false, "לא נמצא ממשק HP_BIOSSettingInterface במחשב זה");
         }
         catch (Exception ex)
         {
             Config.Log("bios hp apply-setting: " + ex.Message);
-            return (true, false, setting.name, "שינוי ההגדרה נכשל: " + ex.Message);
+            return (true, false, "שינוי \"" + name + "\" נכשל: " + ex.Message);
         }
     }
 }
