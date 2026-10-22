@@ -76,11 +76,17 @@ public static class Tray
     private static void TryExit()
     {
         bool locked = false;
-        try { locked = Kiosk.IsActive || HardLock.ServiceActive; } catch { locked = true; }
+        // WHY: שירות מותקן ששותק (pipe) + config.json שנערך ל-active=false לא מתירים יציאה חופשית: fail-closed
+        try { locked = Kiosk.IsActive || HardLock.ServiceActive || Kiosk.ServiceDown(); } catch { locked = true; }
         if (!locked) { Application.ExitThread(); return; }
         using var f = new ExitPasswordForm();
         if (f.ShowDialog() != DialogResult.OK) return;
-        try { Kiosk.RequirePasswordOrRecovery(f.Password); }
+        try
+        {
+            // שירות מופסק באמת (SCM): אין מי שיאמת סיסמה; קוד שחזור בלבד מול ה-hash המקומי (כמו --unlock)
+            if (Kiosk.ServiceStopped()) { if (!Kiosk.IsRecoveryCode(f.Password)) throw BridgeException.BadRequest(Lang.T("רכיב ההקשחה מופסק: נדרש קוד שחזור", "Hardening service stopped: recovery code required")); }
+            else Kiosk.RequirePasswordOrRecovery(f.Password);
+        }
         catch (Exception ex)
         {
             Notify(Program.AppName, ex is BridgeException ? ex.Message : Lang.T("אימות נכשל", "Verification failed"));
@@ -124,6 +130,9 @@ public static class Tray
             _invoker.BeginInvoke(new Action(() => { try { a(); } catch (Exception ex) { Config.Log("ui: " + ex.Message); } }));
         else a();
     }
+
+    /// <summary>יציאה מהחוט הראשי אחרי שחרור חירום מאומת (Kiosk.PollEmergencyMarker)</summary>
+    internal static void ExitNow() => Invoke(() => Application.ExitThread());
 
     public static void SetKioskState(bool active) => Invoke(() =>
     {

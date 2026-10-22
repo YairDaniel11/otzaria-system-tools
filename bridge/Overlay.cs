@@ -16,9 +16,23 @@ public static class Overlay
     // בעיה #14 סעיף 3: חלון "RestScreen-like" אחד לכל מסך (Screen.AllScreens), כולם מוצגים/מוסתרים יחד
     private static readonly List<RestScreen> _rest = new();
 
-    public static bool RestVisible => _rest.Count > 0 && _rest[0].Visible;
+    public static bool RestVisible => _rest.Any(r => r.Visible);
     /// <summary>מסך המנוחה מוצג בגלל חוסר פעילות (ולא בגלל מזעור) — לא להסתיר אותו כשאוצריא לא ממוזערת</summary>
-    public static bool RestIdle => _rest.Count > 0 && _rest[0] is { Visible: true, Idle: true };
+    public static bool RestIdle => _rest.Any(r => r is { Visible: true, Idle: true });
+
+    /// <summary>
+    /// המסך שעליו חלון ביטול החירום פתוח (null = סגור). רק הוא נשאר בלי כיסוי, כדי שהחירום תמיד נגיש
+    /// וכל שאר המסכים נשארים מכוסים (מינימום חשיפה). חוט הממשק בלבד.
+    /// </summary>
+    private static string EmergencyScreen()
+    {
+        try
+        {
+            var f = Application.OpenForms.OfType<EmergencyForm>().FirstOrDefault(x => x.Visible && !x.IsDisposed);
+            return f == null ? null : Screen.FromControl(f).DeviceName;
+        }
+        catch { return null; }
+    }
 
     public static string HebrewDate(DateTime d)
     {
@@ -43,8 +57,8 @@ public static class Overlay
 
     public static void ShowRest(IntPtr otzaria, bool idle = false) => Tray.Invoke(() =>
     {
-        if (EmergencyForm.IsOpen) return; // חלון ביטול חירום פתוח - לא מכסים אותו
         var screens = Screen.AllScreens;
+        string skip = EmergencyScreen(); // חלון חירום פתוח: מכסים את כל המסכים חוץ מהמסך שלו (לא מכסים את החלון)
         // התאמה למספר המסכים (גם אם השתנה: חיבור/ניתוק מסך בזמן ריצה)
         while (_rest.Count < screens.Length) _rest.Add(new RestScreen());
         while (_rest.Count > screens.Length)
@@ -54,20 +68,19 @@ public static class Overlay
             extra.Dispose();
         }
         bool wasVisible = RestVisible;
-        foreach (var r in _rest)
+        bool shown = false;
+        for (int i = 0; i < _rest.Count; i++)
         {
+            var r = _rest[i];
             r.Target = otzaria;
-            if (!wasVisible) r.Idle = idle;
+            if (screens[i].DeviceName == skip) { if (r.Visible) r.Hide(); continue; }
+            if (r.Visible) continue;
+            if (!wasVisible && !r.Visible) r.Idle = idle;
+            r.Bounds = screens[i].Bounds;
+            r.Show();
+            shown = true;
         }
-        if (!wasVisible)
-        {
-            for (int i = 0; i < _rest.Count; i++)
-            {
-                _rest[i].Bounds = screens[i].Bounds;
-                _rest[i].Show();
-            }
-            if (_rest.Count > 0) _rest[0].Activate();
-        }
+        if (shown) { var first = _rest.FirstOrDefault(x => x.Visible); first?.Activate(); }
     });
 
     public static void HideRest() => Tray.Invoke(() => { foreach (var r in _rest) if (r.Visible) r.Hide(); });
@@ -94,10 +107,11 @@ public static class Overlay
         try
         {
             var screens = Screen.AllScreens;
-            // חלון ביטול חירום פתוח / סרגל מנוחה על כל המסכים: לא מכסים (כדי שהחירום תמיד נגיש)
-            if (screens.Length < 2 || !Config.Get("kiosk.coverOtherScreens", true) || EmergencyForm.IsOpen || RestVisible) { HideCovers(); return; }
+            // מסך מנוחה כבר מכסה את המסכים (חוץ ממסך החירום, אם פתוח): אין צורך בכיסוי נוסף
+            if (screens.Length < 2 || !Config.Get("kiosk.coverOtherScreens", true) || RestVisible) { HideCovers(); return; }
+            string skip = EmergencyScreen(); // מסך חלון החירום נשאר חשוף, כל השאר מכוסים
             Screen main = otzaria != IntPtr.Zero ? Screen.FromHandle(otzaria) : Screen.PrimaryScreen;
-            var others = screens.Where(sc => sc.DeviceName != main.DeviceName).ToArray();
+            var others = screens.Where(sc => sc.DeviceName != main.DeviceName && sc.DeviceName != skip).ToArray();
             while (_covers.Count < others.Length) _covers.Add(new BlackCover());
             while (_covers.Count > others.Length) { var x = _covers[^1]; _covers.RemoveAt(_covers.Count - 1); x.Dispose(); }
             for (int i = 0; i < others.Length; i++)
@@ -155,9 +169,8 @@ public static class Overlay
     {
         if (hwnd == IntPtr.Zero)
         {
-            string path = Kiosk.OtzariaPath();
-            string name = string.IsNullOrEmpty(path) ? "otzaria" : Path.GetFileNameWithoutExtension(path);
-            hwnd = Process.GetProcessesByName(name).Select(p => p.MainWindowHandle).FirstOrDefault(h => h != IntPtr.Zero);
+            // לפי נתיב התמונה ולא שם בלבד (Kiosk.FindOtzariaProcess)
+            hwnd = Kiosk.FindOtzariaProcess(Process.GetCurrentProcess().SessionId)?.MainWindowHandle ?? IntPtr.Zero;
         }
         if (hwnd == IntPtr.Zero) return;
         Kiosk.BringToFront(hwnd);
