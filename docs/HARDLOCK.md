@@ -22,7 +22,7 @@
 | רכיב | מיקום | הרשאות |
 |---|---|---|
 | השירות "קיוסק אוצריא" (`OtzariaBridgeService`) | `%ProgramFiles%\OtzariaBridge\OtzariaBridge.exe --service` | LocalSystem, הפעלה אוטומטית, הפעלה מחדש אם קרס |
-| מצב וסוד | `%ProgramData%\OtzariaBridge\hardlock.json` (ויומן `service.log`) | ‏ACL: רק SYSTEM ומנהלים כותבים, משתמשים קוראים |
+| מצב וסוד | `%ProgramData%\OtzariaBridge\hardlock.json` (ויומן `service.log`) | ‏ACL מוגן (ללא ירושה, `HardLock.SecureDir`): רק SYSTEM ומנהלים, קריאה וכתיבה. משתמש רגיל לא קורא ולא כותב (הגיבוב לא חשוף ל-brute-force לא מקוון). גרסה קודמת של המסמך כתבה "משתמשים קוראים", וזה לא תאם את הקוד ואת מדיניות ההקשחה |
 | ערוץ | Named Pipe `\\.\pipe\OtzariaBridgeService`, שורת JSON לבקשה ושורה לתשובה | משתמשים מחוברים: קריאה וכתיבה |
 
 **פקודות בצינור:**
