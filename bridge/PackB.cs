@@ -27,6 +27,7 @@ public static class PackB
         p = Environment.ExpandEnvironmentVariables(p.Trim());
         if (!Path.IsPathFullyQualified(p)) throw BridgeException.BadRequest("נדרש נתיב מלא: " + p);
         string full = PathPolicy.LongName(Path.GetFullPath(p));
+        full = FsApi.StrictNormalize(full);   // S3: בנעילה/הגבלה: ADS/שמות התקן שמורים נדחים (כמו FsApi.FullPath)
         FsApi.EnsureNotReadable(full);   // W2: סודות הגשר חסומים גם לדחיסה/חילוץ/גודל תיקייה
         FxPolicy.EnsurePathAllowed(full);
         return full;
@@ -194,6 +195,19 @@ public static class PackB
         return new { path, keys = bridge.Count };
     }
 
+    /// <summary>מפתחות config שמותר לשחזר מגיבוי: תצוגה/נוחות בלבד. כל השאר (אבטחה, נתיבים, לוח זמנים, תוכנות) לא משוחזר</summary>
+    internal static readonly HashSet<string> ImportWhitelist = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "lang", "diag.autoReport",
+        "kiosk.clock", "kiosk.clockPosition", "kiosk.restScreen", "kiosk.restIdleMinutes", "kiosk.restZmanimSide", "kiosk.fullscreenOtzaria",
+        "kiosk.maximizeOtzaria", "kiosk.coverOtherScreens", "kiosk.dedicationText", "kiosk.venueName", "kiosk.yahrzeitDay", "kiosk.yahrzeitLabel",
+        "kiosk.yahrzeitMonth", "kiosk.sideBar", "kiosk.sideBarIconsOnly", "kiosk.sideBarPosition", "kiosk.showParsha", "kiosk.showDafYomi",
+        "kiosk.candleLightingMinutes", "kiosk.zmanimCity", "kiosk.zmanimDiaspora", "kiosk.zmanimElevation", "kiosk.zmanimFallbackEngine",
+        "kiosk.zmanimLocation", "kiosk.zmanimShow",
+    };
+
+    internal static bool ImportAllowed(string key) => !Skip(key) && ImportWhitelist.Contains(key);
+
     private static object Import(JsonElement b)
     {
         if (Kiosk.IsActive) throw BridgeException.Locked("אי אפשר לשחזר הגדרות במצב נעילה");
@@ -213,7 +227,9 @@ public static class PackB
         int n = 0;
         foreach (var kv in bridge)
         {
-            if (Skip(kv.Key) || kv.Key.StartsWith("fx.policy")) continue;   // מדיניות הסייר לא משוחזרת מקובץ
+            // S3: רשימה לבנה ולא שחורה. קובץ הגיבוי ניתן לעריכה, ולכן רק מפתחות תצוגה/נוחות משוחזרים: kiosk.otzariaPath/strict/
+            // schedule.*/allowOpenExtensions/openSections/programs/fx.policy וכל מפתח לא מוכר (גם עתידי) נדחים.
+            if (!ImportAllowed(kv.Key)) continue;
             Config.Set(kv.Key, kv.Value?.DeepClone());
             n++;
         }

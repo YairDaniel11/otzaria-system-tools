@@ -524,7 +524,7 @@ internal sealed class EmergencyForm : Form
 internal static class Diagnostics_
 {
     public const string IssuesUrl = "https://github.com/YairDaniel11/otzaria-system-tools/issues/new";
-    private static readonly Regex Secret = new("(hash|salt|key|secret|password|token|recovery)", RegexOptions.IgnoreCase);
+    private static readonly Regex Secret = new("(hash|salt|key|secret|password|token|recovery|client|auth)", RegexOptions.IgnoreCase);
 
     public static void Report()
     {

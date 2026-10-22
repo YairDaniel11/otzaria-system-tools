@@ -155,7 +155,7 @@ public class FsGuardTests
     [Fact]
     public void Clean_docx_passes()
     {
-        var z = Zip(("word/document.xml", "<w:document><w:p><w:r><w:t>שלום</w:t></w:r></w:p></w:document>"),
+        var z = Zip(("word/document.xml", "<w:document xmlns:w=\"http://w\"><w:p><w:r><w:t>שלום</w:t></w:r></w:p></w:document>"),
             ("word/_rels/document.xml.rels", "<Relationships><Relationship Id=\"1\" Type=\"http://x/hyperlink\" Target=\"http://a\" TargetMode=\"External\"/></Relationships>"));
         Assert.Null(Inspect(".docx", z));
     }
@@ -190,10 +190,11 @@ public class FsGuardTests
     [Fact]
     public void Legacy_doc_with_macros_is_blocked()
     {
-        var data = new List<byte>(new byte[512]);
+        var data = new List<byte>(new byte[] { 0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1 });
+        data.AddRange(new byte[512]);
         data.AddRange(Encoding.Unicode.GetBytes("_VBA_PROJECT"));
         Assert.NotNull(Inspect(".doc", data.ToArray()));
-        Assert.Null(Inspect(".doc", new byte[2048]));
+        Assert.Null(Inspect(".doc", new byte[] { 0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1 }.Concat(new byte[2048]).ToArray()));
     }
 
     // ---------- הפעלה ----------

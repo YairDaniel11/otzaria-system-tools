@@ -11,10 +11,25 @@ namespace OtzariaBridge;
 /// </summary>
 public static class Secret
 {
-    public const int Iterations = 200_000;
+    /// <summary>איטרציות לגיבובים חדשים (OWASP 2023 ל-PBKDF2-HMAC-SHA256: 600k+)</summary>
+    public const int Iterations = 600_000;
+    /// <summary>הערך ההיסטורי: גיבובים ישנים (Base64 חשוף, בלי תחילית גרסה) נבדקים איתו ומשודרגים בכניסה מוצלחת</summary>
+    public const int LegacyIterations = 200_000;
+    private const string V2 = "v2$";   // תחילית גרסה: "v2$<base64>" = Iterations. בלי תחילית = LegacyIterations
 
+    /// <summary>
+    /// גיבוב בפורמט הנוכחי (עם תחילית גרסה). WHY (S3): 200k איטרציות חלשות מול GPU כשהגיבוב נחשף; הגרסה בתוך המחרוזת השמורה
+    /// מאפשרת תאימות לאחור בלי שינוי בפורמט האחסון של Kiosk/HardLock (שניהם שומרים את המחרוזת כמות שהיא).
+    /// </summary>
     public static string Hash(string secret, byte[] salt) =>
-        Convert.ToBase64String(Rfc2898DeriveBytes.Pbkdf2(secret, salt, Iterations, HashAlgorithmName.SHA256, 32));
+        V2 + Convert.ToBase64String(Rfc2898DeriveBytes.Pbkdf2(secret, salt, Iterations, HashAlgorithmName.SHA256, 32));
+
+    /// <summary>גיבוב בפורמט הישן (לבדיקות ולכלי הגירה בלבד)</summary>
+    public static string HashLegacy(string secret, byte[] salt) =>
+        Convert.ToBase64String(Rfc2898DeriveBytes.Pbkdf2(secret, salt, LegacyIterations, HashAlgorithmName.SHA256, 32));
+
+    /// <summary>האם הגיבוב השמור בפורמט ישן וצריך להחליף אותו (Hash מחדש) אחרי אימות מוצלח</summary>
+    public static bool NeedsUpgrade(string stored) => !string.IsNullOrEmpty(stored) && !stored.StartsWith(V2, StringComparison.Ordinal);
 
     /// <summary>בודק אם secret תואם לגיבוב/salt שמורים (Base64). false גם כשחסר/לא תקין — לעולם לא זורק</summary>
     public static bool Matches(string secret, string hashB64, string saltB64)
@@ -22,8 +37,9 @@ public static class Secret
         if (string.IsNullOrEmpty(hashB64) || string.IsNullOrEmpty(saltB64) || string.IsNullOrEmpty(secret)) return false;
         try
         {
-            byte[] expected = Convert.FromBase64String(hashB64);
-            byte[] actual = Convert.FromBase64String(Hash(secret, Convert.FromBase64String(saltB64)));
+            bool v2 = hashB64.StartsWith(V2, StringComparison.Ordinal);
+            byte[] expected = Convert.FromBase64String(v2 ? hashB64.Substring(V2.Length) : hashB64);
+            byte[] actual = Rfc2898DeriveBytes.Pbkdf2(secret, Convert.FromBase64String(saltB64), v2 ? Iterations : LegacyIterations, HashAlgorithmName.SHA256, 32);
             return CryptographicOperations.FixedTimeEquals(expected, actual);
         }
         catch { return false; } // גיבוב/salt שמורים בפורמט פגום — נחשב "לא תואם", לא קריסה

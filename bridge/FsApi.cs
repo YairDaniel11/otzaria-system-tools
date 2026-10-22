@@ -60,9 +60,21 @@ public static class FsApi
         p = Environment.ExpandEnvironmentVariables(p.Trim());
         if (!Path.IsPathFullyQualified(p)) throw BridgeException.BadRequest("נדרש נתיב מלא: " + p);
         string full = PathPolicy.LongName(Path.GetFullPath(p));   // 8.3 -> שם ארוך לפני כל בדיקה
-        EnsureNotReadable(full);            // סודות הגשר: חסום לכל פעולה (קריאה, רשימה, חיפוש, העתקה מקור/יעד)
+        full = StrictNormalize(full);       // S3: בנעילה/הגבלה: ADS, התקנים שמורים (CON/NUL) ונתיבי התקן נדחים תמיד
+        EnsureNotReadable(full);           // סודות הגשר: חסום לכל פעולה (קריאה, רשימה, חיפוש, העתקה מקור/יעד)
         FxPolicy.EnsurePathAllowed(full);   // מדיניות סייר הקבצים: נעילה או הגבלה לתיקיות
         return full;
+    }
+
+    /// <summary>
+    /// נעילה/הגבלה: PathPolicy.Normalize (ADS, שמות התקן שמורים, \\?\). WHY (S3): FullPath בדק רק מחרוזות; "file.txt:stream" ו-"CON"
+    /// עקפו את בדיקות ההכלה. מחוץ לנעילה/הגבלה ההתנהגות הקיימת נשמרת (תאימות לתוספים).
+    /// </summary>
+    internal static string StrictNormalize(string full)
+    {
+        if (!(Kiosk.IsActive || FxPolicy.IsRestricted)) return full;
+        try { return PathPolicy.Normalize(full); }
+        catch (ArgumentException ex) { throw BridgeException.Forbidden(ex.Message); }
     }
 
     private static string Iso(DateTime t) => t.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
@@ -93,7 +105,8 @@ public static class FsApi
 
     private static void EnsureNotProtectedCore(string p, bool tree = false)
     {
-        string full = Path.GetFullPath(p).TrimEnd('\\');
+        // S3: ADS על תיקייה מוגנת ("<מוגן>:x") לא שווה ולא מתחיל ב-"<מוגן>\": מסירים את חלק ה-ADS לפני ההשוואה
+        string full = FsGuard.StripAds(Path.GetFullPath(p)).TrimEnd('\\');
         string root = Path.GetPathRoot(full)?.TrimEnd('\\') ?? "";
         if (full.Length == 0 || full.Equals(root, StringComparison.OrdinalIgnoreCase))
             throw BridgeException.Forbidden("לא ניתן לשנות שורש כונן");
@@ -141,7 +154,7 @@ public static class FsApi
         if (FsGuard.IsBlockedUnc(Path.GetFullPath(p), Kiosk.IsActive || FxPolicy.IsRestricted, Environment.MachineName))
             throw BridgeException.Forbidden("נתיב רשת (UNC) חסום");
         var roots = SecretRoots();
-        string full = PathPolicy.LongName(Path.GetFullPath(p));
+        string full = FsGuard.StripAds(PathPolicy.LongName(Path.GetFullPath(p)));   // S3: ADS על תיקיית סודות = אותה תיקייה
         if (FsGuard.IsUnderAny(full, roots)) throw BridgeException.Forbidden("אזור מוגן: נתוני הגשר");
         string canon = CanonicalPath(full);
         if (!string.Equals(canon, full, StringComparison.OrdinalIgnoreCase) && FsGuard.IsUnderAny(canon, roots))
@@ -166,7 +179,8 @@ public static class FsApi
     /// </summary>
     internal static void EnsureWriteTargetAllowed(string dest)
     {
-        if (!Kiosk.IsActive) return;
+        // S3: גם במצב restricted בלי נעילה (שם הרשימה הלבנה לא נאכפה, ואפשר היה לכתוב .appinstaller/.msix לתיקייה מותרת)
+        if (!(Kiosk.IsActive || FxPolicy.IsRestricted)) return;
         // רשימה לבנה (סבב 4): כל סיומת שאינה מסמך/תמונה/טקסט/מדיה/ארכיב חסומה, לא רק רשימה שחורה
         if (FsGuard.IsWriteBlockedExt(dest) && !FxPolicy.IsInApprovedRoots(dest))
             throw BridgeException.Forbidden("בזמן נעילה אסור ליצור או לשנות קובץ מסוג " + FsGuard.StdExt(dest) + " מחוץ לתיקיות שאושרו");
@@ -668,38 +682,67 @@ public static class FsApi
         return new { path, size = new FileInfo(path).Length };
     }
 
-    private static object Open(JsonElement b)
+    /// <summary>
+    /// רשימה לבנה לפתיחה בנעילה/הגבלה (S3). WHY: הרשימה השחורה הקודמת פספסה .appinstaller/.msix/.theme/.search-ms/.job/.iqy/.rdp/.iso/.vhd,
+    /// ובמצב restricted בלי נעילה לא נאכפה רשימת סיומות כלל. בנעילה: גם חייב להיות ברשימת המנהל (kiosk.allowOpenExtensions) —
+    /// החיתוך עם הרשימה הלבנה הקבועה מבטל הוספת סוג מסוכן דרך config.json הכתיב למשתמש. סיכון שבירה: סוג נדיר שהמנהל הוסיף ואינו ברשימה הקבועה נחסם.
+    /// </summary>
+    internal static void EnsureOpenExtAllowed(string path)
     {
-        string path = FullPath(b.Req("path"));
-        if (!Exists(path)) throw BridgeException.NotFound("לא נמצא: " + path);
-        EnsureNoHardlink(path);   // שם נוסף לקובץ מוגן נפתח באפליקציה חיצונית = קריאה
-        if (FxPolicy.IsRestricted)
+        if (FsGuard.IsDangerousExt(path) || FsGuard.IsMacroExt(path) || FsGuard.HasAds(path))
+            throw BridgeException.Forbidden("סוג הקובץ חסום לפתיחה: " + FsGuard.StdExt(path));
+        if (!FsGuard.IsOpenAllowedExt(path))
         {
-            // פתיחת תיקייה או קיצור דרך מפעילה את סייר Windows עצמו, שאינו כפוף למדיניות
-            string e = Path.GetExtension(path).ToLowerInvariant();
-            if (Directory.Exists(path) || e is ".lnk" or ".url" or ".scf" or ".appref-ms")
-                throw FxPolicy.Outside("במצב מוגבל אי אפשר לפתוח תיקיות וקיצורי דרך בסייר Windows");
-        }
-        if (Kiosk.IsActive || FxPolicy.IsRestricted)
-        {
-            // WHY: סיומת לפי שם תקני (בלי נקודות/רווחים בסוף) ורשימה שחורה קשיחה שגם הוספה ידנית לרשימת
-            // הסיומות המותרות לא מבטלת: קוד, קיצורים ומאקרו. מסמכי Office נבדקים (מאקרו/DDE/תבנית מרוחקת)
-            if (FsGuard.IsDangerousExt(path) || FsGuard.IsMacroExt(path))
-                throw BridgeException.Forbidden("סוג הקובץ חסום לפתיחה: " + FsGuard.StdExt(path));
+            if (Kiosk.IsActive) throw BridgeException.Locked();
+            throw BridgeException.Forbidden("סוג הקובץ אינו ברשימת הסוגים המותרים לפתיחה: " + FsGuard.StdExt(path));
         }
         if (Kiosk.IsActive)
         {
             string ext = FsGuard.StdExt(path).TrimStart('.');
-            bool allowed = File.Exists(path) && ext.Length > 0 && Kiosk.AllowedExtensions.Any(x =>
-                x.TrimStart('.').Equals(ext, StringComparison.OrdinalIgnoreCase));
-            if (!allowed) throw BridgeException.Locked();
+            if (!Kiosk.AllowedExtensions.Any(x => x.TrimStart('.').Equals(ext, StringComparison.OrdinalIgnoreCase)))
+                throw BridgeException.Locked();
         }
-        if ((Kiosk.IsActive || FxPolicy.IsRestricted) && File.Exists(path))
+    }
+
+    private static object Open(JsonElement b)
+    {
+        string path = FullPath(b.Req("path"));
+        if (!Exists(path)) throw BridgeException.NotFound("לא נמצא: " + path);
+        if (!(Kiosk.IsActive || FxPolicy.IsRestricted))
         {
-            string why = FsGuard.InspectDocument(path);
-            if (why != null) throw BridgeException.Forbidden("הקובץ נחסם: " + why);
+            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            return new { opened = true };
         }
-        Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+        // פתיחת תיקייה מפעילה את סייר Windows עצמו, שאינו כפוף למדיניות
+        if (Directory.Exists(path))
+        {
+            if (Kiosk.IsActive) throw BridgeException.Locked();
+            throw FxPolicy.Outside("במצב מוגבל אי אפשר לפתוח תיקיות וקיצורי דרך בסייר Windows");
+        }
+        EnsureOpenExtAllowed(path);
+        // TOCTOU (S3): הבדיקה והפתיחה נעשו בשני שלבים על אותו שם, ואפשר להחליף את הקובץ/התיקייה ביניהם (נבדק מסמך נקי, נפתח חדש).
+        // עכשיו: handle אחד נפתח וננעל נגד כתיבה/מחיקה (FileShare.Read), הכול נבדק על ה-handle ועל נתיבו הסופי, והוא מוחזק עד אחרי
+        // Process.Start (כמו Programs.Activate). הפתיחה עצמה לפי הנתיב הסופי של ה-handle, לא לפי השם שהתקבל.
+        // שאריות: האפליקציה פותחת את הקובץ בשם אחרי שחרור ה-handle (חלון של מילי-שניות); אי אפשר לסגור זאת בלי לשבור שמירה ב-Word.
+        FileStream hold;
+        try { hold = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read); }
+        catch (IOException)
+        {
+            // הקובץ כבר פתוח לכתיבה בתוכנה אחרת (Word): נועלים רק מחיקה/שינוי שם. בדיקת התוכן עדיין על אותו handle
+            hold = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        }
+        using (hold)
+        {
+            string fin = PathPolicy.FinalPathOfHandle(hold.SafeFileHandle) ?? throw new IOException("פענוח הנתיב הסופי נכשל");
+            EnsureNotReadable(fin);
+            FxPolicy.EnsurePathAllowed(fin);
+            EnsureOpenExtAllowed(fin);
+            if (PathPolicy.HardLinkCountOfHandle(hold.SafeFileHandle) > 1)
+                throw BridgeException.Forbidden("הקובץ מקושר בקישור קשיח (hardlink) לשם נוסף: הפתיחה חסומה");
+            string why = FsGuard.InspectDocument(hold, FsGuard.StdExt(fin));
+            if (why != null) throw BridgeException.Forbidden("הקובץ נחסם: " + why);
+            Process.Start(new ProcessStartInfo(fin) { UseShellExecute = true });
+        }
         return new { opened = true };
     }
 
