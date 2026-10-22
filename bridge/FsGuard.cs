@@ -15,6 +15,23 @@ public static class FsGuard
     public static readonly HashSet<string> DangerousExt = new(StringComparer.OrdinalIgnoreCase)
     {
         ".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".jse", ".wsf", ".lnk", ".dll", ".reg", ".scr", ".msi", ".hta", ".cpl", ".url",
+        // סבב 4: סיומות שמריצות/טוענות קוד ושהרשימה הראשונה פספסה
+        ".com", ".pif", ".vbe", ".wsh", ".ws", ".msc", ".jar", ".msp", ".application", ".chm", ".inf", ".sct", ".scf", ".xll", ".vsto",
+        ".appref-ms", ".diagcab", ".py", ".ps1xml", ".psm1", ".wsc", ".gadget", ".psd1", ".pyw", ".mht", ".mhtml", ".settingcontent-ms", ".library-ms",
+    };
+
+    /// <summary>
+    /// רשימה לבנה של סיומות שמותר ליצור/לכתוב בנעילה מחוץ לתיקיות מאושרות: מסמכים, תמונות, טקסט, שמע/וידאו, ארכיבים.
+    /// WHY: רשימה שחורה תמיד מפספסת סיומת חדשה (.appinstaller וכו'); כאן כל מה שלא מוכר נחסם. בלי סיומת: מותר (אין הרצה לפי שם).
+    /// </summary>
+    public static readonly HashSet<string> WritableExt = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".txt", ".md", ".csv", ".tsv", ".json", ".xml", ".rtf", ".log", ".srt", ".vtt", ".lrc", ".tex", ".bib", ".rst",
+        ".doc", ".docx", ".dot", ".dotx", ".xls", ".xlsx", ".xlt", ".xltx", ".ppt", ".pptx", ".pps", ".ppsx", ".odt", ".ods", ".odp",
+        ".pdf", ".epub", ".djvu", ".mobi", ".html", ".htm",
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".tif", ".tiff", ".ico", ".heic",
+        ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".wma", ".mp4", ".mkv", ".avi", ".mov", ".webm", ".wmv",
+        ".zip", ".7z", ".rar", ".tmp", ".bak",
     };
 
     /// <summary>פורמטי מסמך עם מאקרו: חסומים לפתיחה בנעילה, גם אם המנהל הוסיף אותם לרשימת הסיומות</summary>
@@ -35,6 +52,43 @@ public static class FsGuard
     }
 
     public static bool IsDangerousExt(string path) => DangerousExt.Contains(StdExt(path));
+
+    /// <summary>
+    /// האם כתיבה/יצירה בנעילה חסומה לפי הסיומת: מסוכנת, או כל סיומת שאינה ברשימה הלבנה (סיומת ריקה מותרת).
+    /// סיכון שבירה: קובץ עבודה בסיומת יוצאת דופן (.db, .dat, .otzar) לא יישמר בנעילה מחוץ לתיקיות מאושרות.
+    /// </summary>
+    public static bool IsWriteBlockedExt(string path)
+    {
+        string e = StdExt(path);
+        if (DangerousExt.Contains(e) || MacroExt.Contains(e)) return true;
+        return e.Length > 0 && !WritableExt.Contains(e);
+    }
+
+    /// <summary>
+    /// נתיב UNC שנחסם: כל כתובת עצמית (localhost, 127.x, ::1, שם המחשב, ipv6-literal) תמיד, כי localhost\c$ עוקף בדיקות נתיב;
+    /// וכל UNC אחר כשמצב קשיח (נעילה/הגבלה).
+    /// </summary>
+    public static bool IsBlockedUnc(string path, bool strict, string machineName)
+    {
+        if (path == null || !path.StartsWith("\\\\") || path.StartsWith("\\\\?\\") || path.StartsWith("\\\\.\\")) return false;
+        string rest = path.Substring(2);
+        int i = rest.IndexOf('\\');
+        string host = (i < 0 ? rest : rest.Substring(0, i)).Trim('[', ']').ToLowerInvariant();
+        string m = (machineName ?? "").ToLowerInvariant();
+        bool local = host is "localhost" or "::1" or "." or "" || host.StartsWith("127.") || host.EndsWith(".ipv6-literal.net") ||
+                     (m.Length > 0 && (host == m || host.StartsWith(m + ".")));
+        return local || strict;
+    }
+
+    /// <summary>האם path הוא אב ממש של אחד השורשים (שינוי/מחיקה/העברה שלו מזיז את המוגן)</summary>
+    public static bool IsAncestorOfAny(string path, IEnumerable<string> roots)
+    {
+        string a = path.TrimEnd('\\') + "\\";
+        foreach (string r in roots)
+            if (!string.IsNullOrEmpty(r) && r.TrimEnd('\\').StartsWith(a, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
     public static bool IsMacroExt(string path) => MacroExt.Contains(StdExt(path));
 
     /// <summary>האם path (מנורמל וקנוני) הוא אחת השורשים או מתחתיו</summary>
