@@ -83,6 +83,7 @@ public static class DialogGuard
     private const int CHILDID_SELF = 0;
     private const uint WM_CLOSE = 0x0010;
     private const int PollMs = 400;
+    private const int PollFgMs = 120;
 
     // סיומות "מסוכנות": חסומות תמיד (לא ניתנות להתרה דרך kiosk.allowOpenExtensions) כל עוד מגבלה
     // כלשהי פעילה (Kiosk.IsActive או FxPolicy != open) — כולל json, כדי לכסות גם קבצי הגדרות כמו config.json
@@ -124,6 +125,35 @@ public static class DialogGuard
 
     /// <summary>האם חלון החזית הוא דיאלוג קבצים שמגבילים כרגע (לחסימת מקש התפריט / Shift+F10). זול: נקרא מתוך hook</summary>
     internal static bool IsFileDialogForeground() => _restrictNow && !_fileDialogs.IsEmpty && _fileDialogs.ContainsKey(Kiosk.ForegroundRoot());
+
+    // [r1] דיאלוגים שתיבת השם שלהם מכילה כרגע ערך חורג (עד הדיביונס): Enter נחסם במקלדת (KioskKeys) כדי שלא יבצע ניווט/פתיחה לפני הסריקה
+    private static readonly ConcurrentDictionary<IntPtr, byte> _unsafeEntry = new();
+    private static readonly ConcurrentDictionary<IntPtr, byte> _routed = new();
+
+    /// <summary>האם בדיאלוג הקבצים שבחזית יש כרגע ערך אסור (לחסימת Enter). זול: נקרא מתוך hook</summary>
+    internal static bool IsUnsafeEntryForeground() => !_unsafeEntry.IsEmpty && _unsafeEntry.ContainsKey(Kiosk.ForegroundRoot());
+
+    /// <summary>
+    /// [r1] ערך בתיבת השם שמנווט במקום לבחור קובץ: shell:, מזהה CLSID (::{...}), UNC, כתובת (http/ftp/file), משתני סביבה (%..%),
+    /// נקודות בלבד (.. / .). אלה עוקפים את בדיקת הנתיב/הסיומת כי רק אחרי Enter הם הופכים לתיקיה בפועל.
+    /// </summary>
+    internal static bool IsNavigationToken(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+        string s = raw.Trim().Trim('"');
+        if (s.Contains("(*.", StringComparison.Ordinal)) return false;   // תבנית סוג-קובץ, לא שם
+        return s.StartsWith("shell:", StringComparison.OrdinalIgnoreCase) || s.Contains("::{", StringComparison.Ordinal) ||
+               s.StartsWith(@"\\", StringComparison.Ordinal) || s.StartsWith("//", StringComparison.Ordinal) ||
+               s.StartsWith("http:", StringComparison.OrdinalIgnoreCase) || s.StartsWith("https:", StringComparison.OrdinalIgnoreCase) ||
+               s.StartsWith("ftp:", StringComparison.OrdinalIgnoreCase) || s.StartsWith("file:", StringComparison.OrdinalIgnoreCase) ||
+               (s.Length > 2 && s[0] == '%' && s.IndexOf('%', 1) > 0) || s == "." || s == ".." || s.StartsWith(@"..\", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// [r1] הכתובת הנוכחית של הדיאלוג אינה נתיב מלא (This PC, Network, Control Panel, ספריות...): אי אפשר להכריע במדיניות לפי נתיב,
+    /// ולכן מנתבים לתיקיה מותרת או סוגרים. כתובת ריקה/לא נקראה = לא מתערבים (מגבלה #3).
+    /// </summary>
+    internal static bool AddressNeedsRouting(string address) => !string.IsNullOrWhiteSpace(address) && !IsFullPath(address);
 
     /// <summary>האם לבלוע לחיצת עכבר ימנית בנקודה: תפריט ההקשר בדיאלוג (פתיחה/מאפיינים/הפעלה כמנהל) עוקף את הבדיקות</summary>
     internal static bool ShouldSwallowMouse(int x, int y) =>
@@ -183,7 +213,18 @@ public static class DialogGuard
                 string mode = FxPolicy.EffectiveMode();
                 _restrictNow = Kiosk.IsActive || mode != "open";
                 string violation = DetectViolation(ui, hwnd, mode, out string message);
-                if (violation == null) { _lastViolation.TryRemove(hwnd, out _); Thread.Sleep(PollMs); continue; }
+                int poll = Kiosk.ForegroundRoot() == hwnd ? PollFgMs : PollMs;   // [r1] בחזית: סריקה מהירה (חלון ה-race לפני Enter)
+                if (violation == null) { _lastViolation.TryRemove(hwnd, out _); _unsafeEntry.TryRemove(hwnd, out _); Thread.Sleep(poll); continue; }
+
+                _unsafeEntry[hwnd] = 0;   // [r1] מכאן ועד שהערך תוקן: Enter במקלדת נחסם (KioskKeys)
+
+                // [r1] כתובת שאינה נתיב מלא: ניתוב חד-פעמי לתיקיה מותרת; אם נכשל/חזר — סגירה
+                if (violation.StartsWith("addr:", StringComparison.Ordinal))
+                {
+                    if (_routed.TryAdd(hwnd, 0) && TryRouteToSafeFolder(ui, hwnd)) { Thread.Sleep(poll); continue; }
+                    Close(hwnd, message);
+                    return;
+                }
 
                 // "נעול", נתיב אסור וסיומת מסוכנת אינם תלויים בהקלדה באמצע (אין רישא תמימה של סיומת מסוכנת) — בלי דיביונס.
                 // רק "סיומת שאינה ברשימה" מקבלת דיביונס, כי "report.d" באמצע הקלדת "report.docx" הוא לגיטימי
@@ -193,15 +234,48 @@ public static class DialogGuard
                     return;
                 }
                 _lastViolation[hwnd] = violation;
-                Thread.Sleep(PollMs);
+                Thread.Sleep(poll);
             }
         }
         catch (Exception ex) { Config.Log("dialog-guard monitor: " + ex.Message); }
-        finally { _tracked.TryRemove(hwnd, out _); _lastViolation.TryRemove(hwnd, out _); _fileDialogs.TryRemove(hwnd, out _); }
+        finally { _tracked.TryRemove(hwnd, out _); _lastViolation.TryRemove(hwnd, out _); _fileDialogs.TryRemove(hwnd, out _); _unsafeEntry.TryRemove(hwnd, out _); _routed.TryRemove(hwnd, out _); }
     }
 
     internal static bool IsImmediate(string violation) =>
-        violation == "locked" || violation.StartsWith("path:", StringComparison.Ordinal) || violation.StartsWith("danger:", StringComparison.Ordinal);
+        violation == "locked" || violation.StartsWith("path:", StringComparison.Ordinal) || violation.StartsWith("danger:", StringComparison.Ordinal) ||
+        violation.StartsWith("nav:", StringComparison.Ordinal);
+
+    /// <summary>
+    /// [r1] ניתוב דיאלוג שנמצא בכתובת שאינה נתיב מלא: כותבים לתיבת השם תיקיה מותרת (Documents/Desktop לפי המדיניות) ולוחצים על הכפתור
+    /// הראשי (AutomationId "1") — בתיבה עם נתיב תיקיה הוא מנווט ולא פותח/שומר. לא נבדק מול דיאלוג חי (ר' הדוח); כשל = סגירה.
+    /// </summary>
+    private static bool TryRouteToSafeFolder(IUIAutomation ui, IntPtr hwnd)
+    {
+        try
+        {
+            string safe = null;
+            foreach (var sf in new[] { Environment.SpecialFolder.MyDocuments, Environment.SpecialFolder.DesktopDirectory })
+            {
+                string d = Environment.GetFolderPath(sf);
+                if (string.IsNullOrEmpty(d) || !Directory.Exists(d)) continue;
+                bool ok = FxPolicy.EffectiveMode() == "restricted" ? FxPolicy.IsPathAllowed(d) : !KioskBaselineDenied(d);
+                if (ok) { safe = d; break; }
+            }
+            if (safe == null) return false;
+            var root = ui.ElementFromHandle(hwnd);
+            var combo = root?.FindFirst(TreeScope.TreeScope_Descendants, ui.CreatePropertyCondition((int)UIA_PropertyIds.UIA_AutomationIdPropertyId, "1148"));
+            var edit = combo?.FindFirst(TreeScope.TreeScope_Descendants,
+                ui.CreatePropertyCondition((int)UIA_PropertyIds.UIA_ControlTypePropertyId, (int)UIA_ControlTypeIds.UIA_EditControlTypeId)) ?? combo;
+            if (edit?.GetCurrentPattern((int)UIA_PatternIds.UIA_ValuePatternId) is not IUIAutomationValuePattern vp) return false;
+            vp.SetValue(safe);
+            var btn = root.FindFirst(TreeScope.TreeScope_Descendants, ui.CreatePropertyCondition((int)UIA_PropertyIds.UIA_AutomationIdPropertyId, "1"));
+            if (btn?.GetCurrentPattern((int)UIA_PatternIds.UIA_InvokePatternId) is not IUIAutomationInvokePattern ip) return false;
+            ip.Invoke();
+            Config.Log("dialog-guard: דיאלוג בכתובת שאינה נתיב מלא נותב לתיקיה מותרת (hwnd=0x" + hwnd.ToString("X") + ")");
+            return true;
+        }
+        catch (Exception ex) { Config.Log("dialog-guard route: " + ex.Message); return false; }
+    }
 
     /// <summary>null = אין הפרה כרגע. אחרת מחזיר "מפתח הפרה" יציב (לדיביונס) ומציב את הודעת הטוסט ב-message</summary>
     private static string DetectViolation(IUIAutomation ui, IntPtr hwnd, string mode, out string message)
@@ -215,6 +289,13 @@ public static class DialogGuard
             var allowed = Kiosk.DialogGuardAllowedExtensions();
             foreach (string raw in values)
             {
+                // [r1] shell:/CLSID/UNC/כתובת/משתנה סביבה בתיבת השם: ניווט שעוקף את בדיקת הנתיב — נחסם לפני ש-Enter ירוץ
+                if (IsNavigationToken(raw))
+                {
+                    message = Lang.T("אי אפשר להקליד כתובת מיוחדת (shell:, רשת וכד') בדיאלוג בזמן נעילה.",
+                                      "Special addresses (shell:, network, etc.) can't be typed into this dialog while locked.");
+                    return "nav:" + raw.Trim().ToLowerInvariant();
+                }
                 foreach (string ext in ExtensionsOf(raw))
                 {
                     if (DangerousExt.Contains(ext))
@@ -244,6 +325,17 @@ public static class DialogGuard
         var paths = values.Where(IsFullPath).Select(v => v.Trim().Trim('"')).ToList();
         string cur = ReadCurrentFolder(ui, hwnd);
         if (cur != null) paths.Add(cur);
+        else if (restrictingNow)
+        {
+            // [r1] הכתובת הנוכחית אינה נתיב מלא (This PC / Network / לוח הבקרה / shell:...) — ניתוב או סגירה (ר' TryRouteToSafeFolder)
+            string addr = ReadAddressText(ui, hwnd);
+            if (AddressNeedsRouting(addr))
+            {
+                message = Lang.T("הדיאלוג מוצג בתיקיית מערכת/רשת שאי אפשר לאמת. נעבור לתיקיה מותרת.",
+                                  "The dialog is showing a system/network location that can't be verified.");
+                return "addr:" + addr;
+            }
+        }
 
         if (mode == "restricted")
         {
@@ -300,6 +392,13 @@ public static class DialogGuard
     /// </summary>
     private static string ReadCurrentFolder(IUIAutomation ui, IntPtr hwnd)
     {
+        string rest = ReadAddressText(ui, hwnd);
+        return rest != null && IsFullPath(rest) ? rest : null;
+    }
+
+    /// <summary>[r1] טקסט הכתובת הגולמי מסרגל הכתובת (אחרי "Address: "), או null אם לא נקרא. לא נבדק מול דיאלוג חי</summary>
+    private static string ReadAddressText(IUIAutomation ui, IntPtr hwnd)
+    {
         try
         {
             var root = ui.ElementFromHandle(hwnd);
@@ -309,12 +408,12 @@ public static class DialogGuard
             if (string.IsNullOrWhiteSpace(name)) return null;
             int i = name.IndexOf(": ", StringComparison.Ordinal);
             string rest = (i >= 0 ? name[(i + 2)..] : name).Trim();
-            return IsFullPath(rest) ? rest : null;
+            return rest.Length == 0 ? null : rest;
         }
         catch { return null; }
     }
 
-    private static bool IsFullPath(string v)
+    internal static bool IsFullPath(string v)
     {
         try { return !string.IsNullOrWhiteSpace(v) && Path.IsPathFullyQualified(v.Trim()); }
         catch { return false; }

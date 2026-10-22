@@ -1566,7 +1566,8 @@ public static partial class Kiosk
             if (vk == 0x7B && down) Task.Run(() => Config.Log($"hook: F12 ctrl={ctrl} alt={altHeld} shift={shift}"));
 
             // Ctrl+Alt+O: חזרה לאוצריא מתוכנה מותרת (רק כשתוכנה מותרת בחזית; באוצריא עצמה המקשים עוברים הלאה)
-            if (ctrl && altHeld && vk == 0x4F && down && ForegroundIsAllowedProgram())
+            // [r1] שינוי מינימלי בנקודת חיבור (קובץ בבעלות אחר): AltGr (Ctrl+Alt ימני) לא נחשב Ctrl+Alt+O — ר' KioskKeys.IsReturnHotkey
+            if (KioskKeys.IsReturnHotkey(vk, down, ctrl, altHeld, (GetAsyncKeyState(0xA4) & 0x8000) != 0, (GetAsyncKeyState(0xA5) & 0x8000) != 0) && ForegroundIsAllowedProgram())
             {
                 Task.Run(ReturnToOtzaria);
                 return (IntPtr)1;
@@ -1582,7 +1583,7 @@ public static partial class Kiosk
             var c = _fgAllowedCache;
             bool known = fgPid != 0 && fgPid == c.Pid; // pid שהשתנה מאז העדכון האחרון = "לא מותר" (הכיוון הבטוח)
             var ctx = new KioskKeys.Ctx(altHeld, ctrl, shift, win, known && c.Otzaria, known && c.Allowed, known && c.Browser,
-                DialogGuard.IsFileDialogForeground());
+                DialogGuard.IsFileDialogForeground(), DialogGuard.IsUnsafeEntryForeground()); // [r1] הארגומנט האחרון חדש (Enter על ערך אסור)
             if (KioskKeys.ShouldBlock(vk, ctx)) return (IntPtr)1;
         }
         return CallNextHookEx(_hook, nCode, wParam, lParam);

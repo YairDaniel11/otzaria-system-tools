@@ -81,7 +81,7 @@ public static partial class Kiosk
             bool closeIt =
                 (name.Equals("PickerHost", StringComparison.OrdinalIgnoreCase) && cls == "#32770") ||
                 (name.Equals("explorer", StringComparison.OrdinalIgnoreCase) &&
-                 cls is "ApplicationFrameWindow" or "XamlExplorerHostIslandWindow" or "CabinetWClass");
+                 cls is "ApplicationFrameWindow" or "XamlExplorerHostIslandWindow" or "CabinetWClass" or "#32770"); // [r1] #32770 = חלון Run (Win+R/הפעלה) של explorer, גם בזמן צילום
             if (closeIt)
             {
                 PostMessage(fg, 0x0010 /* WM_CLOSE */, IntPtr.Zero, IntPtr.Zero);
@@ -95,8 +95,9 @@ public static partial class Kiosk
                     LogThrottled("fast:" + name, "watchdog: " + name + " נסגר (תפריט התחל/חיפוש חסומים בנעילה)", 30);
                 else ReturnOtzariaToFront(p.SessionId);
             }
-            else if (!IsOtzariaPid(pid) && _snipSeen == DateTime.MinValue)
+            else if (!IsOtzariaPid(pid) && !(_snipSeen != DateTime.MinValue && ShellPolicy.IsSnipOverlayClass(cls)))
             {
+                // [r1] בזמן צילום מאושר (עד 120 שניות) הפטור הוא רק למחלקות חלון של שכבת הצילום; כל השאר נסרק כרגיל
                 // [w3] תגובה תוך 300ms (ולא 2 שניות) לכל תהליך בחזית שאינו מותר: מעטפת/LOLBin (לפי OriginalFilename ונתיב) נהרגת,
                 // כל תהליך אחר שאינו ברשימה/בעץ שנפתח דרך הגשר — אוצריא חוזרת לחזית מיד.
                 // לא פועלים בזמן צילום מסך (שכבת הצילום מתארחת ב-explorer) — שם נשאר Watch הרגיל.

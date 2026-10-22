@@ -55,6 +55,43 @@ internal static class AppTrust
         return false;
     }
 
+    // ---------- אמון ב-Microsoft: נתיב + ACL + חתימה (לא שם תהליך) ----------
+
+    /// <summary>[r1] המפרסם הוא Microsoft (שם הארגון בשדה O)</summary>
+    internal static bool IsMicrosoftSubject(string subject) =>
+        !string.IsNullOrEmpty(subject) && subject.Contains("O=Microsoft Corporation", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// [r1] רכיב מערכת אמיתי: במיקום קבוע לא-כתיב (ACL; Windows\Temp ו-Windows\Tasks לא עוברים) וחתום-תקף ע"י Microsoft.
+    /// "אמון לפי שם + תחת C:\Windows" לא מספיק: יש תיקיות כתיבות בתוך Windows.
+    /// </summary>
+    internal static bool IsTrustedMicrosoft(string path, ITrustEnv env)
+    {
+        if (string.IsNullOrEmpty(path) || !env.IsTrustedLocation(path)) return false;
+        var s = env.Sig(path);
+        return s.Valid && IsMicrosoftSubject(s.Subject);
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex MsPackageDir = new(
+        @"\\WindowsApps\\Microsoft\.[A-Za-z0-9.]+_[0-9.]+_[A-Za-z0-9]*_?_?8wekyb3d8bbwe\\",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// [r1] אפליקציית חבילה של Microsoft (כלי חיתוך ב-Win11): ה-ACL של WindowsApps לא קריא, לכן לא נשענים על IsTrustedLocation
+    /// אלא על: תחת Program Files\WindowsApps (המשתמש לא יכול ליצור שם) + שם חבילה Microsoft.* עם מזהה מפרסם 8wekyb3d8bbwe
+    /// + חתימת Microsoft תקפה על הקובץ.
+    /// </summary>
+    internal static bool IsMicrosoftPackage(string path, ITrustEnv env)
+    {
+        if (string.IsNullOrEmpty(path)) return false;
+        string full;
+        try { full = Path.GetFullPath(path); } catch { return false; }
+        string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        if (!IsUnderAnyRoot(full, new[] { Path.Combine(pf, "WindowsApps") }) || !MsPackageDir.IsMatch(full)) return false;
+        var s = env.Sig(full);
+        return s.Valid && IsMicrosoftSubject(s.Subject);
+    }
+
     /// <summary>
     /// האם קובץ ההפעלה של תהליך רץ הוא התוכנה של הרשומה.
     ///  Exact: אותו נתיב מלא כמו ברשומה, וגם (נעיצה תואמת, או מיקום קבוע לא-כתיב-למשתמש).
@@ -66,14 +103,14 @@ internal static class AppTrust
     {
         if (string.IsNullOrEmpty(exe)) return MatchKind.None;   // fail-closed: אין נתיב (תהליך מוגבה) = אין זהות
         if (Eq(exe, entryPath))
-            return PinMatches(exe, pinSha, pinSigner, env) || env.IsTrustedLocation(exe) ? MatchKind.Exact : MatchKind.None;
+            return PinMatches(exe, pinSha, pinSigner, env) || env.IsTrustedLocation(exe) || IsMicrosoftPackage(exe, env) ? MatchKind.Exact : MatchKind.None;
 
         string stem = Path.GetFileNameWithoutExtension(exe).ToLowerInvariant();
         bool nameHit = procNamesLower != null && procNamesLower.Contains(stem);
         bool dirHit = !string.IsNullOrEmpty(entryDirOrNull) &&
                       exe.StartsWith(entryDirOrNull.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
         if (!nameHit && !dirHit) return MatchKind.None;
-        if (env.IsTrustedLocation(exe)) return MatchKind.Helper;
+        if (env.IsTrustedLocation(exe) || IsMicrosoftPackage(exe, env)) return MatchKind.Helper;
         if (!string.IsNullOrEmpty(pinSigner))
         {
             var s = env.Sig(exe);
@@ -85,6 +122,44 @@ internal static class AppTrust
     /// <summary>לפני הפעלה: הקובץ נבדק מחדש מול הנעיצה (או מיקום קבוע). קובץ שהוחלף — לא מופעל</summary>
     internal static bool LaunchAllowed(string path, string pinSha, string pinSigner, ITrustEnv env) =>
         PinMatches(path, pinSha, pinSigner, env) || env.IsTrustedLocation(path);
+
+    /// <summary>
+    /// [r1] TOCTOU בהפעלה: הקובץ נפתח ב-FileShare.Read (אין כתיבה/מחיקה/שינוי שם בזמן שהמנעול מוחזק), ה-SHA-256 מחושב מאותו handle,
+    /// ורק אז בודקים נעיצה/חתימה/מיקום ומפעילים. הקורא מחזיק את המנעול עד אחרי Process.Start.
+    /// מגבלה: DLL side-loading (ספריות שהתוכנה טוענת בזמן ריצה) לא נסגרת כאן; מיקום לא-כתיב (נדרש ב-Add) סוגר אותה לתוכנות חדשות,
+    /// רשומות ישנות במיקום כתיב נשארות חשופות.
+    /// </summary>
+    internal sealed class LaunchLock : IDisposable
+    {
+        private readonly FileStream _fs;
+        public string Sha256 { get; }
+        private LaunchLock(FileStream fs, string sha) { _fs = fs; Sha256 = sha; }
+        public static LaunchLock Open(string path)
+        {
+            FileStream fs = null;
+            try
+            {
+                fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                string h = Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
+                fs.Position = 0;
+                return new LaunchLock(fs, h);
+            }
+            catch { fs?.Dispose(); return null; }   // לא ניתן לנעול = fail-closed
+        }
+        public void Dispose() => _fs.Dispose();
+    }
+
+    /// <summary>[r1] כמו LaunchAllowed, אבל ה-SHA הוא זה שחושב מה-handle הנעול</summary>
+    internal static bool LaunchAllowedLocked(string path, string lockedSha, string pinSha, string pinSigner, ITrustEnv env)
+    {
+        if (!string.IsNullOrEmpty(pinSha) && Eq(lockedSha, pinSha)) return true;
+        if (!string.IsNullOrEmpty(pinSigner))
+        {
+            var s = env.Sig(path);
+            if (s.Valid && Eq(s.Subject, pinSigner)) return true;
+        }
+        return env.IsTrustedLocation(path);
+    }
 
     /// <summary>
     /// זיהוי מעטפת חסומה לפי שם התהליך, שם הקובץ בדיסק, או OriginalFilename מה-VersionInfo.
@@ -201,15 +276,25 @@ internal static class AppTrust
     /// הקובץ נמצא תחת Program Files / תיקיית אוצריא, ואינו ניתן לכתיבה למשתמש רגיל: לא הקובץ עצמו, לא התיקיה שלו
     /// ולא אף תיקיית אב (אחרת אפשר להחליף/לשנות שם לתיקיה). שגיאה כלשהי = לא מהימן (fail-closed). תוצאה נשמרת 60 שניות.
     /// </summary>
-    internal static bool IsTrustedLocation(string path)
+    internal static bool IsTrustedLocation(string path) => TrustedCore(path, true);
+
+    /// <summary>
+    /// [r1] כמו IsTrustedLocation אבל בלי הגבלת שורשים (כל כונן קבוע מקומי): לתוכנה חדשה שמוסיפים לרשימה נדרש מיקום שרק מנהל
+    /// כותב אליו (קובץ + כל תיקיות האב), ולא "נעיצת SHA בלבד" — אחרת המשתמש מחליף את הקובץ/התיקיה לפני ההפעלה הבאה
+    /// </summary>
+    internal static bool IsAdminOnlyLocation(string path) => TrustedCore(path, false);
+
+    private static bool TrustedCore(string path, bool rootRestricted)
     {
         if (string.IsNullOrWhiteSpace(path)) return false;
-        if (TrustLoc.TryGetValue(path, out var c) && (DateTime.UtcNow - c.at).TotalSeconds < 60) return c.val;
+        string ckey = (rootRestricted ? "R|" : "A|") + path;
+        if (TrustLoc.TryGetValue(ckey, out var c) && (DateTime.UtcNow - c.at).TotalSeconds < 60) return c.val;
         bool ok = false;
         try
         {
             string full = Path.GetFullPath(path);
-            if (IsUnderAnyRoot(full, FixedRoots()) && File.Exists(full)
+            bool placeOk = rootRestricted ? IsUnderAnyRoot(full, FixedRoots()) : IsLocalFixedDrive(full);
+            if (placeOk && File.Exists(full)
                 && (File.GetAttributes(full) & FileAttributes.ReparsePoint) == 0)
             {
                 ok = ObjectAdminOnly(full, false, false);
@@ -225,8 +310,19 @@ internal static class AppTrust
             }
         }
         catch { ok = false; }
-        TrustLoc[path] = (DateTime.UtcNow, ok);
+        TrustLoc[ckey] = (DateTime.UtcNow, ok);
         return ok;
+    }
+
+    private static bool IsLocalFixedDrive(string full)
+    {
+        try
+        {
+            if (full.StartsWith(@"\\", StringComparison.Ordinal)) return false;   // UNC/רשת/device path
+            string root = Path.GetPathRoot(full);
+            return !string.IsNullOrEmpty(root) && new DriveInfo(root).DriveType == DriveType.Fixed;
+        }
+        catch { return false; }
     }
 
     // ---------- Authenticode ----------
@@ -262,7 +358,7 @@ internal static class AppTrust
     internal static void Invalidate(string path)
     {
         if (string.IsNullOrEmpty(path)) return;
-        SigCache.TryRemove(path, out _); ShaCache.TryRemove(path, out _); TrustLoc.TryRemove(path, out _);
+        SigCache.TryRemove(path, out _); ShaCache.TryRemove(path, out _); TrustLoc.TryRemove("R|" + path, out _); TrustLoc.TryRemove("A|" + path, out _);
     }
 
     internal static SigInfo GetSignature(string path)
@@ -298,7 +394,8 @@ internal static class AppTrust
                 dwProvFlags = 0x10 | 0x1000, // WTD_REVOCATION_CHECK_NONE | WTD_CACHE_ONLY_URL_RETRIEVAL
             };
             int hr = WinVerifyTrust(new IntPtr(-1), GenericVerifyV2, ref wd);
-            if (hr != 0) return SigInfo.None;
+            // [r1] רוב קבצי System32 חתומים בקטלוג ולא בחתימה משובצת: בלי זה "חתימת Microsoft תקפה" נכשלת ל-svchost/ctfmon וכו'
+            if (hr != 0) return ComputeCatalogSignature(path);
             using var cert = new X509Certificate2(X509Certificate.CreateFromSignedFile(path));
             return new SigInfo(true, cert.Subject ?? "");
         }
@@ -307,6 +404,79 @@ internal static class AppTrust
         {
             if (pFile != IntPtr.Zero) Marshal.FreeHGlobal(pFile);
             Marshal.FreeHGlobal(pPath);
+        }
+    }
+
+    // ---------- חתימת קטלוג (קבצי Windows) ----------
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct CATALOG_INFO { public uint cbStruct; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string wszCatalogFile; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WINTRUST_CATALOG_INFO
+    {
+        public uint cbStruct, dwCatalogVersion; public IntPtr pcwszCatalogFilePath, pcwszMemberTag, pcwszMemberFilePath, hMemberFile;
+        public IntPtr pbCalculatedFileHash; public uint cbCalculatedFileHash; public IntPtr pcCatalogContext, hCatAdmin;
+    }
+
+    [DllImport("wintrust.dll", SetLastError = true)] private static extern bool CryptCATAdminAcquireContext(out IntPtr ctx, IntPtr subsystem, uint flags);
+    [DllImport("wintrust.dll")] private static extern bool CryptCATAdminReleaseContext(IntPtr ctx, uint flags);
+    [DllImport("wintrust.dll", SetLastError = true)] private static extern bool CryptCATAdminCalcHashFromFileHandle(IntPtr hFile, ref uint cb, byte[] hash, uint flags);
+    [DllImport("wintrust.dll", SetLastError = true)] private static extern IntPtr CryptCATAdminEnumCatalogFromHash(IntPtr ctx, byte[] hash, uint cb, uint flags, ref IntPtr prev);
+    [DllImport("wintrust.dll")] private static extern bool CryptCATAdminReleaseCatalogContext(IntPtr ctx, IntPtr hCat, uint flags);
+    [DllImport("wintrust.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool CryptCATCatalogInfoFromContext(IntPtr hCat, ref CATALOG_INFO info, uint flags);
+
+    /// <summary>[r1] רוב קבצי System32 חתומים בקטלוג ולא בחתימה משובצת; בלי זה "חתימת Microsoft תקפה" נכשלת להם</summary>
+    private static SigInfo ComputeCatalogSignature(string path)
+    {
+        IntPtr admin = IntPtr.Zero, hCat = IntPtr.Zero, pCat = IntPtr.Zero, pTag = IntPtr.Zero, pMember = IntPtr.Zero, pCatPath = IntPtr.Zero;
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            IntPtr fh = fs.SafeFileHandle.DangerousGetHandle();
+            if (!CryptCATAdminAcquireContext(out admin, IntPtr.Zero, 0)) return SigInfo.None;
+            uint cb = 0;
+            CryptCATAdminCalcHashFromFileHandle(fh, ref cb, null, 0);
+            if (cb == 0 || cb > 128) return SigInfo.None;
+            var hash = new byte[cb];
+            if (!CryptCATAdminCalcHashFromFileHandle(fh, ref cb, hash, 0)) return SigInfo.None;
+            IntPtr prev = IntPtr.Zero;
+            hCat = CryptCATAdminEnumCatalogFromHash(admin, hash, cb, 0, ref prev);
+            if (hCat == IntPtr.Zero) return SigInfo.None;
+            var ci = new CATALOG_INFO { cbStruct = (uint)Marshal.SizeOf<CATALOG_INFO>() };
+            if (!CryptCATCatalogInfoFromContext(hCat, ref ci, 0)) return SigInfo.None;
+
+            pCatPath = Marshal.StringToHGlobalUni(ci.wszCatalogFile);
+            pTag = Marshal.StringToHGlobalUni(Convert.ToHexString(hash));
+            pMember = Marshal.StringToHGlobalUni(path);
+            var hashPin = GCHandle.Alloc(hash, GCHandleType.Pinned);
+            try
+            {
+                var wc = new WINTRUST_CATALOG_INFO
+                {
+                    cbStruct = (uint)Marshal.SizeOf<WINTRUST_CATALOG_INFO>(), pcwszCatalogFilePath = pCatPath, pcwszMemberTag = pTag,
+                    pcwszMemberFilePath = pMember, hMemberFile = fh, pbCalculatedFileHash = hashPin.AddrOfPinnedObject(),
+                    cbCalculatedFileHash = cb, hCatAdmin = admin,
+                };
+                pCat = Marshal.AllocHGlobal(Marshal.SizeOf<WINTRUST_CATALOG_INFO>());
+                Marshal.StructureToPtr(wc, pCat, false);
+                var wd = new WINTRUST_DATA
+                {
+                    cbStruct = (uint)Marshal.SizeOf<WINTRUST_DATA>(), dwUIChoice = 2, fdwRevocationChecks = 0,
+                    dwUnionChoice = 2 /* WTD_CHOICE_CATALOG */, pFile = pCat, dwStateAction = 0, dwProvFlags = 0x10 | 0x1000,
+                };
+                if (WinVerifyTrust(new IntPtr(-1), GenericVerifyV2, ref wd) != 0) return SigInfo.None;
+            }
+            finally { hashPin.Free(); }
+            using var cert = new X509Certificate2(X509Certificate.CreateFromSignedFile(ci.wszCatalogFile));
+            return new SigInfo(true, cert.Subject ?? "");
+        }
+        catch { return SigInfo.None; }
+        finally
+        {
+            if (hCat != IntPtr.Zero && admin != IntPtr.Zero) CryptCATAdminReleaseCatalogContext(admin, hCat, 0);
+            if (admin != IntPtr.Zero) CryptCATAdminReleaseContext(admin, 0);
+            foreach (var p in new[] { pCat, pTag, pMember, pCatPath }) if (p != IntPtr.Zero) Marshal.FreeHGlobal(p);
         }
     }
 

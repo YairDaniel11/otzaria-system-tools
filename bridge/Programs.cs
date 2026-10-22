@@ -33,6 +33,10 @@ public static class Programs
         "wmic", "forfiles", "pcalua", "msbuild", "csc", "installutil", "regsvr32", "certutil", "bitsadmin", "dism",
         "schtasks", "sc", "net", "net1", "reg", "curl", "ftp", "eventvwr", "mstsc", "SystemSettings", "ApplicationFrameHost",
         "osk", "narrator", "magnify", "utilman", "notepad", "mspaint",
+        // [r1] דפדפנים (עוקפים את הרשימה: ניווט חופשי/הורדות) וכלי ניהול מערכת
+        "msedge", "chrome", "firefox", "iexplore", "brave", "opera", "vivaldi",
+        "perfmon", "msconfig", "resmon", "taskschd", "dxdiag", "msinfo32", "compmgmt", "services", "devmgmt", "diskmgmt",
+        "lusrmgr", "secpol", "gpedit", "cleanmgr", "psr", "mdsched", "msra", "quickassist", "odbcad32", "dfrgui",
     };
 
     // בעיה #14 סעיף 6: נכתבים בחוט בקשה (Activate) ונקראים בחוט השומר (ShouldYieldTo וכו') —
@@ -201,6 +205,65 @@ public static class Programs
     /// </summary>
     internal static void GrantForegroundGrace() => GraceUntil = DateTime.UtcNow.AddSeconds(GraceSeconds);
 
+    // [r1] החסד (30 שניות) חל רק על תהליכים שה-flow שביקש אותו באמת צריך: Hello/אימות (CredentialUIBroker, LogonUI, consent)
+    // ו"הצגה בסייר" (explorer) — וגם הם רק אם הנתיב+ACL+חתימת Microsoft אמיתיים. כל תהליך אחר בחזית לא נהנה מהחסד.
+    private static readonly HashSet<string> GraceProcs = new(StringComparer.OrdinalIgnoreCase)
+        { "CredentialUIBroker", "LogonUI", "consent", "explorer" };
+
+    internal static bool GraceApplies(string procName, string exePath, AppTrust.ITrustEnv env) =>
+        GraceProcs.Contains(procName ?? "") && AppTrust.IsTrustedMicrosoft(exePath, env);
+
+    private static bool IsGraceProcess(Process p)
+    {
+        string exe = null;
+        try { exe = p.MainModule?.FileName; } catch { }
+        return GraceApplies(p.ProcessName, exe, AppTrust.Env);
+    }
+
+    [DllImport("kernel32.dll")] private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern int GetPackageFamilyName(IntPtr hProcess, ref uint len, System.Text.StringBuilder name);
+
+    /// <summary>PackageFamilyName של שורת shell:AppsFolder\PFN!App, או null</summary>
+    internal static string PfnOfShellPath(string p) =>
+        IsShellApp(p) ? p.Substring(@"shell:AppsFolder\".Length).Split('!')[0] : null;
+
+    /// <summary>
+    /// [r1] האם תהליך הליבה של UWP (שמארח ApplicationFrameHost) שייך לאפליקציית חבילה מהרשימה, לפי PackageFamilyName
+    /// (המזהה כולל hash של המפרסם, לא ניתן לזיוף בשם). תהליך חסום (SystemSettings וכו') לא מתקבל.
+    /// </summary>
+    internal static bool IsAllowedPackageProcess(uint pid)
+    {
+        try
+        {
+            using (var p = Process.GetProcessById((int)pid)) if (IsBlockedProc(p)) return false;
+            IntPtr h = OpenProcess(0x1000, false, pid);
+            if (h == IntPtr.Zero) return false;
+            string pfn;
+            try
+            {
+                uint len = 256;
+                var sb = new System.Text.StringBuilder((int)len);
+                if (GetPackageFamilyName(h, ref len, sb) != 0) return false;
+                pfn = sb.ToString();
+            }
+            finally { CloseHandle(h); }
+            return Load().Any(e => string.Equals(PfnOfShellPath(e.Path), pfn, StringComparison.OrdinalIgnoreCase));
+        }
+        catch { return false; }
+    }
+
+    // כלי החיתוך של Win11: ה-alias ב-%LOCALAPPDATA%\Microsoft\WindowsApps כתיב למשתמש (אפשר להחליף אותו ב-exe אחר) ולכן אינו מהימן;
+    // מפעילים במקומו לפי PackageFamilyName (hash המפרסם של Microsoft קבוע ולא ניתן לזיוף)
+    internal const string SnipPfnPath = @"shell:AppsFolder\Microsoft.ScreenSketch_8wekyb3d8bbwe!App";
+
+    internal static bool IsSnipAlias(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return false;
+        string alias = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WindowsApps", "SnippingTool.exe");
+        try { return System.IO.Path.GetFullPath(path).Equals(alias, StringComparison.OrdinalIgnoreCase); } catch { return false; }
+    }
+
     /// <summary>
     /// אפליקציית חנות (UWP, כמו פתקים דביקים/שעון) שאין לה קובץ exe שאפשר לאתר - מופעלת לפי מזהה האפליקציה
     /// בתיקיית AppsFolder: shell:AppsFolder\PackageFamilyName!AppId. מזהה תקין בלבד (בלי תווים חריגים)
@@ -211,19 +274,33 @@ public static class Programs
 
     public static bool Activate(Entry e)
     {
-        bool shellApp = IsShellApp(e.Path);
+        // [r1] alias של כלי החיתוך (כתיב למשתמש) מופעל לפי PackageFamilyName, לא לפי הנתיב
+        string target = IsSnipAlias(e.Path) ? SnipPfnPath : e.Path;
+        bool shellApp = IsShellApp(target);
         if (!shellApp && !File.Exists(e.Path)) throw BridgeException.NotFound("הקובץ לא נמצא: " + e.Path);
         // [w3] אימות מחדש מול הנעיצה בכל Launch (קובץ שהוחלף/נפרץ לא מופעל). בלי חלון חסד: הזיהוי הוא לפי
         // עץ התהליכים של מה שנפתח (PID+זמן יצירה) ולפי נתיב+נעיצה, לא "כל מה שבחזית ב-30 השניות הקרובות"
-        if (!shellApp)
+        // [r1] TOCTOU: הקובץ נפתח ב-FileShare.Read (נעול מהחלפה/כתיבה), ה-hash מחושב מה-handle, והמנעול מוחזק עד אחרי Process.Start
+        AppTrust.LaunchLock fileLock = null;
+        try
         {
-            AppTrust.Invalidate(e.Path);
-            if (!AppTrust.LaunchAllowed(e.Path, e.Sha256, e.Signer, AppTrust.Env))
+            if (!shellApp)
             {
-                Config.Log("programs launch חסום: הקובץ אינו תואם לנעיצה/למיקום מהימן: " + e.Path);
-                throw BridgeException.Forbidden("הקובץ שונה מאז שהתוכנה נוספה (או אינו מאומת). יש להסיר ולהוסיף אותה מחדש בסיסמה");
+                AppTrust.Invalidate(e.Path);
+                fileLock = AppTrust.LaunchLock.Open(e.Path);
+                if (fileLock == null || !AppTrust.LaunchAllowedLocked(e.Path, fileLock.Sha256, e.Sha256, e.Signer, AppTrust.Env))
+                {
+                    Config.Log("programs launch חסום: הקובץ אינו תואם לנעיצה/למיקום מהימן (או לא ניתן לנעילה): " + e.Path);
+                    throw BridgeException.Forbidden("הקובץ שונה מאז שהתוכנה נוספה (או אינו מאומת). יש להסיר ולהוסיף אותה מחדש בסיסמה");
+                }
             }
+            return ActivateLocked(e, target, shellApp);
         }
+        finally { fileLock?.Dispose(); }
+    }
+
+    private static bool ActivateLocked(Entry e, string target, bool shellApp)
+    {
         IntPtr h = ExistingWindow(e);
         if (h != IntPtr.Zero)
         {
@@ -233,7 +310,7 @@ public static class Programs
         }
         LastLaunchAt = DateTime.UtcNow;
         _lastLaunchEntry = e;
-        using (var started = Process.Start(new ProcessStartInfo(e.Path)
+        using (var started = Process.Start(new ProcessStartInfo(target)
         {
             UseShellExecute = true,
             WorkingDirectory = shellApp ? null : System.IO.Path.GetDirectoryName(e.Path),
@@ -323,12 +400,19 @@ public static class Programs
             string stem = System.IO.Path.GetFileNameWithoutExtension(path);
             if (Blocked.Contains(stem) || AppTrust.IsBlockedIdentity(null, null, AppTrust.GetOriginalName(path), Blocked))
                 throw BridgeException.Forbidden("אי אפשר להוסיף את התוכנה הזו לרשימה");
+            // [r1] תוכנה חדשה: מיקום קבוע שרק מנהל כותב אליו (קובץ + כל תיקיות האב), לא נעיצת SHA בלבד — אחרת אפשר להחליף את
+            // הקובץ/התיקיה/ספריות שלה (DLL side-loading). alias של כלי החיתוך מומר לאפליקציית חבילה במקום
+            if (IsSnipAlias(path)) { path = SnipPfnPath; shellApp = true; }
+            else if (!AppTrust.IsAdminOnlyLocation(path))
+                throw BridgeException.Forbidden("התוכנה חייבת להיות מותקנת במיקום שרק מנהל יכול לכתוב אליו (למשל Program Files). יש להתקין אותה שם או להקשיח את הרשאות התיקיה");
         }
         else if (string.IsNullOrWhiteSpace(b.Str("procs")))
             throw BridgeException.BadRequest("לאפליקציית חנות חובה לציין שם תהליך (בשדה „תהליכים נוספים”), כדי שהחלון שלה יזוהה כתוכנה מותרת");
 
         var procs = new List<string>();
-        foreach (string p in (b.Str("procs") ?? "").Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
+        string procsRaw = b.Str("procs") ?? "";
+        if (path == SnipPfnPath && string.IsNullOrWhiteSpace(procsRaw)) procsRaw = "SnippingTool, ScreenClippingHost, ScreenSketch";
+        foreach (string p in procsRaw.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries))
         {
             string n = System.IO.Path.GetFileNameWithoutExtension(p.Trim());
             if (!Regex.IsMatch(n, @"^[\w .\-]{1,60}$")) throw BridgeException.BadRequest("שם תהליך לא תקין: " + p);
@@ -402,6 +486,8 @@ public static class Programs
         foreach (var u in list)
         {
             string hit = u.candidates.FirstOrDefault(File.Exists);
+            // [r1] alias ב-WindowsApps (כתיב למשתמש) מוצע כאפליקציית חבילה לפי PackageFamilyName, לא כנתיב
+            if (hit != null && IsSnipAlias(hit)) hit = SnipPfnPath;
             if (hit != null) yield return (u.name, hit, u.procs);
         }
     }
@@ -744,10 +830,12 @@ public static class Programs
     /// </summary>
     public static bool ShouldYieldTo(uint foregroundPid)
     {
-        if (DateTime.UtcNow < GraceUntil) return true;
         try
         {
             using var p = Process.GetProcessById((int)foregroundPid);
+            // [r1] עוין (דפדפן/LOLBin/כלי ניהול, גם לפי OriginalFilename) נבדק לפני כל "הרשאה": לא חסד, לא עץ-גשר, לא "חדש אחרי הפעלה"
+            if (p.Id != Environment.ProcessId && IsBlockedProc(p)) return false;
+            if (DateTime.UtcNow < GraceUntil && IsGraceProcess(p)) return true;
             if (MatchesList(p, Load())) return true;
             if (IsLaunchedTree((int)foregroundPid)) return true;
             // תוכנה שהחלון שלה שייך לתהליך אחר מהקובץ שהופעל (מפעיל נפרד, תהליך עזר, מופע יחיד):
@@ -858,14 +946,28 @@ public static class Programs
         string exe = null;
         try { exe = p.MainModule?.FileName; } catch { }
         if (string.IsNullOrEmpty(exe)) return false;
-        if (AppTrust.Env.IsTrustedLocation(exe)) return true;
+        // [r1] "כל מיקום קבוע" לא מספיק (אחרת כל exe של Windows/Program Files שנפתח תוך 90 שניות מתקבל): נדרשת חתימה/נעיצה של הרשומה
         var le = _lastLaunchEntry;
         if (le == null) return false;
         if (le.Path != null && exe.Equals(le.Path, StringComparison.OrdinalIgnoreCase)) return AppTrust.LaunchAllowed(exe, le.Sha256, le.Signer, AppTrust.Env);
-        if (string.IsNullOrEmpty(le.Signer)) return false;
+        string signer = !string.IsNullOrEmpty(le.Signer) ? le.Signer : AutoSigner(le);
+        if (string.IsNullOrEmpty(signer))
+            return AppTrust.IsMicrosoftPackage(exe, AppTrust.Env) && IsShellApp(le.Path) && PackageMatchesEntry(exe, le);
         var s = AppTrust.Env.Sig(exe);
-        return s.Valid && string.Equals(s.Subject, le.Signer, StringComparison.OrdinalIgnoreCase);
+        return s.Valid && string.Equals(s.Subject, signer, StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>רשומה אוטומטית (בלי נעיצה) במיקום מהימן: המפרסם הוא החתימה התקפה של הקובץ שלה</summary>
+    private static string AutoSigner(Entry le)
+    {
+        if (le.Path == null || IsShellApp(le.Path) || !AppTrust.Env.IsTrustedLocation(le.Path)) return "";
+        var s = AppTrust.Env.Sig(le.Path);
+        return s.Valid ? s.Subject : "";
+    }
+
+    /// <summary>תהליך עזר בחבילת Microsoft של אפליקציית החנות שנפתחה (למשל ScreenClippingHost): שם התהליך מרשימת Procs של הרשומה</summary>
+    private static bool PackageMatchesEntry(string exe, Entry le) =>
+        ProcNames(le).Contains(System.IO.Path.GetFileNameWithoutExtension(exe).ToLowerInvariant());
 
     private delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr l);

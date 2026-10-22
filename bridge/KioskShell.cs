@@ -16,13 +16,31 @@ internal static class KioskKeys
     internal const uint VkTab = 0x09, VkEsc = 0x1B, VkSpace = 0x20, VkF1 = 0x70, VkF4 = 0x73, VkF10 = 0x79,
         VkApps = 0x5D, VkO = 0x4F, VkP = 0x50, VkLWin = 0x5B, VkRWin = 0x5C;
 
+    // FgDialogUnsafe [r1]: בדיאלוג הקבצים בחזית, תיבת השם מכילה כרגע ערך אסור (DialogGuard) - Enter לא עובר (אחרת הדיאלוג נסגר/מנווט לפני הסריקה)
     internal readonly record struct Ctx(bool Alt, bool Ctrl, bool Shift, bool Win,
-        bool FgOtzaria, bool FgAllowed, bool FgBrowser, bool FgFileDialog);
+        bool FgOtzaria, bool FgAllowed, bool FgBrowser, bool FgFileDialog, bool FgDialogUnsafe = false);
+
+    internal const uint VkReturn = 0x0D;
+
+    /// <summary>
+    /// [r1] מקשי מדיה שפותחים תוכנה/דפדפן: דפדפן (0xA6-0xAC: אחורה/קדימה/רענון/עצור/חיפוש/מועדפים/בית), דואר (0xB4), בחירת מדיה (0xB5),
+    /// והפעלת תוכנה 1/2 (0xB6-0xB7). עוצמת קול והפעלה/עצירה (0xAD-0xB3) נשארים מותרים: לא פותחים כלום, וחסימתם היא false-positive.
+    /// </summary>
+    internal static bool IsLaunchMediaKey(uint vk) => (vk >= 0xA6 && vk <= 0xAC) || (vk >= 0xB4 && vk <= 0xB7);
+
+    /// <summary>
+    /// [r1] AltGr = Ctrl (שמולבש ע"י Windows) + Alt ימני, בלי Alt שמאלי. Ctrl+Alt+O אמיתי דורש Alt שמאלי (או Alt כללי ללא ימני בלבד),
+    /// אחרת AltGr+O (אות בפריסות אירופיות) היה מחזיר לאוצריא.
+    /// </summary>
+    internal static bool IsReturnHotkey(uint vk, bool down, bool ctrl, bool altHeld, bool lAlt, bool rAlt) =>
+        down && vk == VkO && ctrl && altHeld && !(rAlt && !lAlt);
 
     /// <summary>האם לבלוע את המקש. Alt נקבע ע"י הקורא כ-"דגל ה-hook או מצב אסינכרוני של MENU/LMENU/RMENU"</summary>
     internal static bool ShouldBlock(uint vk, in Ctx c)
     {
         if (vk is VkLWin or VkRWin) return true;                    // Win בפני עצמו
+        if (IsLaunchMediaKey(vk)) return true;                       // מקשי דפדפן/דואר/אפליקציה בכל תוכנה
+        if (vk == VkReturn && c.FgFileDialog && c.FgDialogUnsafe) return true; // Enter על ערך אסור בדיאלוג קבצים
         if (c.Win) return true;                                      // Win+כל מקש
         if (c.Alt && vk is VkTab or VkEsc or VkSpace) return true;   // Alt+Tab / Alt+Shift+Tab / Alt+Esc / Alt+Space
         if (c.Alt && vk == VkF4) return !c.FgAllowed;                // Alt+F4 מותר רק בתוכנה מותרת (כדי לסגור אותה)
@@ -56,22 +74,67 @@ internal static class ShellPolicy
         ["conhost"] = ShellAction.Kill, ["mshta"] = ShellAction.Kill, ["wscript"] = ShellAction.Kill,
         ["cscript"] = ShellAction.Kill, ["msconfig"] = ShellAction.Kill, ["perfmon"] = ShellAction.Kill,
         ["compmgmt"] = ShellAction.Kill, ["services"] = ShellAction.Kill, ["devmgmt"] = ShellAction.Kill,
+        // [r1] כלי ניהול מערכת נוספים (חלק מהם רצים תחת mmc, חלק כתהליך עצמאי)
+        ["resmon"] = ShellAction.Kill, ["taskschd"] = ShellAction.Kill, ["dxdiag"] = ShellAction.Kill, ["msinfo32"] = ShellAction.Kill,
+        ["diskmgmt"] = ShellAction.Kill, ["lusrmgr"] = ShellAction.Kill, ["secpol"] = ShellAction.Kill, ["gpedit"] = ShellAction.Kill,
+        ["cleanmgr"] = ShellAction.Kill, ["psr"] = ShellAction.Kill, ["mdsched"] = ShellAction.Kill, ["msra"] = ShellAction.Kill,
+        ["quickassist"] = ShellAction.Kill, ["odbcad32"] = ShellAction.Kill, ["dfrgui"] = ShellAction.Kill,
     };
 
-    // רכיבי מערכת שחלונותיהם לגיטימיים (IME, מסך כניסה, UAC...). נשארים רק אם הנתיב בתוך Windows (או שלא קריא = תהליך מוגבה)
+    /// <summary>[r1] שמות שמסומנים עוינים (לשימוש הקורא שרוצה לבדוק לפני כל "אמון" אחר)</summary>
+    internal static bool IsHostileName(string name) => Hostile.ContainsKey(Stem(name));
+
+    // רכיבי מערכת שחלונותיהם לגיטימיים (IME, מסך כניסה, UAC...). נשארים רק אם הנתיב+ACL+חתימת Microsoft תקינים (IsTrustedSystem),
+    // או שהנתיב לא קריא (תהליך מוגבה מאיתנו = לא ניתן לזייף ממשתמש רגיל)
     private static readonly HashSet<string> Critical = new(StringComparer.OrdinalIgnoreCase)
     {
         "csrss", "dwm", "winlogon", "LogonUI", "consent", "fontdrvhost", "ctfmon", "TextInputHost", "sihost",
         "taskhostw", "RuntimeBroker", "svchost", "LockApp", "SecurityHealthSystray", "CredentialUIBroker",
         "smartscreen", "InputApp", "WindowsInternal.ComposableShell.Experiences.TextInput.InputApp",
+        // [r1] מקלדת מגע/IME/הגדרות-תיווך/מארחי COM: רק עם נתיב+חתימה
+        "TabTip", "ShellHost", "ImeBroker", "dllhost", "SystemSettingsBroker",
     };
 
-    // נטפלים בהם במקום אחר (Watch / KioskGuard) או בזמן צילום מאושר: לא נוגעים כאן
+    // נטפלים בהם במקום אחר (Watch / KioskGuard): לא נוגעים כאן — אבל רק אם הנתיב+חתימה אמיתיים (אחרת התחזות)
     private static readonly HashSet<string> HandledElsewhere = new(StringComparer.OrdinalIgnoreCase)
         { "explorer", "PickerHost", "StartMenuExperienceHost", "SearchHost" };
 
-    private static readonly HashSet<string> SnipHosts = new(StringComparer.OrdinalIgnoreCase)
-        { "ApplicationFrameHost", "ShellExperienceHost" };
+    // [r1] explorer אינו עוד "Keep" גורף: רק חלונות המעטפת עצמם (שולחן עבודה/שורת משימות). כל השאר (Run #32770, CabinetWClass...) נסגרים
+    private static readonly HashSet<string> ExplorerShellClasses = new(StringComparer.Ordinal)
+    {
+        "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "NotifyIconOverflowWindow",
+        "TopLevelWindowForOverflowXamlIsland", "SysShadow", "tooltips_class32",
+    };
+
+    /// <summary>
+    /// [r1] מחלקות חלון של שכבת הצילום (Win11 "חדש"): גשרי הרכבה/CoreWindow שמצייר הצילום. בזמן צילום מאושר (120 שניות) רק הן פטורות;
+    /// #32770 (Run/דיאלוגים), CabinetWClass, ApplicationFrameWindow נשארים באכיפה. הרשימה לא אומתה מול Windows חי (ר' הדוח).
+    /// </summary>
+    internal static bool IsSnipOverlayClass(string cls) =>
+        !string.IsNullOrEmpty(cls) && (cls.StartsWith("ScreenClip", StringComparison.OrdinalIgnoreCase) ||
+        cls is "Windows.UI.Core.CoreWindow" or "Microsoft.UI.Content.DesktopChildSiteBridge" or
+               "Windows.UI.Composition.DesktopWindowContentBridge" or "Windows.UI.Input.InputSite.WindowClass");
+
+    // [r1] תהליכים שה-Close שלהם אינו מסלים ל-Kill: ApplicationFrameHost מארח גם אפליקציות UWP מותרות; explorer נטפל ב-Watch
+    internal static bool NeverKill(string name)
+    {
+        string n = Stem(name);
+        return n.Equals("ApplicationFrameHost", StringComparison.OrdinalIgnoreCase) || n.Equals("explorer", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>[r1] האם ההחלטה על השם הזה תלויה באמון (נתיב+חתימה) — רק אז משלמים על בדיקת חתימה</summary>
+    internal static bool NeedsTrust(string name)
+    {
+        string n = Stem(name);
+        return HandledElsewhere.Contains(n) || Critical.Contains(n) || n.Equals("ShellExperienceHost", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// [r1] רכיב מערכת אמיתי: נתיב במיקום קבוע לא-כתיב (ACL) + חתימת Microsoft תקפה. לא "שם + תחת C:\Windows" (Windows\Temp כתיב).
+    /// חבילות (SystemApps/WindowsApps של Microsoft) נבדקות גם לפי שם-חבילה+חתימה, בלי תלות ב-ACL לא קריא.
+    /// </summary>
+    internal static bool IsTrustedSystem(string imagePath, AppTrust.ITrustEnv env) =>
+        !string.IsNullOrEmpty(imagePath) && (AppTrust.IsTrustedMicrosoft(imagePath, env) || AppTrust.IsMicrosoftPackage(imagePath, env));
 
     internal static string Stem(string name)
     {
@@ -86,16 +149,26 @@ internal static class ShellPolicy
         return path.StartsWith(root, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>החלטה לגבי תהליך שיש לו חלון עליון גלוי ושאינו אוצריא/הגשר/תוכנה מותרת (את אלה בודק הקורא קודם)</summary>
-    internal static ShellAction Decide(string name, string imagePath, string windir, bool snipInProgress)
+    /// <summary>
+    /// החלטה לגבי חלון של תהליך שאינו אוצריא/הגשר/תוכנה מותרת (את אלה בודק הקורא קודם).
+    /// trusted = IsTrustedSystem (נתיב+ACL+חתימה); pathUnknown = אין גישה לנתיב (מוגבה מאיתנו); cls = מחלקת החלון (לכללי explorer/צילום).
+    /// </summary>
+    internal static ShellAction Decide(string name, bool trusted, bool pathUnknown, bool snipInProgress, string cls = null)
     {
         string n = Stem(name);
         if (n.Length == 0) return ShellAction.Keep;
-        if (HandledElsewhere.Contains(n)) return ShellAction.Keep;
-        if (Critical.Contains(n) && (string.IsNullOrEmpty(imagePath) || IsUnder(imagePath, windir))) return ShellAction.Keep;
-        if (snipInProgress && SnipHosts.Contains(n)) return ShellAction.Keep;
+        if (HandledElsewhere.Contains(n) && (trusted || pathUnknown))
+        {
+            if (!n.Equals("explorer", StringComparison.OrdinalIgnoreCase)) return ShellAction.Keep;   // PickerHost/תפריט התחל/חיפוש: KioskGuard
+            if (ExplorerShellClasses.Contains(cls ?? "")) return ShellAction.Keep;
+            if (snipInProgress && IsSnipOverlayClass(cls)) return ShellAction.Keep;
+            return ShellAction.Close;   // Run (#32770), CabinetWClass וכו' — גם בזמן צילום
+        }
+        if (Critical.Contains(n) && (trusted || pathUnknown)) return ShellAction.Keep;
+        if (snipInProgress && n.Equals("ShellExperienceHost", StringComparison.OrdinalIgnoreCase) && (trusted || pathUnknown) && IsSnipOverlayClass(cls))
+            return ShellAction.Keep;
         if (Hostile.TryGetValue(n, out var a)) return a;
-        return ShellAction.Close; // כל תהליך חזית אחר שאינו ברשימה: סגירה, ואם לא נסגר — Kill בסריקה הבאה
+        return ShellAction.Close; // כל תהליך חזית אחר שאינו ברשימה (גם מתחזה בשם מערכת): סגירה, ואם לא נסגר — Kill בסריקה הבאה
     }
 }
 
@@ -172,42 +245,55 @@ public static partial class Kiosk
         return _hook != IntPtr.Zero;
     }
 
+    /// <summary>
+    /// [r1] ידיות ה-hook שייכות לחוט שיצר אותן (מצב מקומי, לא שדות סטטיים משותפים): חוט ישן שהתעורר אחרי hang משחרר רק את שלו
+    /// ולא את ה-hook של החוט החדש. השדות הסטטיים (_hook/_mouseHook) מתעדכנים רק אם החוט הוא החוט הפעיל.
+    /// </summary>
+    private sealed class HookHandles { public IntPtr Kb, Mouse; }
+
     private static void HookThreadMain(ManualResetEventSlim ready)
     {
-        _hookThreadId = GetCurrentThreadId();
+        var mine = new HookHandles();
+        uint tid = GetCurrentThreadId();
+        if (ReferenceEquals(_hookThread, Thread.CurrentThread)) _hookThreadId = tid; // בלי lock: StartHookThread מחזיק HookGate וממתין ל-ready
         PeekMessage(out _, IntPtr.Zero, 0, 0, 0); // יוצר את תור ההודעות של התהליכון לפני שמישהו שולח לו
-        _hookProc = HookCallback;
-        _mouseProc = MouseCallback;
-        InstallCore();
+        // הנציגים נשמרים בשדות סטטיים ולא מוחלפים (נציג שנאסף ע"י ה-GC בזמן ש-hook ישן עדיין מותקן = קריסה)
+        _hookProc ??= HookCallback;
+        _mouseProc ??= MouseCallback;
+        InstallCore(mine);
         ready.Set();
         while (GetMessage(out var m, IntPtr.Zero, 0, 0) > 0)
         {
-            if (m.message == MsgReinstall) InstallCore();
+            if (m.message == MsgReinstall) InstallCore(mine);
             else if (m.message == MsgPing) Volatile.Write(ref _pingAck, Environment.TickCount64);
             else if (m.message == MsgStop) break;
             else { TranslateMessage(ref m); DispatchMessage(ref m); }
         }
-        if (_hook != IntPtr.Zero) UnhookWindowsHookEx(_hook);
-        if (_mouseHook != IntPtr.Zero) UnhookWindowsHookEx(_mouseHook);
-        _hook = IntPtr.Zero; _mouseHook = IntPtr.Zero;
+        if (mine.Kb != IntPtr.Zero) UnhookWindowsHookEx(mine.Kb);
+        if (mine.Mouse != IntPtr.Zero) UnhookWindowsHookEx(mine.Mouse);
+        // מאפסים את הסטטי רק אם הוא עדיין שלי (החוט החדש כבר עדכן אותו)
+        if (_hook == mine.Kb) _hook = IntPtr.Zero;
+        if (_mouseHook == mine.Mouse) _mouseHook = IntPtr.Zero;
     }
 
-    /// <summary>התקנה חדשה לפני הסרת הישנה (בלי חלון בלי הגנה). רץ רק בתהליכון ה-hook</summary>
-    private static void InstallCore()
+    /// <summary>התקנה חדשה לפני הסרת הישנה (בלי חלון בלי הגנה). רץ רק בתהליכון ה-hook, על הידיות שלו</summary>
+    private static void InstallCore(HookHandles mine)
     {
         IntPtr mod = GetModuleHandle(null);
         IntPtr nk = SetWindowsHookEx(13 /* WH_KEYBOARD_LL */, _hookProc, mod, 0);
         if (nk == IntPtr.Zero) LogThrottled("hookfail", "keyboard hook failed: " + Marshal.GetLastWin32Error(), 30);
         else
         {
-            var old = _hook; _hook = nk;
+            var old = mine.Kb; mine.Kb = nk;
+            if (ReferenceEquals(_hookThread, Thread.CurrentThread)) _hook = nk;
             if (old != IntPtr.Zero) UnhookWindowsHookEx(old);
             if (!_hookLogged) { _hookLogged = true; Config.Log("keyboard hook installed (dedicated thread)"); }
         }
         IntPtr nm = SetWindowsHookEx(14 /* WH_MOUSE_LL */, _mouseProc, mod, 0);
         if (nm != IntPtr.Zero)
         {
-            var old = _mouseHook; _mouseHook = nm;
+            var old = mine.Mouse; mine.Mouse = nm;
+            if (ReferenceEquals(_hookThread, Thread.CurrentThread)) _mouseHook = nm;
             if (old != IntPtr.Zero) UnhookWindowsHookEx(old);
         }
         else LogThrottled("mousehookfail", "mouse hook failed: " + Marshal.GetLastWin32Error(), 30);
@@ -284,7 +370,6 @@ public static partial class Kiosk
     private static volatile bool _shellStop;
     private static long _shellDirtyAt;
     private static WinEventProc _shellProc;
-    private sealed record PidInfo(long At, bool Skip, ShellAction Act, string Name);
     private static readonly ConcurrentDictionary<uint, PidInfo> _pidCache = new();
     private static readonly ConcurrentDictionary<uint, long> _closeSeen = new();
     private static readonly string WinDir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
@@ -350,6 +435,9 @@ public static partial class Kiosk
         return IsOtzariaPid(pid); // נתיב לא קריא/לא הוגדר: נפילה לשם (תהליך מוגבה בלבד)
     }
 
+    // [r1] PidInfo לפי תהליך (נתיב + אמון מערכת); ההחלטה (Decide) לפי חלון, כי explorer/ShellExperienceHost תלויים במחלקת החלון
+    private sealed record PidInfo(long At, bool Skip, string Name, bool Trusted, bool PathUnknown);
+
     private static PidInfo Classify(uint pid, int session)
     {
         long now = Environment.TickCount64;
@@ -358,30 +446,51 @@ public static partial class Kiosk
         try
         {
             using var p = Process.GetProcessById((int)pid);
-            if (p.SessionId != session) r = new PidInfo(now, true, ShellAction.Keep, "");
+            if (p.SessionId != session) r = new PidInfo(now, true, "", false, false);
             else
             {
                 string name = p.ProcessName, path = ImagePath(pid);
-                if (pid == (uint)Environment.ProcessId || IsOtzariaImage(pid, path) || Programs.IsAllowedForeground(pid))
-                    r = new PidInfo(now, true, ShellAction.Keep, name);
+                // [r1] עוין (דפדפן/LOLBin/כלי ניהול) נבדק קודם: לא נפטר גם אם הוא "חדש אחרי הפעלה"/בעץ הגשר (IsAllowedForeground בודק זהות חסומה ראשון)
+                bool hostile = ShellPolicy.IsHostileName(name);
+                if (pid == (uint)Environment.ProcessId || (!hostile && (IsOtzariaImage(pid, path) || Programs.IsAllowedForeground(pid))))
+                    r = new PidInfo(now, true, name, false, false);
                 else
                 {
-                    bool snip = _snipSeen != DateTime.MinValue && (DateTime.UtcNow - _snipSeen).TotalSeconds < 120;
-                    var act = ShellPolicy.Decide(name, path, WinDir, snip);
-                    r = new PidInfo(now, act == ShellAction.Keep, act, name);
+                    bool trusted = ShellPolicy.NeedsTrust(name) && ShellPolicy.IsTrustedSystem(path, AppTrust.Env);
+                    r = new PidInfo(now, false, name, trusted, string.IsNullOrEmpty(path));
                 }
             }
         }
-        catch { r = new PidInfo(now, true, ShellAction.Keep, ""); }
+        catch { r = new PidInfo(now, true, "", false, false); }
         _pidCache[pid] = r;
         return r;
+    }
+
+    [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumProc cb, IntPtr l);
+
+    /// <summary>[r1] PID של תהליך הליבה של UWP שמתארח בחלון ApplicationFrameHost (חלון הילד Windows.UI.Core.CoreWindow), או 0</summary>
+    private static uint HostedCorePid(IntPtr frame, uint hostPid)
+    {
+        uint found = 0;
+        var sb = new StringBuilder(64);
+        EnumChildWindows(frame, (ch, _) =>
+        {
+            GetWindowThreadProcessId(ch, out uint cp);
+            if (cp == 0 || cp == hostPid) return true;
+            sb.Clear();
+            if (GetClassName(ch, sb, sb.Capacity) > 0 && sb.ToString() == "Windows.UI.Core.CoreWindow") { found = cp; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
     }
 
     private static void SweepWindows()
     {
         int session = Process.GetCurrentProcess().SessionId;
         UpdateForegroundAllowedCacheIfChanged();
-        var victims = new Dictionary<uint, (PidInfo info, List<IntPtr> wins)>();
+        bool snip = _snipSeen != DateTime.MinValue && (DateTime.UtcNow - _snipSeen).TotalSeconds < 120;
+        var victims = new Dictionary<uint, (string name, ShellAction act, List<IntPtr> wins)>();
+        var cb = new StringBuilder(128);
         EnumWindows((h, _) =>
         {
             if (!IsWindowVisible(h)) return true;
@@ -391,19 +500,32 @@ public static partial class Kiosk
             if (pid == 0) return true;
             var info = Classify(pid, session);
             if (info.Skip) return true;
-            if (!victims.TryGetValue(pid, out var v)) victims[pid] = v = (info, new List<IntPtr>());
+            cb.Clear();
+            GetClassName(h, cb, cb.Capacity);
+            var act = ShellPolicy.Decide(info.Name, info.Trusted, info.PathUnknown, snip, cb.ToString());
+            if (act == ShellAction.Keep) return true;
+            // [r1] ApplicationFrameHost מותר כשתהליך הליבה של ה-UWP שהוא מארח הוא אפליקציית חבילה מהרשימה (לפי PackageFamilyName)
+            if (info.Name.Equals("ApplicationFrameHost", StringComparison.OrdinalIgnoreCase))
+            {
+                uint core = HostedCorePid(h, pid);
+                if (core != 0 && Programs.IsAllowedPackageProcess(core)) return true;
+            }
+            if (!victims.TryGetValue(pid, out var v)) victims[pid] = v = (info.Name, act, new List<IntPtr>());
+            if (act == ShellAction.Kill) v.act = ShellAction.Kill;
             v.wins.Add(h);
+            victims[pid] = v;
             return true;
         }, IntPtr.Zero);
 
         long now = Environment.TickCount64;
-        foreach (var (pid, (info, wins)) in victims)
+        foreach (var (pid, (name, act, wins)) in victims)
         {
-            bool kill = info.Act == ShellAction.Kill;
+            bool kill = act == ShellAction.Kill;
             if (!kill)
             {
-                // Close: קודם סגירה מנומסת; אם החלון עדיין שם אחרי >=600ms — Kill
-                if (_closeSeen.TryGetValue(pid, out long first) && now - first >= 600) kill = true;
+                // Close: קודם סגירה מנומסת; אם החלון עדיין שם אחרי >=600ms — Kill.
+                // [r1] חריג: ApplicationFrameHost/explorer — רק סגירה (WM_CLOSE בכל סריקה), בלי הסלמה: הריגתם סוגרת גם UWP מותרים/את המעטפת
+                if (!ShellPolicy.NeverKill(name) && _closeSeen.TryGetValue(pid, out long first) && now - first >= 600) kill = true;
                 else
                 {
                     _closeSeen.TryAdd(pid, now);
@@ -416,7 +538,7 @@ public static partial class Kiosk
                 _closeSeen.TryRemove(pid, out _);
                 _pidCache.TryRemove(pid, out _);
             }
-            LogThrottled("shell:" + info.Name, "shell guard: חלון " + info.Name + (kill ? " נהרג" : " נסגר") + " (תוכנה שאינה ברשימה)", 30);
+            LogThrottled("shell:" + name, "shell guard: חלון " + name + (kill ? " נהרג" : " נסגר") + " (תוכנה שאינה ברשימה)", 30);
             if (LogOnce("shellnote", 10)) Tray.Notify(Program.AppName, Lang.T("התוכנה הזו חסומה בזמן נעילה", "This program is blocked while locked"));
         }
         // ניקוי רשומות סגירה של תהליכים שנעלמו

@@ -46,20 +46,16 @@ public class ShellHardeningTests
     [Theory]
     [InlineData("osk", ShellAction.Kill)] [InlineData("SystemSettings", ShellAction.Kill)] [InlineData("WerFault.exe", ShellAction.Kill)]
     [InlineData("msedge", ShellAction.Kill)] [InlineData("ApplicationFrameHost", ShellAction.Close)]
-    [InlineData("somethingnew", ShellAction.Close)] [InlineData("explorer", ShellAction.Keep)]
+    [InlineData("somethingnew", ShellAction.Close)]
+    // [r1] Decide(name, trusted, pathUnknown, snip, cls): אמון נקבע מבחוץ (נתיב+ACL+חתימה); explorer בלי אמון = התחזות = Close
     public void Decide_by_name(string name, ShellAction expected) =>
-        Assert.Equal(expected, ShellPolicy.Decide(name, @"C:\Users\x\evil\a.exe", @"C:\Windows", false));
+        Assert.Equal(expected, ShellPolicy.Decide(name, false, false, false, "Progman"));
 
-    [Fact] public void Critical_kept_only_under_windows()
+    [Fact] public void Critical_kept_only_when_trusted_or_elevated()
     {
-        Assert.Equal(ShellAction.Keep, ShellPolicy.Decide("ctfmon", @"C:\Windows\System32\ctfmon.exe", @"C:\Windows", false));
-        Assert.Equal(ShellAction.Keep, ShellPolicy.Decide("ctfmon", null, @"C:\Windows", false));
-        Assert.Equal(ShellAction.Close, ShellPolicy.Decide("ctfmon", @"C:\Users\x\ctfmon.exe", @"C:\Windows", false)); // התחזות לפי שם
-    }
-    [Fact] public void Snip_hosts_kept_during_capture()
-    {
-        Assert.Equal(ShellAction.Keep, ShellPolicy.Decide("ApplicationFrameHost", null, @"C:\Windows", true));
-        Assert.Equal(ShellAction.Close, ShellPolicy.Decide("ApplicationFrameHost", null, @"C:\Windows", false));
+        Assert.Equal(ShellAction.Keep, ShellPolicy.Decide("ctfmon", true, false, false));
+        Assert.Equal(ShellAction.Keep, ShellPolicy.Decide("ctfmon", false, true, false));   // נתיב לא קריא = מוגבה מאיתנו
+        Assert.Equal(ShellAction.Close, ShellPolicy.Decide("ctfmon", false, false, false)); // התחזות לפי שם
     }
 
     [Theory]
