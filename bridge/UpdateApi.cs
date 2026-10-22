@@ -171,11 +171,23 @@ public static class UpdateApi
     /// WHY: השדה "latest" לא קיים באובייקט release של GitHub, ולכן בחירה שנשענה עליו בחרה בפועל את
     /// הראשונה ברשימה. תגית בלי מספר גרסה נדלגת.
     /// </summary>
-    public static Release SelectRelease(string json)
+    public static Release SelectRelease(string json) => SelectCandidates(json).FirstOrDefault();
+
+    /// <summary>קידומת מותרת ל-html_url של הוצאה (נפתח בדפדפן דרך SS.openUrl בחלון "אודות"): רק עמוד ההוצאות של הריפו הזה</summary>
+    public static bool IsAllowedReleasePage(string url)
+        => Uri.TryCreate(url, UriKind.Absolute, out var u) && u.Scheme == Uri.UriSchemeHttps && u.IsDefaultPort && string.IsNullOrEmpty(u.UserInfo) &&
+           u.IdnHost.Equals("github.com", StringComparison.OrdinalIgnoreCase) &&
+           u.AbsolutePath.StartsWith("/" + Repo + "/releases", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// כל ההוצאות התקפות (לא draft/prerelease, תגית עם גרסה) בסדר יורד לפי גרסת התגית. html_url שאינו עמוד ההוצאות של הריפו מוחלף ב-null
+    /// (WHY U3: אחרת ה-UI פותח כתובת שרירותית מתשובת רשת).
+    /// </summary>
+    public static List<Release> SelectCandidates(string json)
     {
-        Release best = null;
+        var list = new List<Release>();
         using var doc = JsonDocument.Parse(json);
-        if (doc.RootElement.ValueKind != JsonValueKind.Array) return null;
+        if (doc.RootElement.ValueKind != JsonValueKind.Array) return list;
         foreach (var rel in doc.RootElement.EnumerateArray())
         {
             if (rel.ValueKind != JsonValueKind.Object) continue;
@@ -184,13 +196,12 @@ public static class UpdateApi
             if (tv == null) continue;
             if (rel.TryGetProperty("draft", out var d) && d.ValueKind == JsonValueKind.True) continue;
             if (rel.TryGetProperty("prerelease", out var p) && p.ValueKind == JsonValueKind.True) continue;
-            if (best != null && tv <= best.TagVersion) continue;
             string exe = null, sums = null, sig = null, bv = null;
             if (rel.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
                 foreach (var a in assets.EnumerateArray())
                 {
-                    string name = a.TryGetProperty("name", out var n) ? n.GetString() : null;
-                    string dl = a.TryGetProperty("browser_download_url", out var du) ? du.GetString() : null;
+                    string name = a.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() : null;
+                    string dl = a.TryGetProperty("browser_download_url", out var du) && du.ValueKind == JsonValueKind.String ? du.GetString() : null;
                     if (name == null || dl == null) continue;
                     if (!IsAllowedDownloadUrl(dl)) continue; // WHY: מארח/נתיב לא מורשים = כאילו הנכס לא קיים (fail-closed ב-Install)
                     if (string.Equals(name, "OtzariaBridge.exe", StringComparison.OrdinalIgnoreCase)) exe = dl;
@@ -198,10 +209,38 @@ public static class UpdateApi
                     else if (string.Equals(name, SigAssetName, StringComparison.OrdinalIgnoreCase)) sig = dl;
                     else if (string.Equals(name, BridgeVersionAssetName, StringComparison.OrdinalIgnoreCase)) bv = dl;
                 }
-            best = new Release(tag, tv, rel.TryGetProperty("html_url", out var u) ? u.GetString() : null,
-                rel.TryGetProperty("body", out var bd) && bd.ValueKind == JsonValueKind.String ? bd.GetString() : null, exe, sums, sig, bv);
+            string html = rel.TryGetProperty("html_url", out var u) && u.ValueKind == JsonValueKind.String ? u.GetString() : null;
+            if (!IsAllowedReleasePage(html)) html = null;
+            list.Add(new Release(tag, tv, html,
+                rel.TryGetProperty("body", out var bd) && bd.ValueKind == JsonValueKind.String ? bd.GetString() : null, exe, sums, sig, bv));
         }
-        return best;
+        return list.OrderByDescending(r => r.TagVersion).ToList();
+    }
+
+    /// <summary>
+    /// ההוצאה הגבוהה ביותר שיש לה sums+sig+bv וחתימתה (על SHA256SUMS) מאומתת מול המפתח, והתגית החתומה תואמת וגרסת המפתח לא בוטלה.
+    /// WHY (U3): בחירה לפי התגית הגבוהה בלבד אפשרה לכל מי שמפרסם הוצאה v999 בלי חתימה (או בחתימה שגויה) לחסום עדכונים לצמיתות (DoS).
+    /// עכשיו הוצאה לא חתומה/פגומה נדלגת ונבחרת הבאה בתור (עד 5 ניסיונות). הורדה נכשלת (רשת) = נדלגת. אין מאומתת = null.
+    /// </summary>
+    public static async Task<Release> SelectVerifiedRelease(string json, Func<string, long, Task<byte[]>> download, string publicKeySpkiBase64)
+    {
+        int tried = 0;
+        foreach (var r in SelectCandidates(json))
+        {
+            if (r.SumsUrl == null || r.SigUrl == null || r.BridgeVerUrl == null || r.ExeUrl == null) continue;
+            if (++tried > 5) break;
+            try
+            {
+                byte[] sums = await download(r.SumsUrl, MaxSmallDownload);
+                string sig = System.Text.Encoding.ASCII.GetString(await download(r.SigUrl, MaxSmallDownload));
+                if (!VerifySignature(sums, sig, publicKeySpkiBase64)) continue;
+                string text = System.Text.Encoding.UTF8.GetString(sums);
+                if (SignedTag(text) != r.Tag || SignedKeyVersion(text) < MinKeyVersion) continue;
+                return r;
+            }
+            catch { /* הורדה/פענוח נכשלו: מועמד זה נדלג */ }
+        }
+        return null;
     }
 
     /// <summary>אימות חתימת ECDSA P-256 (SHA-256, פורמט P1363 בגודל 64 בתים, base64) על התוכן. כל כשל = false</summary>
@@ -336,7 +375,8 @@ public static class UpdateApi
                 throw new BridgeException("internal", "בדיקת העדכון נכשלה (אין חיבור לאינטרנט או ש-GitHub לא זמין): " + ex.Message, 502);
             }
 
-            var rel = SelectRelease(json);
+            // WHY (U3): בוחרים את ההוצאה הגבוהה ביותר שחתימתה מאומתת, לא פשוט את הגבוהה ביותר (הוצאה לא חתומה לא חוסמת עדכונים)
+            var rel = await SelectVerifiedRelease(json, DownloadCapped, PublicKeySpkiBase64);
             Version latestBridgeVer = null;
             if (rel?.BridgeVerUrl != null)
             {

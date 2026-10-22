@@ -490,7 +490,45 @@ internal static class InstallTrust
             root = Path.GetFullPath(root).TrimEnd('\\') + "\\";
             if (full.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return false;
         }
-        return true;
+        // WHY (U3): "מחוץ ל-Program Files = כתיב למשתמש" שגוי לשני הכיוונים (C:\Tools בהרשאת מנהלים בלבד, או Program Files עם ACL רופף נבדק לפי שם).
+        // בודקים DACL בפועל של הקובץ ושל התיקייה (החלפה/שינוי שם). לא ניתן לקרוא ACL / נתיב לא קיים = כתיב (fail-closed: נדרש hash)
+        return AclAllowsUserWrite(full);
+    }
+
+    private static readonly System.Security.AccessControl.FileSystemRights WriteRights =
+        System.Security.AccessControl.FileSystemRights.WriteData | System.Security.AccessControl.FileSystemRights.AppendData |
+        System.Security.AccessControl.FileSystemRights.Delete | System.Security.AccessControl.FileSystemRights.DeleteSubdirectoriesAndFiles |
+        System.Security.AccessControl.FileSystemRights.ChangePermissions | System.Security.AccessControl.FileSystemRights.TakeOwnership;
+
+    /// <summary>האם ה-DACL של הקובץ או של תיקייתו מתיר (Allow) כתיבה/מחיקה לזהות שאינה SYSTEM/Administrators/TrustedInstaller ושייכת לטוקן הנוכחי או ל-Users/Everyone</summary>
+    internal static bool AclAllowsUserWrite(string full)
+    {
+        try
+        {
+            string dir = Path.GetDirectoryName(full);
+            if (!File.Exists(full) || string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return true;
+            var me = System.Security.Principal.WindowsIdentity.GetCurrent();
+            var mine = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (me.User != null) mine.Add(me.User.Value);
+            if (me.Groups != null) foreach (var g in me.Groups) mine.Add(g.Value);
+            foreach (string wk in new[] { "S-1-1-0", "S-1-5-11", "S-1-5-32-545", "S-1-5-4" }) mine.Add(wk);   // Everyone, Authenticated Users, Users, Interactive
+            var trusted = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "S-1-5-18", "S-1-5-32-544", "S-1-3-0" };
+            var acls = new List<System.Security.AccessControl.AuthorizationRuleCollection>
+            {
+                new FileInfo(full).GetAccessControl().GetAccessRules(true, true, typeof(System.Security.Principal.SecurityIdentifier)),
+                new DirectoryInfo(dir).GetAccessControl().GetAccessRules(true, true, typeof(System.Security.Principal.SecurityIdentifier)),
+            };
+            foreach (var rules in acls)
+                foreach (System.Security.AccessControl.FileSystemAccessRule r in rules)
+                {
+                    if (r.AccessControlType != System.Security.AccessControl.AccessControlType.Allow || (r.FileSystemRights & WriteRights) == 0) continue;
+                    string sid = r.IdentityReference.Value;
+                    if (trusted.Contains(sid) || sid.StartsWith("S-1-5-80-", StringComparison.Ordinal)) continue;   // TrustedInstaller
+                    if (mine.Contains(sid)) return true;
+                }
+            return false;
+        }
+        catch { return true; }
     }
 
     /// <summary>גרסת ה-exe (FileVersion) או null אם אין/לא קריא/לא מספר גרסה</summary>

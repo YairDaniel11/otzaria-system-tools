@@ -23,6 +23,10 @@
     <NoWarn>$(NoWarn);CA1416;CS8632</NoWarn>
     <!-- חוסם DOTNET_STARTUP_HOOKS: משתמש רגיל היה מזריק קוד לגשר דרך משתנה סביבה (HKCU\Environment). גם מסוננים ב-Native.Launch -->
     <StartupHookSupport>false</StartupHookSupport>
+    <!-- נעילת שרשרת אספקה (U3): packages.lock.json נשמר בריפו, וב-CI (CI=true) restore נכשל אם גרסה/hash שונו. עדכון חבילה: dotnet restore עם force-evaluate -->
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
   </PropertyGroup>
 
   <ItemGroup>

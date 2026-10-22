@@ -8,7 +8,9 @@
 param(
   [string]$Sums = 'SHA256SUMS.txt',
   [string]$KeyFile,
-  [string]$Out
+  [string]$Out,
+  # המפתח/ות הציבוריים המוטמעים בגשר (UpdateApi.PublicKeySpkiBase64, ';' בין כמה). חובה ב-CI: חתימה שאינה מתאימה להם = נכשל (U3)
+  [string]$PublicKey = $env:UPDATE_PUBLIC_KEY
 )
 $ErrorActionPreference = 'Stop'
 if (-not $Out) { $Out = "$Sums.sig" }
@@ -21,5 +23,21 @@ if ($ec.KeySize -ne 256) { throw 'המפתח חייב להיות P-256.' }
 $data = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Sums))
 $sig = $ec.SignData($data, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
 if (-not $ec.VerifyData($data, $sig, [System.Security.Cryptography.HashAlgorithmName]::SHA256)) { throw 'אימות עצמי נכשל.' }
+# WHY (U3): אימות מול המפתח הציבורי הנגזר מהפרטי לא תופס סוד שגוי/ישן (נחתם, אך הגשר המותקן דוחה). לכן מאמתים מול המפתח המוטמע בגשר.
+if ([string]::IsNullOrWhiteSpace($PublicKey)) {
+  if ($env:CI -eq 'true') { throw 'חסר -PublicKey (או UPDATE_PUBLIC_KEY): ב-CI חובה לאמת מול המפתח המוטמע בגשר.' }
+  Write-Warning 'לא ניתן מפתח ציבורי מוטמע: מאומת רק מול המפתח הנגזר (מקומי בלבד).'
+} else {
+  $ok = $false
+  foreach ($k in ($PublicKey -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+    try {
+      $pub = [System.Security.Cryptography.ECDsa]::Create()
+      $r2 = 0
+      $pub.ImportSubjectPublicKeyInfo([Convert]::FromBase64String($k), [ref]$r2)
+      if ($pub.VerifyData($data, $sig, [System.Security.Cryptography.HashAlgorithmName]::SHA256)) { $ok = $true; break }
+    } catch { }
+  }
+  if (-not $ok) { throw 'החתימה אינה מאומתת מול המפתח הציבורי המוטמע בגשר (UpdateApi.PublicKeySpkiBase64). הסוד UPDATE_SIGNING_KEY שגוי או שהמפתח הוחלף.' }
+}
 Set-Content -LiteralPath $Out -Value ([Convert]::ToBase64String($sig)) -Encoding ascii -NoNewline
 Write-Host "נחתם: $Out"

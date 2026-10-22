@@ -208,6 +208,25 @@ public static class PackB
 
     internal static bool ImportAllowed(string key) => !Skip(key) && ImportWhitelist.Contains(key);
 
+    /// <summary>
+    /// סכמה לערך של מפתח משוחזר. WHY (U3): הרשימה הלבנה בדקה רק שם מפתח; קובץ גיבוי ניתן לעריכה, ולכן ערך בטיפוס/גודל לא צפוי
+    /// (אובייקט מקונן, מחרוזת בת מגה, מספר חריג, מערך ענק) היה נכתב ל-config וגורם לקריסה, לניפוח הקובץ או להזרקת תוכן לממשק.
+    /// טיפוסים: bool / מספר סופי בטווח / מחרוזת עד אורך מרבי / מערך מחרוזות קצר (zmanimShow). אחר = נדחה.
+    /// </summary>
+    internal static bool ImportValueOk(string key, JsonNode v)
+    {
+        if (v is not JsonValue jv) return v is JsonArray arr && key.Equals("kiosk.zmanimShow", StringComparison.OrdinalIgnoreCase) && arr.Count <= 64 &&
+                                          arr.All(x => x is JsonValue xv && xv.TryGetValue<string>(out var xs) && xs != null && xs.Length <= 64);
+        if (jv.TryGetValue<bool>(out _)) return true;
+        if (jv.TryGetValue<string>(out var str))
+        {
+            int max = key.Equals("kiosk.dedicationText", StringComparison.OrdinalIgnoreCase) ? 500 : key.Equals("lang", StringComparison.OrdinalIgnoreCase) ? 16 : 120;
+            return str != null && str.Length <= max && !str.Any(c => char.IsControl(c) && c != '\n');
+        }
+        if (jv.TryGetValue<double>(out var d)) return !double.IsNaN(d) && !double.IsInfinity(d) && Math.Abs(d) <= 1_000_000;
+        return false;
+    }
+
     private static object Import(JsonElement b)
     {
         if (Kiosk.IsActive) throw BridgeException.Locked("אי אפשר לשחזר הגדרות במצב נעילה");
@@ -229,7 +248,7 @@ public static class PackB
         {
             // S3: רשימה לבנה ולא שחורה. קובץ הגיבוי ניתן לעריכה, ולכן רק מפתחות תצוגה/נוחות משוחזרים: kiosk.otzariaPath/strict/
             // schedule.*/allowOpenExtensions/openSections/programs/fx.policy וכל מפתח לא מוכר (גם עתידי) נדחים.
-            if (!ImportAllowed(kv.Key)) continue;
+            if (!ImportAllowed(kv.Key) || !ImportValueOk(kv.Key, kv.Value)) continue;
             Config.Set(kv.Key, kv.Value?.DeepClone());
             n++;
         }
