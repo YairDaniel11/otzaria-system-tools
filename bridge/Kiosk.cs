@@ -26,7 +26,33 @@ public static partial class Kiosk
     private static LowLevelKeyboardProc _hookProc;
 
     public static bool IsActive => Config.Get("kiosk.active", false);
-    private static bool HasPassword => !string.IsNullOrEmpty(Config.Get<string>("kiosk.passwordHash", null));
+    // כשהשירות מחזיק את הסיסמה אין עותק מקומי (ר' PurgeLocalPassword), ולכן "יש סיסמה" כולל גם את השירות
+    private static bool HasPassword => !string.IsNullOrEmpty(Config.Get<string>("kiosk.passwordHash", null)) || HardLock.Available;
+    internal const int MinPasswordLength = 10;
+
+    /// <summary>השירות מותקן אבל ה-pipe לא עונה. כשל סגור: אסור ליפול ל-hash מקומי (config.json כתיב למשתמש)</summary>
+    internal static bool ServiceDown()
+    {
+        try { dynamic st = HardLock.Status(); return st.installed == true && st.running != true; }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// מוחק את עותק ה-hash/salt של סיסמת הנעילה מ-config.json כשהשירות (SYSTEM) מחזיק אותה: עותק קריא-כתיב למשתמש
+    /// מאפשר ניחוש לא מקוון או החלפה. נקרא רק אחרי שהשירות אישר (Available) - אז ההגירה בהתקנה כבר קרתה.
+    /// </summary>
+    private static void PurgeLocalPassword()
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(Config.Get<string>("kiosk.passwordHash", null)) && string.IsNullOrEmpty(Config.Get<string>("kiosk.salt", null))) return;
+            Config.Remove("kiosk.passwordHash");
+            Config.Remove("kiosk.salt");
+            Config.Save();
+            Config.Log("kiosk: עותק hash הסיסמה המקומי הוסר (השירות מקור האמת)");
+        }
+        catch (Exception ex) { Config.Log("purge local password: " + ex.Message); }
+    }
 
     public static string[] AllowedExtensions => Config.GetList("kiosk.allowOpenExtensions");
 
@@ -160,7 +186,9 @@ public static partial class Kiosk
         {
             ThrowIfLockedOut();
             // כשרכיב ההקשחה מותקן — הוא מקור האמת לסיסמה (עריכת config.json לא עוזרת)
-            if (HardLock.Available) { HardLock.Verify(password, allowRecovery); return; }
+            if (HardLock.Available) { HardLock.Verify(password, allowRecovery); PurgeLocalPassword(); return; }
+            // fail-closed: שירות מותקן שלא עונה לא מחזיר אותנו ל-hash מקומי
+            if (ServiceDown()) throw new BridgeException("unsupported", "רכיב ההקשחה לא מגיב ולכן אי אפשר לאמת סיסמה כרגע. נסו שוב בעוד רגע (או קוד שחזור בקיצור החירום)", 503);
             bool ok = Matches(password, "kiosk.passwordHash", "kiosk.salt") ||
                       (allowRecovery && Matches(Secret.NormalizeRecovery(password), "kiosk.recoveryHash", "kiosk.recoverySalt"));
             if (ok)
@@ -691,15 +719,17 @@ public static partial class Kiosk
     private static object SetPassword(JsonElement b)
     {
         string newPassword = b.Str("newPassword") ?? "";
-        if (newPassword.Length < 6) throw BridgeException.BadRequest("הסיסמה חייבת להכיל לפחות 6 תווים");
+        if (newPassword.Length < MinPasswordLength) throw BridgeException.BadRequest($"הסיסמה חייבת להכיל לפחות {MinPasswordLength} תווים");
         // סיסמת הנעילה וסיסמת הפתיחה הזמנית חייבות להיות שונות, אחרת מי שקיבל את הזמנית היה יודע גם את הראשית
         if (Matches(newPassword, KTuHash, KTuSalt)) throw BridgeException.BadRequest("סיסמת הנעילה חייבת להיות שונה מסיסמת הפתיחה הזמנית");
         string recovery = null;
+        bool svc = HardLock.Available;
+        if (!svc && ServiceDown()) throw new BridgeException("unsupported", "רכיב ההקשחה לא מגיב; אי אפשר לשנות סיסמה כרגע", 503);
         if (HasPassword)
         {
             // שינוי סיסמה קיימת: אימות הישנה, וסנכרון לרכיב ההקשחה אם מותקן. קוד השחזור הקיים נשמר
             Verify(b.Str("oldPassword"), allowRecovery: true);
-            if (HardLock.Available) HardLock.SetPassword(b.Str("oldPassword"), newPassword);
+            if (svc) HardLock.SetPassword(b.Str("oldPassword"), newPassword);
         }
         else
         {
@@ -707,7 +737,8 @@ public static partial class Kiosk
             recovery = Secret.NewRecoveryCode();
             StoreSecret(recovery, "kiosk.recoveryHash", "kiosk.recoverySalt");
         }
-        StoreSecret(newPassword, "kiosk.passwordHash", "kiosk.salt");
+        if (svc) PurgeLocalPassword(); // השירות מחזיק את ה-hash; לא שומרים עותק מקומי
+        else StoreSecret(newPassword, "kiosk.passwordHash", "kiosk.salt");
         Config.Save();
         return recovery == null ? new { ok = true } : new { ok = true, recoveryCode = recovery };
     }
@@ -718,6 +749,9 @@ public static partial class Kiosk
         Verify(b.Str("password"), allowRecovery: false);
 
         bool strict = b.Bool("strict", false); // כבוי כברירת מחדל
+        // נעילה קשיחה (קפדנית או מוקשחת בשירות) בחשבון מנהל ניתנת לעקיפה מלאה: מסרבים, אלא אם המפעיל אישר במפורש
+        if (UserIsAdministrator() && (strict || HardLock.Available || HardLock.ServiceInstalled()) && !b.Bool("acceptAdminRisk", false))
+            throw new BridgeException("admin_account", "חשבון הלימוד הוא חשבון מנהל, ונעילה קשיחה בו ניתנת לעקיפה (עצירת הגשר/השירות, רישום, מדיניות). הפעילו את הנעילה בחשבון משתמש רגיל, או אשרו במפורש (acceptAdminRisk) על אחריותכם.", 403);
         bool blockTm = b.Bool("blockTaskManager", true);
         string otz = OtzariaPath();
         if (string.IsNullOrEmpty(otz) || !File.Exists(otz))
@@ -1028,8 +1062,13 @@ public static partial class Kiosk
             // חסימת מנהל המשימות דרך מדיניות. במחשבים רבים המפתח Policies\System נעול למשתמש רגיל
             // (נוצר על ידי מנהל/מדיניות קבוצתית), ולכן זו חסימה "במאמץ הטוב": אם אין הרשאה,
             // הנעילה ממשיכה, ומנהל המשימות נסגר על ידי שומר הנעילה ונחסם במקלדת (Ctrl+Shift+Esc).
+            // הנעילה כאן כבר הוחלטה (Enable סירב מראש כשנדרש; ForceActivate/שחזור בעלייה חייבים לנעול - כשל סגור),
+            // לכן כאן רק חסימה ברורה למשתמש ולא ביטול
             if (UserIsAdministrator())
+            {
                 Config.Log("kiosk: אזהרה — הנעילה הופעלה בחשבון עם הרשאות מנהל, שניתן לעקוף אותה ממנו. מומלץ להפעיל בעמדת לימוד בחשבון משתמש רגיל.");
+                Tray.Notify(Program.AppName, Lang.T("אזהרה: חשבון זה הוא חשבון מנהל - ניתן לעקוף את הנעילה. מומלץ חשבון משתמש רגיל.", "Warning: this is an administrator account - the lock can be bypassed. A standard account is recommended."));
+            }
 
             _taskMgrByPolicy = false;
             try
@@ -1058,7 +1097,9 @@ public static partial class Kiosk
                     throw BridgeException.Forbidden("נעילה קפדנית דורשת הרשאה לשנות את מעטפת Windows, ואין הרשאה כזו במחשב הזה. אפשר להפעיל נעילה רגילה.");
             }
 
-            Tray.Invoke(InstallHook);
+            if (!InstallHook()) Config.Log("kiosk: התקנת hook המקלדת נכשלה, ה-watchdog ינסה שוב כל ~3 שניות");
+            StartShellGuard();
+            SetToastPolicy(true);
             HookSessionEnding();
             Overlay.ShowClock(); // שורת המשימות מוסתרת — שעה ותאריך בשעון צף
             Overlay.ShowSideBar(); // סרגל תוכנות בצד המסך: מעבר מהיר בין אוצריא לתוכנות התורניות
@@ -1083,7 +1124,9 @@ public static partial class Kiosk
             StopFastGuard();
             // ממתינים שסבב שומר שכבר רץ יסתיים, כדי שלא יסגור את explorer מיד אחרי שהופעל מחדש
             for (int i = 0; i < 30 && Volatile.Read(ref _watchBusy) == 1; i++) Thread.Sleep(100);
-            Tray.Invoke(RemoveHook);
+            RemoveHook();
+            StopShellGuard();
+            SetToastPolicy(false);
             Overlay.HideAll();
             RestoreWindowFrame(); UnblockClose();
             ClearRegistry();
@@ -1101,6 +1144,7 @@ public static partial class Kiosk
         catch (Exception ex) { Config.Log("kiosk clear shell: " + ex.Message); }
         try { using var k = Registry.CurrentUser.OpenSubKey(PoliciesKey, true); k?.DeleteValue("DisableTaskMgr", false); }
         catch (Exception ex) { Config.Log("kiosk clear policy: " + ex.Message); }
+        SetToastPolicy(false);
         if (ShellPointsToBridge()) Config.Log("kiosk clear: אזהרה — המעטפת עדיין מפנה לגשר");
     }
 
@@ -1156,7 +1200,13 @@ public static partial class Kiosk
     /// <summary>ביטול נעילה בזמן הסרה</summary>
     public static string ReleaseForUninstall(string password)
     {
-        if (HasPassword && !(Matches(password, "kiosk.passwordHash", "kiosk.salt") ||
+        if (HardLock.Available)
+        {
+            try { HardLock.Verify(password, true); }
+            catch (BridgeException) { return "נדרשת סיסמת הנעילה: --password <סיסמה>"; }
+        }
+        else if (ServiceDown()) return "רכיב ההקשחה לא מגיב; אי אפשר לאמת סיסמה (קוד שחזור: --unlock)";
+        else if (HasPassword && !(Matches(password, "kiosk.passwordHash", "kiosk.salt") ||
                              Matches(Secret.NormalizeRecovery(password), "kiosk.recoveryHash", "kiosk.recoverySalt")))
             return "נדרשת סיסמת הנעילה: --password <סיסמה>";
         Config.Set("kiosk.active", false);
@@ -1183,15 +1233,17 @@ public static partial class Kiosk
 
     private static DateTime _lastFit = DateTime.MinValue;
     private static int _fitFails;
-    private static DateTime _fitPausedUntil = DateTime.MinValue;
 
     /// <summary>רושם ליומן הודעה אבחונית לכל היותר פעם בכל כמה שניות לכל מפתח, כדי לא להציף את היומן</summary>
     private static readonly System.Collections.Generic.Dictionary<string, DateTime> _logTimes = new();
     private static void LogThrottled(string key, string msg, int seconds)
     {
         var now = DateTime.UtcNow;
-        if (_logTimes.TryGetValue(key, out var t) && (now - t).TotalSeconds < seconds) return;
-        _logTimes[key] = now;
+        lock (_logTimes) // נקרא מכמה תהליכונים (Watch, FastGuard, שומר המעטפת, hook)
+        {
+            if (_logTimes.TryGetValue(key, out var t) && (now - t).TotalSeconds < seconds) return;
+            _logTimes[key] = now;
+        }
         Config.Log(msg);
     }
 
@@ -1210,19 +1262,14 @@ public static partial class Kiosk
         bool covers = r.Left <= b.Left + Tol && r.Top <= b.Top + Tol && r.Right >= b.Right - Tol && r.Bottom >= b.Bottom - Tol;
         if (covers) { _fitFails = 0; return; }
         if (!IsZoomed(hwnd)) { ShowWindow(hwnd, SwMaximize); return; }
-        if (DateTime.UtcNow < _fitPausedUntil) return;
+        // WHY: השהיה של 5 דקות אחרי כשלים השאירה חלון קטן/פס ריק חשוף (ושולחן עבודה גלוי) - עכשיו ממשיכים לנסות
+        // כל 8 שניות לסירוגין (מתיחה ישירה / שחזור+מיקסום), בלי להשהות
         if ((DateTime.UtcNow - _lastFit).TotalSeconds < 8) return;
         _lastFit = DateTime.UtcNow;
-        if (++_fitFails > 3)
-        {
-            _fitPausedUntil = DateTime.UtcNow.AddMinutes(5);
-            _fitFails = 0;
-            Config.Log($"watchdog: מיקסום חוזר לא עזר (חלון {r.Left},{r.Top},{r.Right},{r.Bottom} מול מסך {b.Left},{b.Top},{b.Right},{b.Bottom}); מושהה 5 דקות");
-            return;
-        }
+        if (++_fitFails > 1000) _fitFails = 2;
         LogThrottled("fit", $"watchdog: ממלא את המסך (חלון {r.Left},{r.Top},{r.Right},{r.Bottom} מול מסך {b.Left},{b.Top},{b.Right},{b.Bottom})", 60);
         // קודם מותחים ישירות לגבולות המסך (בלי שחזור-ומקסום שמרצד); רק אם זה לא עזר בניסיון הקודם — שחזור ומקסום
-        if (_fitFails <= 1)
+        if (_fitFails % 2 == 1)
             SetWindowPos(hwnd, IntPtr.Zero, b.Left, b.Top, b.Width, b.Height, SwpNoZOrder | SwpNoActivate);
         else
         {
@@ -1321,7 +1368,6 @@ public static partial class Kiosk
             int session = Process.GetCurrentProcess().SessionId;
             // ממצא ביקורת אבטחה: מתעדכן כאן (חוט הטיימר, כל 2 שניות) ולא בתוך ה-hook עצמו — ר' הערה ב-ForegroundIsAllowedProgram
             UpdateForegroundAllowedCache();
-            RefreshHook();
             // בזמן שכלי החיתוך המאושר פתוח לא הורגים את explorer (עד 2 דקות): שכבת הצילום של "חדש" בווינדוס 11
             // מתארחת בתוך explorer, ו-Kill כל 2 שניות הרג אותה מיד - נראה כרענון של כלי החיתוך בלי צילום (נצפה
             // ברישום: explorer/userinit/SearchHost נולדים מחדש בכל מחזור). המחיר: שורת המשימות עשויה להופיע לשניות
@@ -1386,6 +1432,8 @@ public static partial class Kiosk
             }
             else if (Overlay.RestVisible) Overlay.HideRest();
             if (Overlay.RestVisible) return;
+            // מסכים נוספים: כיסוי שחור (אוצריא ממלאת רק את המסך שלה); תוכנה מותרת בחזית (אולי במסך השני) - בלי כיסוי
+            if (ForegroundIsAllowedProgram()) Overlay.HideCovers(); else Overlay.SyncCovers(hwnd);
             if (Config.Get("kiosk.maximizeOtzaria", true)) FitToScreen(hwnd);
             if (Config.Get("kiosk.fullscreenOtzaria", true)) MakeFullscreen(hwnd);
             BlockClose(hwnd);
@@ -1424,41 +1472,14 @@ public static partial class Kiosk
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int vKey);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandle(string name);
 
-    private static void InstallHook()
-    {
-        if (_hook != IntPtr.Zero) return;
-        _hookProc = HookCallback;
-        _hook = SetWindowsHookEx(13 /* WH_KEYBOARD_LL */, _hookProc, GetModuleHandle(null), 0);
-        if (_hook == IntPtr.Zero) Config.Log("keyboard hook failed: " + Marshal.GetLastWin32Error());
-        else if (!_hookLogged) { _hookLogged = true; Config.Log("keyboard hook installed"); }
-    }
-
     private static bool _hookLogged;
-    private static int _hookTick;
-
-    /// <summary>
-    /// Windows מסירה בשקט hook מקלדת גלובלי שחרג מ-LowLevelHooksTimeout, ו-InstallHook יוצא מוקדם כש-_hook כבר מוגדר
-    /// (אז חסימת Win/Alt+Tab וצירוף החירום פשוט מפסיקים לעבוד בלי שאף אחד יודע). מתקינים מחדש כל כ-30 שניות
-    /// </summary>
-    private static void RefreshHook()
-    {
-        if (++_hookTick % 15 != 0) return;
-        Tray.Invoke(() => { RemoveHook(); InstallHook(); });
-    }
-
-    private static void RemoveHook()
-    {
-        if (_hook == IntPtr.Zero) return;
-        UnhookWindowsHookEx(_hook);
-        _hook = IntPtr.Zero;
-    }
 
     /// <summary>
     /// תמונת מצב של "האם התהליך הזה בחזית מותר", מחושבת מראש בחוט השומר (Watch, כל 2 שניות) ולא
     /// בתוך ה-hook. אובייקט record יחיד: הקצאה/קריאה של הפניה הן אטומיות ב-.NET, כך שה-hook תמיד
     /// רואה צמד (Pid, Allowed) עקבי מאותו עדכון, בלי צורך בנעילה.
     /// </summary>
-    private sealed record FgAllowedCache(uint Pid, bool Allowed);
+    private sealed record FgAllowedCache(uint Pid, bool Allowed, bool Otzaria = false, bool Browser = false);
     private static FgAllowedCache _fgAllowedCache = new(0, false);
 
     /// <summary>
@@ -1471,8 +1492,12 @@ public static partial class Kiosk
         try
         {
             GetWindowThreadProcessId(GetForegroundWindow(), out uint pid);
-            bool allowed = pid != 0 && pid != (uint)Environment.ProcessId && !IsOtzariaPid(pid) && Programs.IsAllowedForeground(pid);
-            _fgAllowedCache = new FgAllowedCache(pid, allowed);
+            bool otz = pid != 0 && IsOtzariaPid(pid);
+            bool allowed = pid != 0 && pid != (uint)Environment.ProcessId && !otz && Programs.IsAllowedForeground(pid);
+            bool browser = false;
+            if (pid != 0)
+                try { using var bp = Process.GetProcessById((int)pid); browser = BrowserNames.Contains(bp.ProcessName); } catch { }
+            _fgAllowedCache = new FgAllowedCache(pid, allowed, otz, browser);
         }
         catch { _fgAllowedCache = new FgAllowedCache(0, false); }
     }
@@ -1493,6 +1518,9 @@ public static partial class Kiosk
         var c = _fgAllowedCache;
         return pid == c.Pid && c.Allowed;
     }
+
+    private static readonly HashSet<string> BrowserNames = new(StringComparer.OrdinalIgnoreCase)
+        { "msedge", "chrome", "firefox", "iexplore", "brave", "opera", "vivaldi" };
 
     private static bool IsOtzariaPid(uint pid)
     {
@@ -1525,39 +1553,37 @@ public static partial class Kiosk
         if (nCode >= 0)
         {
             var k = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
-            bool alt = (k.flags & 0x20) != 0;
-            bool ctrl = (GetAsyncKeyState(0x11) & 0x8000) != 0;
             uint vk = k.vkCode;
-            bool block =
-                vk is 0x5B or 0x5C ||                     // Win
-                (alt && vk is 0x09 or 0x1B or 0x73) ||   // Alt+Tab, Alt+Esc, Alt+F4
-                (ctrl && vk == 0x1B);                     // Ctrl+Esc
-            // אבחון: האם F12 בכלל מגיע ל-hook, ובאיזה מצב מקשי שינוי (הלוג נכתב מחוץ ל-hook)
-            if (vk == 0x7B && (wParam == (IntPtr)0x100 || wParam == (IntPtr)0x104))
-            {
-                bool shiftNow = (GetAsyncKeyState(0x10) & 0x8000) != 0;
-                Task.Run(() => Config.Log($"hook: F12 ctrl={ctrl} alt={alt} shift={shiftNow}"));
-            }
-            // Alt+F4 עובד בתוכנה מותרת שנמצאת בחזית, כדי שאפשר לסגור אותה ולחזור לאוצריא
-            if (block && alt && vk == 0x73 && ForegroundIsAllowedProgram()) block = false;
+            bool down = wParam == (IntPtr)0x100 || wParam == (IntPtr)0x104;
+            bool ctrl = (GetAsyncKeyState(0x11) & 0x8000) != 0;
+            bool shift = (GetAsyncKeyState(0x10) & 0x8000) != 0;
+            // דגל ה-Alt של ה-hook (LLKHF_ALTDOWN) לא מסומן בכל מקלדת/פריסה (נצפה בלוג: F12 הגיע עם alt=False
+            // למרות ש-Alt היה לחוץ) - לכן בכל הבדיקות מקבלים אם אחד מהם אומר "לחוץ": הדגל, MENU, LMENU או RMENU
+            bool altHeld = (k.flags & 0x20) != 0 || (GetAsyncKeyState(0x12) & 0x8000) != 0 ||
+                           (GetAsyncKeyState(0xA4) & 0x8000) != 0 || (GetAsyncKeyState(0xA5) & 0x8000) != 0;
+            bool win = (GetAsyncKeyState(0x5B) & 0x8000) != 0 || (GetAsyncKeyState(0x5C) & 0x8000) != 0;
+            // אבחון: האם F12 בכלל מגיע ל-hook (הלוג נכתב מחוץ ל-hook)
+            if (vk == 0x7B && down) Task.Run(() => Config.Log($"hook: F12 ctrl={ctrl} alt={altHeld} shift={shift}"));
+
             // Ctrl+Alt+O: חזרה לאוצריא מתוכנה מותרת (רק כשתוכנה מותרת בחזית; באוצריא עצמה המקשים עוברים הלאה)
-            if (ctrl && (alt || (GetAsyncKeyState(0x12) & 0x8000) != 0) && vk == 0x4F && (wParam == (IntPtr)0x100 || wParam == (IntPtr)0x104) && ForegroundIsAllowedProgram())
+            if (ctrl && altHeld && vk == 0x4F && down && ForegroundIsAllowedProgram())
             {
                 Task.Run(ReturnToOtzaria);
                 return (IntPtr)1;
             }
-            // Ctrl+Alt+Shift+F12: חלון קוד שחזור לביטול חירום של הנעילה
-            // דגל ה-Alt של ה-hook (LLKHF_ALTDOWN) לא מסומן בכל מקלדת/פריסה (נצפה בלוג: F12 הגיע עם ctrl+shift אבל
-            // alt=False למרות ש-Alt היה לחוץ) - לכן בודקים גם את מצב המקש עצמו, ומקבלים אם אחד מהם אומר "לחוץ"
-            bool altHeld = alt || (GetAsyncKeyState(0x12) & 0x8000) != 0;
-            if (ctrl && altHeld && vk == 0x7B && (GetAsyncKeyState(0x10) & 0x8000) != 0 && (wParam == (IntPtr)0x100 || wParam == (IntPtr)0x104))
+            // Ctrl+Alt+Shift+F12: חלון קוד שחזור לביטול חירום של הנעילה. ה-hook כבר לא בחוט ה-UI, אבל עדיין לא
+            // מריצים כאן: פתיחת טופס + pipe לשירות בתוך callback חורגים מ-300ms ו-Windows מסירה את ה-hook
+            if (ctrl && altHeld && vk == 0x7B && shift && down)
             {
-                // לא מריצים כאן ישירות: ה-hook רץ בחוט ה-UI, ו-Tray.Invoke מריץ סינכרונית כשכבר בו -
-                // פתיחת טופס + BringToFront + קריאת pipe לשירות בתוך callback חורגים מ-300ms ו-Windows מתעלמת מה-hook
                 Task.Run(() => { try { Config.Log("emergency: זוהה Ctrl+Alt+Shift+F12 ב-hook"); Tray.Invoke(EmergencyForm.Open); } catch (Exception ex) { Config.Log("emergency open: " + ex.Message); } });
                 return (IntPtr)1;
             }
-            if (block) return (IntPtr)1;
+            GetWindowThreadProcessId(GetForegroundWindow(), out uint fgPid);
+            var c = _fgAllowedCache;
+            bool known = fgPid != 0 && fgPid == c.Pid; // pid שהשתנה מאז העדכון האחרון = "לא מותר" (הכיוון הבטוח)
+            var ctx = new KioskKeys.Ctx(altHeld, ctrl, shift, win, known && c.Otzaria, known && c.Allowed, known && c.Browser,
+                DialogGuard.IsFileDialogForeground());
+            if (KioskKeys.ShouldBlock(vk, ctx)) return (IntPtr)1;
         }
         return CallNextHookEx(_hook, nCode, wParam, lParam);
     }

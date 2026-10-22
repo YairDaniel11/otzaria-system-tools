@@ -92,6 +92,8 @@ public static class DialogGuard
         "js", "jse", "wsf", "wsh", "msi", "msc", "scr", "com", "exe", "cpl", "hta", "jar",
         "reg", "lnk", "url", "scf", "appref-ms", "dll", "sys", "inf", "json", "py", "pyw",
         "sh", "gadget", "application", "msp", "mst", "pif", "chm",
+        "msix", "msixbundle", "appx", "appxbundle", "iso", "vhd", "vhdx", "rdp", "jnlp", "library-ms",
+        "search-ms", "settingcontent-ms", "diagcab", "ocx", "xll", "wll", "theme", "themepack",
     };
 
     private delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
@@ -116,6 +118,16 @@ public static class DialogGuard
     // דיביונס: אותה הפרה צריכה להופיע פעמיים ברצף (מרווח poll אחד) לפני שסוגרים בפועל (ר' מגבלה #4)
     private static readonly ConcurrentDictionary<IntPtr, string> _lastViolation = new();
     private static bool _started;
+    // דיאלוגי פתיחה/שמירה שאומתו (לא Message-Box) — לחסימת תפריט הקשר (עכבר ב-Kiosk, מקלדת ב-KioskKeys)
+    private static readonly ConcurrentDictionary<IntPtr, byte> _fileDialogs = new();
+    private static volatile bool _restrictNow;
+
+    /// <summary>האם חלון החזית הוא דיאלוג קבצים שמגבילים כרגע (לחסימת מקש התפריט / Shift+F10). זול: נקרא מתוך hook</summary>
+    internal static bool IsFileDialogForeground() => _restrictNow && !_fileDialogs.IsEmpty && _fileDialogs.ContainsKey(Kiosk.ForegroundRoot());
+
+    /// <summary>האם לבלוע לחיצת עכבר ימנית בנקודה: תפריט ההקשר בדיאלוג (פתיחה/מאפיינים/הפעלה כמנהל) עוקף את הבדיקות</summary>
+    internal static bool ShouldSwallowMouse(int x, int y) =>
+        _restrictNow && !_fileDialogs.IsEmpty && _fileDialogs.ContainsKey(Kiosk.RootWindowAt(x, y));
 
     public static void Start()
     {
@@ -164,15 +176,18 @@ public static class DialogGuard
 
             if (!LooksLikeFileDialog(ui, hwnd)) return; // Message-Box או דיאלוג סטנדרטי אחר — לא נוגעים בו
             Config.Log("dialog-guard: זוהה דיאלוג פתיחה/שמירה (hwnd=0x" + hwnd.ToString("X") + ")");
+            _fileDialogs[hwnd] = 0;
 
             while (IsWindow(hwnd))
             {
                 string mode = FxPolicy.EffectiveMode();
+                _restrictNow = Kiosk.IsActive || mode != "open";
                 string violation = DetectViolation(ui, hwnd, mode, out string message);
                 if (violation == null) { _lastViolation.TryRemove(hwnd, out _); Thread.Sleep(PollMs); continue; }
 
-                // "נעול" אינו תלוי בטקסט שהמשתמש מקליד — אין צורך/טעם בדיביונס, סוגרים מיד
-                if (violation == "locked" || _lastViolation.TryGetValue(hwnd, out var prev) && prev == violation)
+                // "נעול", נתיב אסור וסיומת מסוכנת אינם תלויים בהקלדה באמצע (אין רישא תמימה של סיומת מסוכנת) — בלי דיביונס.
+                // רק "סיומת שאינה ברשימה" מקבלת דיביונס, כי "report.d" באמצע הקלדת "report.docx" הוא לגיטימי
+                if (IsImmediate(violation) || _lastViolation.TryGetValue(hwnd, out var prev) && prev == violation)
                 {
                     Close(hwnd, message);
                     return;
@@ -182,8 +197,11 @@ public static class DialogGuard
             }
         }
         catch (Exception ex) { Config.Log("dialog-guard monitor: " + ex.Message); }
-        finally { _tracked.TryRemove(hwnd, out _); _lastViolation.TryRemove(hwnd, out _); }
+        finally { _tracked.TryRemove(hwnd, out _); _lastViolation.TryRemove(hwnd, out _); _fileDialogs.TryRemove(hwnd, out _); }
     }
+
+    internal static bool IsImmediate(string violation) =>
+        violation == "locked" || violation.StartsWith("path:", StringComparison.Ordinal) || violation.StartsWith("danger:", StringComparison.Ordinal);
 
     /// <summary>null = אין הפרה כרגע. אחרת מחזיר "מפתח הפרה" יציב (לדיביונס) ומציב את הודעת הטוסט ב-message</summary>
     private static string DetectViolation(IUIAutomation ui, IntPtr hwnd, string mode, out string message)
@@ -197,19 +215,20 @@ public static class DialogGuard
             var allowed = Kiosk.DialogGuardAllowedExtensions();
             foreach (string raw in values)
             {
-                string ext = ExtensionOf(raw);
-                if (ext == null) continue;
-                if (DangerousExt.Contains(ext))
+                foreach (string ext in ExtensionsOf(raw))
                 {
-                    message = Lang.T($"סוג קובץ זה (.{ext}) חסום לבחירה מטעמי אבטחה.",
-                                      $"This file type (.{ext}) can't be selected for security reasons.");
-                    return "ext:" + ext;
-                }
-                if (!allowed.Contains(ext))
-                {
-                    message = Lang.T($"סוג קובץ זה (.{ext}) אינו ברשימת סוגי הקבצים המותרים כרגע.",
-                                      $"This file type (.{ext}) isn't in the currently allowed list.");
-                    return "ext:" + ext;
+                    if (DangerousExt.Contains(ext))
+                    {
+                        message = Lang.T($"סוג קובץ זה (.{ext}) חסום לבחירה מטעמי אבטחה.",
+                                          $"This file type (.{ext}) can't be selected for security reasons.");
+                        return "danger:" + ext;
+                    }
+                    if (!allowed.Contains(ext))
+                    {
+                        message = Lang.T($"סוג קובץ זה (.{ext}) אינו ברשימת סוגי הקבצים המותרים כרגע.",
+                                          $"This file type (.{ext}) isn't in the currently allowed list.");
+                        return "ext:" + ext;
+                    }
                 }
             }
         }
@@ -221,20 +240,78 @@ public static class DialogGuard
             return "locked";
         }
 
+        // נתיבים: כל נתיב מלא בתיבות הטקסט + התיקייה הנוכחית (אם נקראה מסרגל הכתובת). בלי דיביונס כשהתיקייה אסורה
+        var paths = values.Where(IsFullPath).Select(v => v.Trim().Trim('"')).ToList();
+        string cur = ReadCurrentFolder(ui, hwnd);
+        if (cur != null) paths.Add(cur);
+
         if (mode == "restricted")
         {
-            // מקור האמין היחיד שמומש לנתיב — נתיב מילולי מלא (לא breadcrumb, ר' מגבלה #3)
-            string path = values.FirstOrDefault(v => IsFullPath(v));
-            bool ok = path != null && FxPolicy.IsPathAllowed(path.Trim());
-            if (!ok && path != null)
-            {
-                message = Lang.T("הגישה לתיקייה הזו חסומה במדיניות סייר הקבצים.",
-                                  "Access to this folder is blocked by the file-browser policy.");
-                return "path:" + path.Trim().ToLowerInvariant();
-            }
+            foreach (string path in paths)
+                if (!FxPolicy.IsPathAllowed(path))
+                {
+                    message = Lang.T("הגישה לתיקייה הזו חסומה במדיניות סייר הקבצים.",
+                                      "Access to this folder is blocked by the file-browser policy.");
+                    return "path:" + path.ToLowerInvariant();
+                }
+        }
+        else if (Kiosk.IsActive && mode == "open" && Kiosk.TempUnlockSecondsLeft() == 0)
+        {
+            // FxPolicy=open לא מתיר הכול כשהקיוסק פעיל: לפחות תיקיות מערכת/תוכנות/הגדרות הגשר ונתיבי רשת חסומים
+            foreach (string path in paths)
+                if (KioskBaselineDenied(path))
+                {
+                    message = Lang.T("התיקייה הזו חסומה בזמן נעילה.", "This folder is blocked while the computer is locked.");
+                    return "path:" + path.ToLowerInvariant();
+                }
         }
 
         return null;
+    }
+
+    /// <summary>חסימת בסיס בנעילה כש-FxPolicy=open: Windows, Program Files, ProgramData, תיקיית הגשר, Startup ושיתופי רשת. כשל בפענוח = חסום</summary>
+    internal static bool KioskBaselineDenied(string path)
+    {
+        string canon;
+        try { canon = PathPolicy.Resolve(path); }
+        catch { return true; }
+        if (canon.StartsWith("\\\\", StringComparison.Ordinal)) return true;
+        var roots = new List<string>
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            Environment.GetFolderPath(Environment.SpecialFolder.Startup),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup),
+            Config.Dir,
+        };
+        foreach (string r in roots)
+        {
+            if (string.IsNullOrEmpty(r)) continue;
+            try { if (PathPolicy.IsUnder(canon, PathPolicy.Resolve(r))) return true; } catch { }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// התיקייה הנוכחית של הדיאלוג מסרגל הכתובת (AutomationId 1001, שם בצורת "Address: C:\path"). רק נתיב מלא ותקין —
+    /// לא מנחשים מ-breadcrumb ידידותי ("This PC > ..."): טעות שם היא התרה שגויה. ר' מגבלה #3. לא נבדק מול דיאלוג חי
+    /// </summary>
+    private static string ReadCurrentFolder(IUIAutomation ui, IntPtr hwnd)
+    {
+        try
+        {
+            var root = ui.ElementFromHandle(hwnd);
+            var el = root?.FindFirst(TreeScope.TreeScope_Descendants,
+                ui.CreatePropertyCondition((int)UIA_PropertyIds.UIA_AutomationIdPropertyId, "1001"));
+            string name = el?.CurrentName;
+            if (string.IsNullOrWhiteSpace(name)) return null;
+            int i = name.IndexOf(": ", StringComparison.Ordinal);
+            string rest = (i >= 0 ? name[(i + 2)..] : name).Trim();
+            return IsFullPath(rest) ? rest : null;
+        }
+        catch { return null; }
     }
 
     private static bool IsFullPath(string v)
@@ -243,30 +320,56 @@ public static class DialogGuard
         catch { return false; }
     }
 
-    /// <summary>סיומת קובץ מתוך ערך גולמי של תיבת "שם הקובץ" (יכול להיות נתיב מלא, שם בלבד, או "a" "b" מרובה)</summary>
-    private static string ExtensionOf(string raw)
+    /// <summary>
+    /// נרמול שם קובץ כפי ש-Windows פותחת אותו: נקודות ורווחים בסוף נמחקים ("evil.exe." = "evil.exe"), וזרם נתונים
+    /// חלופי ("evil.exe:x", "evil.exe::$DATA") נחתך. בלי זה "evil.exe." עקף את בדיקת הסיומת.
+    /// </summary>
+    internal static string NormalizeName(string s)
     {
-        if (string.IsNullOrWhiteSpace(raw)) return null;
-        string s = raw.Trim();
-        // תבנית סינון סוג-קובץ ("Word Document (*.docx)") — לא שם קובץ, מתעלמים (ר' למה למטה ב-ReadCandidateValues)
-        if (s.Contains("(*.", StringComparison.Ordinal)) return null;
-        if (s.Length >= 2 && s[0] == '"')
-        {
-            int end = s.IndexOf('"', 1);
-            if (end > 0) s = s.Substring(1, end - 1);
-        }
-        else
-        {
-            int sp = s.IndexOf(' ');
-            // בחירה מרובה גסה: "report.docx summary.pdf" (בלי מרכאות) — בודקים רק את הראשון; טיפול גס, ר' מגבלה #6
-            if (sp > 0 && !IsFullPath(s)) s = s.Substring(0, sp);
-        }
+        s = s.Trim().TrimEnd('.', ' ');
+        int from = (s.Length >= 2 && s[1] == ':') ? 2 : 0;   // נקודתיים של אות הכונן אינן זרם
+        int colon = s.IndexOf(':', from);
+        if (colon > 0) s = s[..colon];
+        return s.TrimEnd('.', ' ');
+    }
+
+    private static string ExtOfName(string name)
+    {
         try
         {
-            string ext = Path.GetExtension(s).TrimStart('.');
+            string n = NormalizeName(name.Trim().Trim('"'));
+            string ext = Path.GetExtension(n).TrimStart('.').TrimEnd('.', ' ');
             return string.IsNullOrEmpty(ext) ? null : ext;
         }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// כל הסיומות מתוך ערך גולמי של תיבת "שם הקובץ": נתיב מלא, שם בלבד, או בחירה מרובה ("a" "b"). בלי מרכאות ועם רווחים —
+    /// הסיומת של המחרוזת כולה (מה ש-Windows תפתח) + כל מילה שסיומתה מסוכנת (כדי ש"v1.2 notes.docx" לא ייחסם סתם)
+    /// </summary>
+    internal static List<string> ExtensionsOf(string raw)
+    {
+        var res = new List<string>();
+        if (string.IsNullOrWhiteSpace(raw)) return res;
+        string s = raw.Trim();
+        // תבנית סינון סוג-קובץ ("Word Document (*.docx)") — לא שם קובץ, מתעלמים (ר' ReadCandidateValues)
+        if (s.Contains("(*.", StringComparison.Ordinal)) return res;
+        if (s.Contains('"'))
+        {
+            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(s, "\"([^\"]*)\""))
+            { string e = ExtOfName(m.Groups[1].Value); if (e != null) res.Add(e); }
+            return res;
+        }
+        string whole = ExtOfName(s);
+        if (whole != null) res.Add(whole);
+        if (!IsFullPath(s) && s.Contains(' '))
+            foreach (string tok in s.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                string e = ExtOfName(tok);
+                if (e != null && DangerousExt.Contains(e) && !res.Contains(e)) res.Add(e);
+            }
+        return res;
     }
 
     /// <summary>

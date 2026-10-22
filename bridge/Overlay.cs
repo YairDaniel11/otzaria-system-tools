@@ -83,7 +83,36 @@ public static class Overlay
 
     public static void HideSideBar() => Tray.Invoke(() => { _side?.Hide(); });
 
-    public static void HideAll() { HideRest(); HideClock(); HideSideBar(); }
+    private static readonly List<BlackCover> _covers = new();
+
+    /// <summary>
+    /// כיסוי שחור על כל מסך שאוצריא אינה עליו (Screen.AllScreens). בלי זה, במחשב עם כמה מסכים המסך השני נשאר שולחן
+    /// עבודה חשוף. נקרא בכל סבב של השומר; מתאים את מספר הכיסויים גם כשמסך מתחבר/מתנתק. כבוי: kiosk.coverOtherScreens=false.
+    /// </summary>
+    public static void SyncCovers(IntPtr otzaria) => Tray.Invoke(() =>
+    {
+        try
+        {
+            var screens = Screen.AllScreens;
+            // חלון ביטול חירום פתוח / סרגל מנוחה על כל המסכים: לא מכסים (כדי שהחירום תמיד נגיש)
+            if (screens.Length < 2 || !Config.Get("kiosk.coverOtherScreens", true) || EmergencyForm.IsOpen || RestVisible) { HideCovers(); return; }
+            Screen main = otzaria != IntPtr.Zero ? Screen.FromHandle(otzaria) : Screen.PrimaryScreen;
+            var others = screens.Where(sc => sc.DeviceName != main.DeviceName).ToArray();
+            while (_covers.Count < others.Length) _covers.Add(new BlackCover());
+            while (_covers.Count > others.Length) { var x = _covers[^1]; _covers.RemoveAt(_covers.Count - 1); x.Dispose(); }
+            for (int i = 0; i < others.Length; i++)
+            {
+                var c = _covers[i];
+                if (c.Bounds != others[i].Bounds) c.Bounds = others[i].Bounds;
+                if (!c.Visible) c.Show();
+            }
+        }
+        catch (Exception ex) { Config.Log("covers: " + ex.Message); }
+    });
+
+    public static void HideCovers() { foreach (var c in _covers) if (c.Visible) c.Hide(); }
+
+    public static void HideAll() { HideRest(); HideClock(); HideSideBar(); HideCovers(); }
 
     private static LockCountdown _countdown;
 
@@ -882,5 +911,30 @@ internal sealed class TempUnlockBanner : Form
     {
         if (disposing) _tick.Dispose();
         base.Dispose(disposing);
+    }
+}
+
+/// <summary>מסך שחור ללא פעילות, למסכים נוספים בנעילה (לא לוקח פוקוס, לא ניתן לבחירה)</summary>
+internal sealed class BlackCover : Form
+{
+    public BlackCover()
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        BackColor = Color.Black;
+    }
+
+    protected override bool ShowWithoutActivation => true;
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x08000000 /* WS_EX_NOACTIVATE */ | 0x00000080 /* WS_EX_TOOLWINDOW */;
+            return cp;
+        }
     }
 }
