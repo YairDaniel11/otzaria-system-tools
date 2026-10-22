@@ -398,12 +398,16 @@ public static partial class Kiosk
         }
     }
 
-    private static void StopShellGuard()
+    // keepBaseline: פתיחה זמנית (Release(keepStrict)) ואז Apply. WHY (u2): איפוס baseline בכל עצירה גרם לכך שתהליכים בלי חלון שנוצרו בזמן הפתיחה
+    // נרשמו כ"היו קיימים" ומוּתרו לתמיד. בפתיחה זמנית ה-baseline הקודם נשמר, ותהליך חדש שנוצר בחלון הפתוח נבחן כרגיל.
+    // מחיר (false-positive): תוכנת רקע שעלתה בזמן הפתיחה הזמנית ואינה מהימנה תיסגר בנעילה מחדש. שחרור מלא מאפס (נעילה חדשה = baseline חדש)
+    private static void StopShellGuard(bool keepBaseline = false)
     {
         Thread t;
         lock (HookGate) { t = _shellThread; _shellThread = null; _shellStop = true; }
         try { t?.Join(2000); } catch { }
-        _pidCache.Clear(); _closeSeen.Clear(); _procSeen.Clear(); _procBaselineDone = false;
+        _pidCache.Clear(); _closeSeen.Clear();
+        if (!keepBaseline) { _procSeen.Clear(); _procBaselineDone = false; }
     }
 
     private static void ShellGuardMain()
@@ -448,7 +452,7 @@ public static partial class Kiosk
     {
         string otz = OtzariaPath();
         if (!string.IsNullOrEmpty(path) && !string.IsNullOrEmpty(otz))
-            return path.Equals(Path.GetFullPath(otz), StringComparison.OrdinalIgnoreCase); // זהות לפי נתיב, לא שם
+            return path.Equals(Path.GetFullPath(otz), StringComparison.OrdinalIgnoreCase) && OtzariaImageVerified(otz); // [u2] נתיב + SHA/מיקום מהימן, לא נתיב בלבד
         return IsOtzariaPid(pid); // נתיב לא קריא/לא הוגדר: נפילה לשם (תהליך מוגבה בלבד)
     }
 
@@ -587,20 +591,35 @@ public static partial class Kiosk
     internal static string ImagePathOf(uint pid) => ImagePath(pid);
 
     /// <summary>
-    /// החלטה טהורה: האם להרוג תהליך חדש בסשן. צאצאי הגשר/אוצריא/baseline פטורים; זהות חסומה נהרגת גם במיקום מהימן
-    /// (wordpad/hh ב-Windows); אחרת רק אם המיקום לא מנהל-בלבד ואין התאמה לרשימה.
+    /// החלטה טהורה: האם להרוג תהליך חדש בסשן.
+    /// [u2] WHY: זהות חסומה נבדקת *לפני* פטור-עץ. עוזר של הגשר עצמו (ילד שלא עובר בשורש מ-Programs.Launched) פטור; צאצא של תוכנה מותרת
+    /// (launchedDescendant: Word => DDEAUTO/OLE => wscript/powershell -w hidden) לא, וגם לא-חסום נדרש TreeChildTrusted (או רכיב מערכת חתום Microsoft).
     /// </summary>
-    internal static bool ShouldKillProcess(bool selfTree, bool otzaria, bool grandfathered, bool blockedIdentity, bool locationTrusted, bool allowedByList)
+    internal static bool ShouldKillProcess(bool bridgeHelper, bool launchedDescendant, bool childTrusted, bool trustedSystem,
+                                           bool otzaria, bool grandfathered, bool blockedIdentity, bool locationTrusted, bool allowedByList)
     {
-        if (selfTree || otzaria || grandfathered) return false;
-        if (blockedIdentity) return true;
+        if (otzaria || grandfathered) return false;
+        bool helper = bridgeHelper && !launchedDescendant;
+        if (blockedIdentity) return !helper;
+        if (helper) return false;
+        if (launchedDescendant) return !(childTrusted || trustedSystem);
         if (allowedByList) return false;
         return !locationTrusted;
     }
 
+    /// <summary>תאימות: הצורה הישנה (selfTree = עוזר גשר, בלי צאצאי תוכנה מותרת)</summary>
+    internal static bool ShouldKillProcess(bool selfTree, bool otzaria, bool grandfathered, bool blockedIdentity, bool locationTrusted, bool allowedByList) =>
+        ShouldKillProcess(selfTree, false, false, false, otzaria, grandfathered, blockedIdentity, locationTrusted, allowedByList);
+
     /// <summary>שמות שלעולם לא נהרגים בסריקת תהליכים (נטפלים במקום אחר / מארחים משותפים)</summary>
     private static readonly HashSet<string> ProcSweepExempt = new(StringComparer.OrdinalIgnoreCase)
         { "explorer", "msiexec", "ApplicationFrameHost", "conhost", "openconsole" };
+
+    /// <summary>
+    /// [u2] WHY: פטור לפי שם בלבד ניתן לזיוף (conhost.exe/explorer.exe בתיקיה כתיבה). הפטור רק כשהנתיב מנהל-בלבד + חתימת Microsoft (IsTrustedSystem)
+    /// </summary>
+    internal static bool ProcSweepExemptFor(string name, string path, AppTrust.ITrustEnv env) =>
+        ProcSweepExempt.Contains(ShellPolicy.Stem(name)) && ShellPolicy.IsTrustedSystem(path, env);
 
     private static readonly ConcurrentDictionary<(int pid, long start), bool> _procSeen = new();
     private static bool _procBaselineDone;
@@ -647,13 +666,19 @@ public static partial class Kiosk
                     string path = ImagePath((uint)p.Id);
                     if (string.IsNullOrEmpty(path)) continue;            // מוגבה/מוגן: לא נשמר, ינוסה שוב (הצעה בדוח: ניטור בשירות)
                     string name = p.ProcessName;
-                    if (ProcSweepExempt.Contains(name)) { _procSeen[key] = true; continue; }
+                    if (ProcSweepExemptFor(name, path, AppTrust.Env)) { _procSeen[key] = true; continue; }
                     bool selfTree = IsSelfDescendant((uint)p.Id, start);
-                    bool isOtz = !string.IsNullOrEmpty(otz) && SamePath(path, otz);
+                    bool launchedDesc = Programs.HasLaunchedAncestor(p.Id);   // [u2] צאצא של תוכנה שהגשר הפעיל: לא "עוזר גשר"
+                    bool childTrusted = launchedDesc && Programs.ChildTrustedPid(p.Id);
+                    bool isOtz = !string.IsNullOrEmpty(otz) && SamePath(path, otz) && OtzariaImageVerified(otz);   // [u2]
                     bool blocked = Programs.IsBlockedProc(p);
                     bool locTrusted = AppTrust.IsAdminOnlyLocation(path) || AppTrust.IsMicrosoftPackage(path, AppTrust.Env);
                     bool byList = !blocked && !locTrusted && !selfTree && !isOtz && Programs.IsAllowedForeground((uint)p.Id);
-                    if (ShouldKillProcess(selfTree, isOtz, false, blocked, locTrusted, byList))
+                    // [u2] false-positive: OneDrive/Teams/מעדכנים חתומי Microsoft מ-AppData, רק כשרצה תוכנה מהימנה; נרשם ביומן (throttle) כדי שיהיה ניתן לביקורת
+                    bool msApp = !blocked && !isOtz && AppTrust.IsMicrosoftUserApp(path, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Programs.AnyLaunchedAlive(), AppTrust.Env);
+                    if (msApp) LogThrottled("procsweep-msapp:" + name, "process sweep: " + name + " פטור (אפליקציית Microsoft חתומה, תוכנה מהימנה רצה): " + path, 300);
+                    bool sysTrusted = ShellPolicy.IsTrustedSystem(path, AppTrust.Env);
+                    if (!msApp && ShouldKillProcess(selfTree, launchedDesc, childTrusted, sysTrusted, isOtz, false, blocked, locTrusted, byList))
                     {
                         bool ok = AppTrust.KillLogged(p, "procsweep");
                         LogThrottled("procsweep:" + name, "process sweep: " + name + (ok ? " נהרג" : " לא ניתן להרוג") + " (תהליך לא מהימן/חסום בלי חלון): " + path, 30);

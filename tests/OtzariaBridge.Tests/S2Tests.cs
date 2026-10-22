@@ -145,21 +145,7 @@ public class S2Tests
     }
 
     // ---- 4: קובץ בלי סיומת ----
-    private static readonly Func<string, bool> NoDirs = _ => false;
-    private static Func<string, bool> Dirs(params string[] d) => p => d.Contains(p.TrimEnd('\\'), StringComparer.OrdinalIgnoreCase);
-
-    [Theory]
-    [InlineData("evil", true)] [InlineData("evil.", true)] [InlineData(@"C:\Users\u\evil", true)] [InlineData("\"a.docx\" \"b\"", true)]
-    [InlineData("report.docx", false)] [InlineData("*", false)] [InlineData("*.*", false)] [InlineData("Word (*.docx)", false)] [InlineData("", false)]
-    public void Extensionless_file_is_a_violation(string raw, bool expected) =>
-        Assert.Equal(expected, DialogGuard.HasExtensionlessFile(raw, @"C:\Docs", NoDirs));
-
-    [Fact] public void Extensionless_existing_directory_is_navigation_not_violation()
-    {
-        Assert.False(DialogGuard.HasExtensionlessFile(@"C:\Docs\Sub", @"C:\Docs", Dirs(@"C:\Docs\Sub")));
-        Assert.False(DialogGuard.HasExtensionlessFile("Sub", @"C:\Docs", Dirs(@"C:\Docs\Sub")));   // יחסי לתיקיה הנוכחית
-        Assert.True(DialogGuard.HasExtensionlessFile("Sub", null, Dirs(@"C:\Docs\Sub")));          // תיקיה נוכחית לא ידועה: נכשלים סגור
-    }
+    // [u2] בדיקות HasExtensionlessFile הוחלפו ב-U2Tests (ExtensionlessViolation: Open/Save)
 
     [Fact] public void Noext_violation_is_debounced_not_immediate() => Assert.False(DialogGuard.IsImmediate("noext:evil"));
 

@@ -1082,22 +1082,65 @@ public static partial class Kiosk
         Config.Set("kiosk.otzariaShaPath", Path.GetFullPath(path));
     }
 
-    /// <summary>לפני כל Process.Start של אוצריא: אין הפעלה של קובץ שלא אומת</summary>
-    private static bool CheckOtzariaForLaunch(string path)
+    /// <summary>
+    /// לפני כל Process.Start של אוצריא: אין הפעלה של קובץ שלא אומת. [u2] WHY (TOCTOU): בעבר SHA חושב ואז Process.Start בלי נעילה - אפשר היה להחליף את הקובץ בין השניים.
+    /// עכשיו הקובץ נפתח ב-FileShare.Read (AppTrust.LaunchLock), ה-SHA מה-handle, וה-handle מוחזק עד אחרי Process.Start.
+    /// start=null: בדיקה בלבד (בלי הפעלה). מחזיר false אם לא אומת / לא הופעל
+    /// </summary>
+    private static bool CheckOtzariaForLaunch(string path, Action start = null)
     {
+        AppTrust.LaunchLock fl = null;
         try
         {
             if (string.IsNullOrEmpty(path) || !File.Exists(path)) return false;
             bool trusted = AppTrust.IsTrustedLocation(path);
             bool svc = HardLock.Available;
-            string pinned = svc ? ServiceOtzariaSha(path)
-                : SamePath(Config.Get<string>("kiosk.otzariaShaPath", null), path) ? Config.Get<string>("kiosk.otzariaSha", null) : null;
-            string actual = trusted ? null : Sha256Of(path);
+            string pinned = PinnedOtzariaSha(path, svc);
+            string actual = null;
+            if (!trusted)
+            {
+                fl = AppTrust.LaunchLock.Open(path);
+                if (fl == null) return false;   // לא ניתן לנעול = fail-closed
+                actual = fl.Sha256;
+            }
             var v = DecideLaunch(trusted, pinned, actual, svc);
             if (v == LaunchVerdict.AllowAndPin) { PinOtzaria(path); try { Config.Save(); } catch { } }
             if (v == LaunchVerdict.Refuse)
                 LogThrottled("otzUntrusted", "watchdog: קובץ אוצריא במיקום כתיב למשתמש ואינו תואם את הנעיצה - לא מופעל (הפעלת הנעילה מחדש בסיסמה תנעץ את הגרסה הנוכחית)", 120);
-            return v != LaunchVerdict.Refuse;
+            if (v == LaunchVerdict.Refuse) return false;
+            start?.Invoke();   // תחת הנעילה: הקובץ לא יוחלף בין האימות להפעלה
+            return true;
+        }
+        catch { return false; }
+        finally { fl?.Dispose(); }
+    }
+
+    private static string PinnedOtzariaSha(string path, bool svc) =>
+        svc ? ServiceOtzariaSha(path)
+            : SamePath(Config.Get<string>("kiosk.otzariaShaPath", null), path) ? Config.Get<string>("kiosk.otzariaSha", null) : null;
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long mtime, long len, string sha)> _otzShaCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// [u2] WHY: זהות אוצריא של תהליך *רץ* לפי נתיב בלבד פטרה כל exe שהוצב בנתיב המוגדר במיקום כתיב (הוחלף אחרי ההפעלה/ננעץ אחר).
+    /// הנתיב חייב להיות גם מאומת: מיקום מהימן, או SHA תואם לנעיצה (תמונה רצה לא ניתנת לכתיבה ולכן SHA של הקובץ הוא של התהליך).
+    /// SHA מוטמן לפי (mtime,גודל) כדי לא לחשב כל סריקה. נעיצה חסרה בלי שירות = כמו בהפעלה (TOFU), לא נחסם
+    /// </summary>
+    internal static bool OtzariaImageVerified(string path)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            bool trusted = AppTrust.IsTrustedLocation(path);
+            if (trusted) return true;
+            var fi = new FileInfo(path);
+            if (!fi.Exists) return false;
+            long mt = fi.LastWriteTimeUtc.Ticks, len = fi.Length;
+            string sha;
+            if (_otzShaCache.TryGetValue(path, out var c) && c.mtime == mt && c.len == len) sha = c.sha;
+            else { sha = Sha256Of(path); _otzShaCache[path] = (mt, len, sha); }
+            bool svc = HardLock.Available;
+            return DecideLaunch(false, PinnedOtzariaSha(path, svc), sha, svc) != LaunchVerdict.Refuse;
         }
         catch { return false; }
     }
@@ -1275,7 +1318,7 @@ public static partial class Kiosk
             // ממתינים שסבב שומר שכבר רץ יסתיים, כדי שלא יסגור את explorer מיד אחרי שהופעל מחדש
             for (int i = 0; i < 30 && Volatile.Read(ref _watchBusy) == 1; i++) Thread.Sleep(100);
             RemoveHook();
-            StopShellGuard();
+            StopShellGuard(keepBaseline: keepStrict);   // [u2] פתיחה זמנית: baseline נשמר
             SetToastPolicy(false);
             Overlay.HideAll();
             RestoreWindowFrame(); UnblockClose();
@@ -1664,14 +1707,14 @@ public static partial class Kiosk
                 {
                     // backoff: אם אוצריא קורסת בעלייה, הפעלה מחדש בכל 2 שניות יוצרת תהליך חדש בלי הפסקה (ומציפה את
                     // המחשב). ההמתנה בין ניסיונות גדלה 2,4,8,16,32,60 שניות, ומתאפסת אחרי ש-אוצריא רצה 20 שניות ברצף
-                    if (DateTime.UtcNow >= _otzNextLaunch && !CheckOtzariaForLaunch(path))
+                    if (DateTime.UtcNow >= _otzNextLaunch && !CheckOtzariaForLaunch(path, () => Process.Start(new ProcessStartInfo(path) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(path) })?.Dispose()))
                     {
                         // קובץ לא מאומת: לא מפעילים, ושולחן העבודה לא נחשף (יציאה בסיסמה/קוד שחזור)
                         if (!Overlay.RestVisible) Overlay.ShowRest(IntPtr.Zero, idle: true);
                     }
                     else if (DateTime.UtcNow >= _otzNextLaunch)
                     {
-                        Process.Start(new ProcessStartInfo(path) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(path) });
+                        // [u2] ההפעלה כבר בוצעה בתוך CheckOtzariaForLaunch (תחת LaunchLock)
                         _otzLaunches++;
                         _otzNextLaunch = DateTime.UtcNow.AddSeconds(Math.Min(60, 1 << Math.Min(_otzLaunches, 6)));
                         if (_otzLaunches >= 3) LogThrottled("otzCrash", "watchdog: אוצריא לא נשארת פתוחה (ניסיון הפעלה " + _otzLaunches + ") - ממתינים לפני הניסיון הבא", 60);
@@ -1798,7 +1841,7 @@ public static partial class Kiosk
         {
             // WHY: שם תהליך בלבד ניתן לזיוף (otzaria.exe בכל תיקיה); משווים את נתיב התמונה לנתיב המוגדר. בלי נתיב - לא אוצריא
             string path = OtzariaPath();
-            return !string.IsNullOrEmpty(path) && SamePath(ImagePath(pid), path);
+            return !string.IsNullOrEmpty(path) && SamePath(ImagePath(pid), path) && OtzariaImageVerified(path);   // [u2] נתיב + אימות SHA/מיקום
         }
         catch { return false; }
     }
