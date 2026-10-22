@@ -758,7 +758,7 @@ public static partial class Kiosk
             throw BridgeException.BadRequest("לא נמצאה תוכנת אוצריא. יש להגדיר otzariaPath בהגדרות הנעילה");
         // WHY: אוצריא בתיקיה כתיבה למשתמש (למשל LocalAppData\Programs) ניתנת להחלפה בקובץ אחר, והנעילה היא שמפעילה אותה.
         // בנעילה קשיחה מסרבים, אלא אם המפעיל אישר במפורש (acceptWritableOtzaria) - ואז הנעיצה (SHA256) מגנה מפני החלפה
-        if ((strict || HardLock.Available || HardLock.ServiceInstalled()) && !AppTrust.IsTrustedLocation(otz) && !b.Bool("acceptWritableOtzaria", false))
+        if ((strict || HardLock.Available || HardLock.ServiceInstalled()) && !AppTrust.IsTrustedLocation(otz) && (!b.Bool("acceptWritableOtzaria", false) || HardLock.Available || HardLock.ServiceInstalled()))   // [s2] עם שירות אין אישור-נעיצה מקומית (הנעיצה בקובץ כתיב למשתמש)
             throw new BridgeException("otzaria_untrusted_location", "אוצריא מותקנת בתיקיה שמשתמש רגיל יכול לשנות (" + otz + "), ולכן אפשר להחליף אותה בתוכנה אחרת. התקינו אותה ב-Program Files, או אשרו במפורש (acceptWritableOtzaria) - הנעילה תנעץ את הקובץ הנוכחי ותסרב להפעיל קובץ ששונה.", 403);
 
         // הפעלה ידנית בסיסמה בזמן פתיחה זמנית מסיימת אותה (ברכיב ההקשחה — "enable" מנקה אותה שם)
@@ -949,7 +949,14 @@ public static partial class Kiosk
         // כשרכיב ההקשחה מותקן ויש לו נתיב — הוא מקור האמת, ו-config.json (כתיב למשתמש המחובר) לא נקרא.
         // נתיב ריק אצלו = זיהוי אוטומטי; נתיב שלא קיים בחשבון הזה = זיהוי אוטומטי (ולא ערך מ-config.json)
         string servicePath = HardLock.Policy?.OtzariaPath;
-        string configured = servicePath ?? Config.Get<string>("kiosk.otzariaPath", null);
+        string configured = servicePath;
+        if (configured == null)
+        {
+            // [s2] WHY: כשהשירות קיים, נתיב מ-config.json (כתיב למשתמש) לא נקרא - אחרת משתמש מצביע את "אוצריא" על exe משלו.
+            // חריג להגירה: נתיב מה-config שנמצא במיקום מנהל-בלבד (Program Files וכד') לא ניתן לזיוף ולכן מתקבל
+            string cfg = Config.Get<string>("kiosk.otzariaPath", null);
+            if (!HardLock.Available || (!string.IsNullOrEmpty(cfg) && AppTrust.IsTrustedLocation(cfg))) configured = cfg;
+        }
         if (!string.IsNullOrEmpty(configured) && File.Exists(configured)) return configured;
 
         // WHY: אין נפילה לנתיב של תהליך "otzaria" שרץ - כל תהליך בשם הזה (גם עותק זדוני בתיקיה כתיבה) היה הופך ל"אוצריא" המהימנה
@@ -978,11 +985,12 @@ public static partial class Kiosk
     /// ונעיצה נרשמת עכשיו (TOFU), כדי לא לנעול החוצה התקנה קיימת.
     /// </summary>
     internal enum LaunchVerdict { Allow, AllowAndPin, Refuse }
-    internal static LaunchVerdict DecideLaunch(bool trustedLocation, string pinned, string actual)
+    internal static LaunchVerdict DecideLaunch(bool trustedLocation, string pinned, string actual, bool serviceControlled = false)
     {
         if (trustedLocation) return LaunchVerdict.Allow;
         if (string.IsNullOrEmpty(actual)) return LaunchVerdict.Refuse;
-        if (string.IsNullOrEmpty(pinned)) return LaunchVerdict.AllowAndPin;
+        // [s2] WHY: עם שירות - בלי TOFU (המשתמש יכול לכתוב את הנעיצה ל-config ולהחליף את הקובץ) ובלי נעיצה מ-config. רק נעיצה שהשירות מחזיק
+        if (string.IsNullOrEmpty(pinned)) return serviceControlled ? LaunchVerdict.Refuse : LaunchVerdict.AllowAndPin;
         return string.Equals(pinned, actual, StringComparison.OrdinalIgnoreCase) ? LaunchVerdict.Allow : LaunchVerdict.Refuse;
     }
 
@@ -993,8 +1001,15 @@ public static partial class Kiosk
     }
 
     /// <summary>נעיצת ה-SHA256 של אוצריא (בהפעלת הנעילה). נשמרת ב-config.json רק כשכבה נוספת: שמירה מוגנת אמיתית דורשת תמיכה בשירות (הצעה בדוח)</summary>
+    /// <summary>
+    /// [s2] נקודת חיבור לשירות: SHA-256 של אוצריא שהשירות מחזיק (מקור אמת, לא כתיב למשתמש). כרגע אין API בשירות שמחזיר/שומר אותו,
+    /// ולכן null = עם שירות, אוצריא במיקום כתיב לא תופעל. חיבור (הצעה): HardLock.Policy.OtzariaSha256 + שמירה ב-SetOtzariaPath בסיסמה.
+    /// </summary>
+    internal static Func<string, string> ServiceOtzariaSha = _ => null;
+
     private static void PinOtzaria(string path)
     {
+        if (HardLock.Available) return;   // [s2] עם שירות לא כותבים נעיצה ל-config כתיב (לא מאובטחת)
         string sha = Sha256Of(path);
         if (sha == null) return;
         Config.Set("kiosk.otzariaSha", sha);
@@ -1008,9 +1023,11 @@ public static partial class Kiosk
         {
             if (string.IsNullOrEmpty(path) || !File.Exists(path)) return false;
             bool trusted = AppTrust.IsTrustedLocation(path);
-            string pinned = SamePath(Config.Get<string>("kiosk.otzariaShaPath", null), path) ? Config.Get<string>("kiosk.otzariaSha", null) : null;
+            bool svc = HardLock.Available;
+            string pinned = svc ? ServiceOtzariaSha(path)
+                : SamePath(Config.Get<string>("kiosk.otzariaShaPath", null), path) ? Config.Get<string>("kiosk.otzariaSha", null) : null;
             string actual = trusted ? null : Sha256Of(path);
-            var v = DecideLaunch(trusted, pinned, actual);
+            var v = DecideLaunch(trusted, pinned, actual, svc);
             if (v == LaunchVerdict.AllowAndPin) { PinOtzaria(path); try { Config.Save(); } catch { } }
             if (v == LaunchVerdict.Refuse)
                 LogThrottled("otzUntrusted", "watchdog: קובץ אוצריא במיקום כתיב למשתמש ואינו תואם את הנעיצה - לא מופעל (הפעלת הנעילה מחדש בסיסמה תנעץ את הגרסה הנוכחית)", 120);

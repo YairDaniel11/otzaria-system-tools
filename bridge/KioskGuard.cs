@@ -79,7 +79,7 @@ public static partial class Kiosk
             string cls = sb.ToString();
 
             bool closeIt =
-                (name.Equals("PickerHost", StringComparison.OrdinalIgnoreCase) && cls == "#32770") ||
+                name.Equals("PickerHost", StringComparison.OrdinalIgnoreCase) ||   // [s2] WHY: בלי תלות במחלקה (#32770 בלבד החמיץ חלונות אחרים של PickerHost)
                 (name.Equals("explorer", StringComparison.OrdinalIgnoreCase) &&
                  cls is "ApplicationFrameWindow" or "XamlExplorerHostIslandWindow" or "CabinetWClass" or "#32770"); // [r1] #32770 = חלון Run (Win+R/הפעלה) של explorer, גם בזמן צילום
             if (closeIt)

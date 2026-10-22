@@ -60,7 +60,7 @@ namespace OtzariaBridge;
 ///    הדיאלוג) — לא מסנן תצוגה. זו בדיוק המגבלה שתועדה מראש כ"קבילה אם הסינון מהתצוגה לא ישים טכנית".
 /// 6. בחירה מרובה (כמה קבצים יחד, "a.docx" "b.pdf") נבדקת פריט-פריט בצורה גסה (פיצול לפי מרכאות/רווח);
 ///    לא נבדק מול תרחיש בחירה מרובה אמיתי.
-/// 7. חלון מרוץ (race) קצר: הבדיקה הראשונה רצה ~80 מ"ש אחרי האירוע, polling כל ~400 מ"ש אח"כ — יכול
+/// 7. חלון מרוץ (race) קצר: [s2] הזיהוי מנסה שוב עד ~3 שניות (חלונות ילד מקוריים, בלי תלות ב-UIA); polling כל ~400 מ"ש אח"כ — יכול
 ///    להיות הבזק קצר של תוכן/בחירה אסורה לפני שהדיאלוג נסגר.
 /// 8. מצב "נעול" (FxPolicy locked) סוגר כל דיאלוג Open/Save סטנדרטי מיידית, בלי תלות בנתיב/סיומת.
 /// 9. אם תהליך הגשר בסשן המשתמש נסגר/קורס, האכיפה נעצרת עד שהוא עולה מחדש (תוך שניות, ר' Installer/
@@ -96,6 +96,40 @@ public static class DialogGuard
         "msix", "msixbundle", "appx", "appxbundle", "iso", "vhd", "vhdx", "rdp", "jnlp", "library-ms",
         "search-ms", "settingcontent-ms", "diagcab", "ocx", "xll", "wll", "theme", "themepack",
     };
+
+    private const int DetectWindowMs = 3000;
+
+    private delegate bool EnumChildProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumChildProc cb, IntPtr l);
+
+    private static IUIAutomation TryCreateUi()
+    {
+        try { return new CUIAutomation8(); }
+        catch { }
+        try { return new CUIAutomation(); }
+        catch { return null; }
+    }
+
+    /// <summary>מחלקות כל חלונות הצאצא של חלון (כל העומק)</summary>
+    private static List<string> ChildClasses(IntPtr hwnd)
+    {
+        var res = new List<string>();
+        var sb = new StringBuilder(128);
+        try
+        {
+            EnumChildWindows(hwnd, (h, _) => { sb.Clear(); if (GetClassName(h, sb, sb.Capacity) > 0) res.Add(sb.ToString()); return true; }, IntPtr.Zero);
+        }
+        catch { }
+        return res;
+    }
+
+    // [s2] רכיבי דיאלוג קבצים של comdlg32/IFileDialog. הראשונים הם הוכחה; האחרים (סרגל כתובת/תצוגת DirectUI) מספיקים כדי לנהוג בדיאלוג כדיאלוג קבצים
+    private static readonly HashSet<string> FileDialogChildClasses = new(StringComparer.Ordinal)
+        { "SHELLDLL_DefView", "DUIViewWndClassName", "DirectUIHWND", "ComboBoxEx32", "ReBarWindow32", "Address Band Root", "ShellTabWindowClass" };
+
+    /// <summary>[s2] זיהוי דיאלוג קבצים לפי מחלקות הילדים (טהור, בלי UIA). MessageBox מכיל רק Static/Button</summary>
+    internal static bool LooksLikeFileDialogByChildren(IEnumerable<string> childClasses) =>
+        childClasses != null && childClasses.Any(FileDialogChildClasses.Contains);
 
     private delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
 
@@ -197,14 +231,29 @@ public static class DialogGuard
     {
         try
         {
-            Thread.Sleep(80); // נותנים לעץ ה-UI Automation של הדיאלוג זמן להתאכלס לפני הבדיקה הראשונה
-            if (!IsWindow(hwnd)) return;
-
-            IUIAutomation ui;
-            try { ui = new CUIAutomation8(); }
-            catch { ui = new CUIAutomation(); }
-
-            if (!LooksLikeFileDialog(ui, hwnd)) return; // Message-Box או דיאלוג סטנדרטי אחר — לא נוגעים בו
+            // [s2] WHY: בדיקה חד-פעמית אחרי 80ms נפתחה לכשל (עץ UIA עדיין ריק/COM נכשל = הדיאלוג לא נאכף לעולם). עכשיו: ניסיון חוזר עד ~3 שניות,
+            // זיהוי ראשי לפי חלונות ילד מקוריים (SHELLDLL_DefView/DUIViewWndClassName) בלי UIA, ו-UIA רק כגיבוי
+            IUIAutomation ui = null;
+            bool isFile = false;
+            long deadline = Environment.TickCount64 + DetectWindowMs;
+            for (int attempt = 0; IsWindow(hwnd) && Environment.TickCount64 < deadline; attempt++)
+            {
+                if (LooksLikeFileDialogByChildren(ChildClasses(hwnd))) { isFile = true; break; }
+                if (attempt % 4 == 3)
+                {
+                    ui ??= TryCreateUi();
+                    if (ui != null && LooksLikeFileDialog(ui, hwnd)) { isFile = true; break; }
+                }
+                Thread.Sleep(60);
+            }
+            if (!isFile || !IsWindow(hwnd)) return; // Message-Box או דיאלוג סטנדרטי אחר (אין בו רכיבי דיאלוג קבצים) — לא נוגעים בו
+            ui ??= TryCreateUi();
+            if (ui == null && (Kiosk.IsActive || FxPolicy.EffectiveMode() != "open"))
+            {
+                // [s2] זוהה דיאלוג קבצים אבל אי אפשר לקרוא אותו (UIA לא זמין): נכשלים סגור
+                Close(hwnd, Lang.T("אי אפשר לאמת את דיאלוג הקבצים בזמן נעילה.", "This file dialog can't be verified while locked."));
+                return;
+            }
             Config.Log("dialog-guard: זוהה דיאלוג פתיחה/שמירה (hwnd=0x" + hwnd.ToString("X") + ")");
             _fileDialogs[hwnd] = 0;
 
@@ -314,6 +363,17 @@ public static class DialogGuard
             }
         }
 
+        if (restrictingNow)
+        {
+            // [s2] קובץ (לא תיקיה) בלי סיומת: Windows/Word פותחים אותו לפי תוכן, ובדיקת הסיומת לא ראתה אותו. נבדקת רק תיבת "שם הקובץ" (AutomationId 1148)
+            string fname = ReadFileNameValue(ui, hwnd);
+            if (fname != null && HasExtensionlessFile(fname, ReadCurrentFolder(ui, hwnd), Directory.Exists))
+            {
+                message = Lang.T("אי אפשר לבחור קובץ בלי סיומת בזמן נעילה.", "Files without an extension can't be selected while locked.");
+                return "noext:" + fname.Trim().ToLowerInvariant();
+            }
+        }
+
         if (mode == "locked")
         {
             message = Lang.T("סייר הקבצים נעול — אי אפשר להשתמש כרגע בדיאלוגי פתיחה/שמירה של קבצים.",
@@ -359,6 +419,47 @@ public static class DialogGuard
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// [s2] האם בתיבת שם הקובץ יש קובץ בלי סיומת. תיקיה קיימת (נתיב מלא, או יחסית לתיקיה הנוכחית אם נקראה) מותרת (ניווט);
+    /// תבניות (* ?) מותרות (סינון). שם יחסי כשהתיקיה הנוכחית לא ידועה = הפרה (נכשלים סגור; עם דיביונס, כך שהקלדה באמצע לא סוגרת מיד)
+    /// </summary>
+    internal static bool HasExtensionlessFile(string raw, string curFolder, Func<string, bool> dirExists)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+        string s = raw.Trim();
+        if (s.Contains("(*.", StringComparison.Ordinal)) return false;
+        var names = new List<string>();
+        if (s.Contains('"'))
+            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(s, "\"([^\"]*)\"")) names.Add(m.Groups[1].Value);
+        else names.Add(s);
+        foreach (string n in names)
+        {
+            string t = NormalizeName(n.Trim().Trim('"'));
+            if (t.Length == 0 || t.IndexOfAny(new[] { '*', '?' }) >= 0) continue;
+            if (ExtOfName(n) != null) continue;
+            string full = null;
+            try { full = IsFullPath(t) ? t : (curFolder != null ? Path.Combine(curFolder.Trim(), t) : null); } catch { }
+            if (full != null && dirExists(full)) continue;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>[s2] הערך בתיבת "שם הקובץ" (AutomationId 1148) בלבד, או null אם לא נמצאה. לא נבדק מול דיאלוג חי</summary>
+    private static string ReadFileNameValue(IUIAutomation ui, IntPtr hwnd)
+    {
+        try
+        {
+            var root = ui.ElementFromHandle(hwnd);
+            var combo = root?.FindFirst(TreeScope.TreeScope_Descendants, ui.CreatePropertyCondition((int)UIA_PropertyIds.UIA_AutomationIdPropertyId, "1148"));
+            if (combo == null) return null;
+            var edit = combo.FindFirst(TreeScope.TreeScope_Descendants,
+                ui.CreatePropertyCondition((int)UIA_PropertyIds.UIA_ControlTypePropertyId, (int)UIA_ControlTypeIds.UIA_EditControlTypeId)) ?? combo;
+            return GetElementValue(edit);
+        }
+        catch { return null; }
     }
 
     /// <summary>חסימת בסיס בנעילה כש-FxPolicy=open: Windows, Program Files, ProgramData, תיקיית הגשר, Startup ושיתופי רשת. כשל בפענוח = חסום</summary>

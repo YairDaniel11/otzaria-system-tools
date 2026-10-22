@@ -69,7 +69,8 @@ public class AppTrustTests
         string helper = @"D:\Apps\zayit\evil.exe";
         Assert.Equal(AppTrust.MatchKind.None, AppTrust.MatchExe(helper, Exe, @"D:\Apps\zayit", Names, "aa", "CN=Good", env));
         env.Sigs[helper] = new AppTrust.SigInfo(true, "CN=Good");
-        Assert.Equal(AppTrust.MatchKind.Helper, AppTrust.MatchExe(helper, Exe, @"D:\Apps\zayit", Names, "aa", "CN=Good", env));
+        // [s2] חתימה בלבד (בלי מיקום מנהל-בלבד) כבר לא מספיקה ל-Helper
+        Assert.Equal(AppTrust.MatchKind.None, AppTrust.MatchExe(helper, Exe, @"D:\Apps\zayit", Names, "aa", "CN=Good", env));
         env.Sigs[helper] = AppTrust.SigInfo.None; env.Trusted.Add(helper);
         Assert.Equal(AppTrust.MatchKind.Helper, AppTrust.MatchExe(helper, Exe, @"D:\Apps\zayit", Names, "aa", "CN=Good", env));
     }
@@ -194,7 +195,9 @@ public class AppTrustTests
         var set = new AppTrust.LaunchedSet();
         set.Remember(100, T0, T0);
         Assert.True(set.Contains(100, Alive(T0), T0.AddMinutes(9.9)));
-        Assert.False(set.Contains(100, Alive(T0), T0.AddMinutes(10.1)));
+        // [s2] שורש חי נשאר מהימן כל חייו; התוקף נאכף רק על שורש שמת (ר' S2Tests)
+        Assert.True(set.Contains(100, Alive(T0), T0.AddMinutes(10.1)));
+        Assert.False(set.Contains(100, Dead, T0.AddMinutes(10.1), T0.AddMinutes(10)));
     }
 
     [Fact]

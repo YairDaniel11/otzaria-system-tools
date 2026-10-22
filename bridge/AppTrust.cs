@@ -33,6 +33,11 @@ internal static class AppTrust
         /// <summary>חתימת Authenticode תקפה (WinVerifyTrust) והמפרסם (Subject)</summary>
         SigInfo Sig(string path);
         string Sha256(string path);
+        /// <summary>
+        /// [s2] מיקום שרק מנהל כותב אליו (קובץ + כל תיקיות האב) בכל כונן קבוע, לא רק Program Files/אוצריא.
+        /// ברירת מחדל = IsTrustedLocation כדי לא לשבור מימושי בדיקה קיימים
+        /// </summary>
+        bool IsAdminOnlyLocation(string path) => IsTrustedLocation(path);
     }
 
     internal enum MatchKind { None, Exact, Helper }
@@ -58,8 +63,42 @@ internal static class AppTrust
     // ---------- אמון ב-Microsoft: נתיב + ACL + חתימה (לא שם תהליך) ----------
 
     /// <summary>[r1] המפרסם הוא Microsoft (שם הארגון בשדה O)</summary>
-    internal static bool IsMicrosoftSubject(string subject) =>
-        !string.IsNullOrEmpty(subject) && subject.Contains("O=Microsoft Corporation", StringComparison.OrdinalIgnoreCase);
+    internal static bool IsMicrosoftSubject(string subject)
+    {
+        // [s2] WHY: Contains("O=Microsoft Corporation") התאים גם ל-"O=Microsoft Corporation Evil" ול-CN="x, O=Microsoft Corporation".
+        // עכשיו: פענוח RDN אמיתי (מרכאות/escape), ושדה O חייב להיות בדיוק "Microsoft Corporation"
+        foreach (var (k, v) in ParseRdns(subject))
+            if (k == "O" && string.Equals(v, "Microsoft Corporation", StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    /// <summary>[s2] פענוח Subject בפורמט X.500 ("CN=a, O=\"b, c\"") לזוגות (מפתח באותיות גדולות, ערך). טהור</summary>
+    internal static List<(string key, string value)> ParseRdns(string subject)
+    {
+        var res = new List<(string, string)>();
+        if (string.IsNullOrWhiteSpace(subject)) return res;
+        var cur = new System.Text.StringBuilder();
+        bool quote = false;
+        void Flush()
+        {
+            string tok = cur.ToString().Trim(); cur.Clear();
+            int eq = tok.IndexOf('=');
+            if (eq <= 0) return;
+            string key = tok[..eq].Trim().ToUpperInvariant(), val = tok[(eq + 1)..].Trim();
+            if (val.Length >= 2 && val[0] == '"' && val[^1] == '"') val = val[1..^1].Replace("\"\"", "\"");
+            res.Add((key, val));
+        }
+        for (int i = 0; i < subject.Length; i++)
+        {
+            char c = subject[i];
+            if (c == '\\' && i + 1 < subject.Length) { cur.Append(subject[++i]); continue; }
+            if (c == '"') { quote = !quote; cur.Append(c); continue; }
+            if ((c == ',' || c == ';') && !quote) { Flush(); continue; }
+            cur.Append(c);
+        }
+        Flush();
+        return res;
+    }
 
     /// <summary>
     /// [r1] רכיב מערכת אמיתי: במיקום קבוע לא-כתיב (ACL; Windows\Temp ו-Windows\Tasks לא עוברים) וחתום-תקף ע"י Microsoft.
@@ -111,12 +150,31 @@ internal static class AppTrust
                       exe.StartsWith(entryDirOrNull.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
         if (!nameHit && !dirHit) return MatchKind.None;
         if (env.IsTrustedLocation(exe) || IsMicrosoftPackage(exe, env)) return MatchKind.Helper;
-        if (!string.IsNullOrEmpty(pinSigner))
+        // [s2] WHY: חתימה בלבד בלי מיקום אפשרה לכל קובץ חתום-באותו-מפרסם בתיקיה כתיבה (ספריות/עותקים). עכשיו נדרש גם מיקום שרק מנהל כותב אליו;
+        // Subject מלא (לא Contains). מחיר (false-positive): תוכנת עזר במיקום כתיב (AppData) לא תזוהה כ-Helper; הרשומה עצמה (Exact) עדיין תקפה
+        if (!string.IsNullOrEmpty(pinSigner) && env.IsAdminOnlyLocation(exe))
         {
             var s = env.Sig(exe);
             if (s.Valid && Eq(s.Subject, pinSigner)) return MatchKind.Helper;
         }
         return MatchKind.None;
+    }
+
+    /// <summary>
+    /// [s2] אמון בצאצא של תוכנה מותרת (Word -> VBA -> קובץ): לא "כי אבא מותר". הקובץ חייב להיות במיקום שרק מנהל כותב אליו,
+    /// או חבילת Microsoft, או חתום-תקף באחד המפרסמים הנעוצים ברשימה. קבצים תחת Windows נדחים (שם יושבים כל ה-LOLBins: hh, msdt, cmstp...);
+    /// רכיבי מערכת לגיטימיים נשארים מטופלים ב-ShellPolicy (Critical + חתימה).
+    /// </summary>
+    internal static bool TreeChildTrusted(string exe, IEnumerable<string> pinnedSigners, string windowsDir, ITrustEnv env)
+    {
+        if (string.IsNullOrEmpty(exe)) return false;   // fail-closed: אין נתיב = אין אמון
+        if (!string.IsNullOrEmpty(windowsDir) && IsUnderAnyRoot(exe, new[] { windowsDir })) return false;
+        if (env.IsAdminOnlyLocation(exe) || IsMicrosoftPackage(exe, env)) return true;
+        var s = env.Sig(exe);
+        if (s.Valid && pinnedSigners != null)
+            foreach (var p in pinnedSigners)
+                if (!string.IsNullOrEmpty(p) && Eq(s.Subject, p)) return true;
+        return false;
     }
 
     /// <summary>לפני הפעלה: הקובץ נבדק מחדש מול הנעיצה (או מיקום קבוע). קובץ שהוחלף — לא מופעל</summary>
@@ -512,6 +570,7 @@ internal static class AppTrust
     private sealed class RealEnv : ITrustEnv
     {
         public bool IsTrustedLocation(string path) => AppTrust.IsTrustedLocation(path);
+        public bool IsAdminOnlyLocation(string path) => AppTrust.IsAdminOnlyLocation(path);
         public SigInfo Sig(string path) => GetSignature(path);
         public string Sha256(string path) => GetSha256(path);
     }
@@ -570,7 +629,11 @@ internal static class AppTrust
 
     internal sealed class LaunchedSet
     {
+        // [s2] WHY: התוקף (10 דקות) נאכף רק על שורש שמת (בן של מפעיל שנסגר). שורש חי (Word פתוח שעות) נשאר מהימן כל חייו,
+        // אחרת צאצא לגיטימי שנפתח אחרי 10 דקות היה נחסם. הבטיחות של הצאצא עצמו באה מ-TreeChildTrusted (נתיב/חתימה), לא מגיל האב
         internal static readonly TimeSpan Validity = TimeSpan.FromMinutes(10);
+        internal static readonly TimeSpan MaxKeep = TimeSpan.FromHours(24);
+        private const int MaxEntries = 64;
         private readonly Dictionary<int, (DateTime at, DateTime start)> _d = new();
         private readonly object _g = new();
 
@@ -578,14 +641,15 @@ internal static class AppTrust
         {
             lock (_g)
             {
-                foreach (int k in _d.Where(x => now - x.Value.at > Validity).Select(x => x.Key).ToList()) _d.Remove(k);
+                foreach (int k in _d.Where(x => now - x.Value.at > MaxKeep).Select(x => x.Key).ToList()) _d.Remove(k);
+                while (_d.Count >= MaxEntries) _d.Remove(_d.OrderBy(x => x.Value.at).First().Key);
                 _d[pid] = (now, start);
             }
         }
 
         /// <summary>
-        /// האם pid הוא תהליך שנרשם. חי: זמן היצירה חייב להיות זהה (אחרת PID הוחזר לתהליך אחר). מת: רק אם childStart
-        /// (זמן היצירה של הבן שהצביע עליו) מאוחר מזמן היצירה הרשום — מפעיל שכבר נסגר. תהליך חי שאין גישה לזמנו — לא מתקבל.
+        /// האם pid הוא תהליך שנרשם. חי: זמן היצירה חייב להיות זהה (אחרת PID הוחזר לתהליך אחר), ללא תלות בגיל. מת: רק אם childStart
+        /// (זמן היצירה של הבן שהצביע עליו) מאוחר מזמן היצירה הרשום ובתוך תוקף 10 דקות. תהליך חי שאין גישה לזמנו — לא מתקבל.
         /// </summary>
         public bool Contains(int pid, ProcInfo info, DateTime now, DateTime? childStart = null)
         {
@@ -593,25 +657,30 @@ internal static class AppTrust
             lock (_g)
             {
                 if (!_d.TryGetValue(pid, out rec)) return false;
-                if (now - rec.at > Validity) { _d.Remove(pid); return false; }   // תוקף 10 דקות באמת נאכף
+                if (now - rec.at > MaxKeep) { _d.Remove(pid); return false; }
             }
             if (info.Alive)
                 return info.Start.HasValue && Math.Abs((info.Start.Value - rec.start).TotalSeconds) < 1;
+            if (now - rec.at > Validity) return false;   // שורש מת: תוקף 10 דקות
             return childStart.HasValue && childStart.Value >= rec.start;
         }
 
-        /// <summary>האם pid או אחד מאבותיו (עד 6 דורות) נפתח דרך הגשר; האב חייב להיות מבוגר מהבן (PID reuse)</summary>
-        public bool IsTree(int pid, Func<int, ProcInfo> probe, Func<int, int> parentOf, DateTime now)
+        /// <summary>
+        /// האם pid או אחד מאבותיו (עד 6 דורות) נפתח דרך הגשר; האב חייב להיות מבוגר מהבן (PID reuse).
+        /// [s2] childTrusted: לצאצא (לא לשורש עצמו) נדרש גם אימות קובץ; null = ללא אימות (תאימות לבדיקות ישנות)
+        /// </summary>
+        public bool IsTree(int pid, Func<int, ProcInfo> probe, Func<int, int> parentOf, DateTime now, Func<int, bool> childTrusted = null)
         {
+            int orig = pid;
             for (int i = 0; i < 6 && pid > 4; i++)
             {
                 var info = probe(pid);
-                if (Contains(pid, info, now)) return true;
+                if (Contains(pid, info, now)) return i == 0 || childTrusted == null || childTrusted(orig);
                 if (!info.Alive || !info.Start.HasValue) return false;
                 int parent = parentOf(pid);
                 if (parent <= 4) return false;
                 var pi = probe(parent);
-                if (!pi.Alive) return Contains(parent, pi, now, info.Start);
+                if (!pi.Alive) return Contains(parent, pi, now, info.Start) && (childTrusted == null || childTrusted(orig));
                 if (!pi.Start.HasValue || pi.Start.Value > info.Start.Value) return false;   // "אב" צעיר מהבן = PID הוחזר
                 pid = parent;
             }

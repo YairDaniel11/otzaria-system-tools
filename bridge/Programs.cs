@@ -37,6 +37,12 @@ public static class Programs
         "msedge", "chrome", "firefox", "iexplore", "brave", "opera", "vivaldi",
         "perfmon", "msconfig", "resmon", "taskschd", "dxdiag", "msinfo32", "compmgmt", "services", "devmgmt", "diskmgmt",
         "lusrmgr", "secpol", "gpedit", "cleanmgr", "psr", "mdsched", "msra", "quickassist", "odbcad32", "dfrgui",
+        // [s2] WHY: מאקרו VBA ב-Word (Alt+F11 / מסמך עם מאקרו) מריץ כל תהליך; אלה ה-LOLBins/כלי העזר שנמצאים במיקום מהימן (Windows/Program Files)
+        // ולכן עברו את בדיקת המיקום כצאצאים. calc לא נחסם בכוונה (מחשבון ללא יכולת הרצה/פתיחת קבצים; חסימה = false-positive למשתמשים)
+        "hh", "msdt", "cmstp", "odbcconf", "wordpad", "write", "charmap", "regasm", "regsvcs", "mavinject", "wusa", "expand",
+        "extrac32", "makecab", "ieexec", "infdefaultinstall", "presentationhost", "syncappvpublishingserver", "scriptrunner",
+        "jsc", "vbc", "rcsi", "csi", "cdb", "ntsd", "windbg", "iexpress", "sdbinst", "verclsid", "xwizard", "eudcedit",
+        "fsquirt", "dccw", "telnet", "tftp", "ssh", "scp", "sftp", "winrs", "pktmon", "netsh", "dnscmd", "fltmc",
     };
 
     // בעיה #14 סעיף 6: נכתבים בחוט בקשה (Activate) ונקראים בחוט השומר (ShouldYieldTo וכו') —
@@ -785,7 +791,8 @@ public static class Programs
     {
         lock (PidGate)
             if (ParentCache.TryGetValue(pid, out var c) && DateTime.UtcNow - c.at < TimeSpan.FromSeconds(10)) return c.parent;
-        int parent = 0;
+        int parent = (int)Kiosk.ParentPidOf((uint)pid);   // [s2] ntdll: זול ובלי תלות ב-WMI; WMI רק כגיבוי
+        if (parent == 0)
         try
         {
             using var q = new ManagementObjectSearcher("SELECT ParentProcessId FROM Win32_Process WHERE ProcessId=" + pid);
@@ -798,7 +805,22 @@ public static class Programs
     }
 
     /// <summary>האם התהליך נפתח דרך הגשר, או שהוא תהליך בן (עד 6 דורות) של תהליך שנפתח כך. תוקף 10 דקות, והשוואת זמן יצירה (PID reuse)</summary>
-    private static bool IsLaunchedTree(int pid) => Launched.IsTree(pid, Probe, ParentOf, DateTime.UtcNow);
+    private static bool IsLaunchedTree(int pid) => Launched.IsTree(pid, Probe, ParentOf, DateTime.UtcNow, ChildTrusted);
+
+    /// <summary>
+    /// [s2] צאצא של תוכנה מותרת מקבל אמון רק אם הקובץ שלו עובר TreeChildTrusted (מיקום מנהל-בלבד / חבילת Microsoft / חתימה נעוצה).
+    /// WHY: בלי זה VBA ב-Word שהריץ קובץ מהמשתמש (או hh/msdt) נחשב "תוכנה מותרת" רק כי אבא שלו מותר.
+    /// </summary>
+    private static bool ChildTrusted(int pid)
+    {
+        try
+        {
+            string exe = Kiosk.ImagePathOf((uint)pid);
+            var signers = Load().Select(e => e.Signer).Where(x => !string.IsNullOrEmpty(x)).Distinct().ToList();
+            return AppTrust.TreeChildTrusted(exe, signers, Environment.GetFolderPath(Environment.SpecialFolder.Windows), AppTrust.Env);
+        }
+        catch { return false; }
+    }
 
     /// <summary>תיקיות רחבות מדי כדי להתיר את כל מה שבהן (Windows, Program Files, תיקיית משתמש...)</summary>
     private static bool BroadDir(string dir)
