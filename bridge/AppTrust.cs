@@ -177,6 +177,21 @@ internal static class AppTrust
         return false;
     }
 
+    private static readonly string[] MsUserAppDirs = { @"Microsoft\OneDrive", @"Microsoft\Teams", @"Microsoft\TeamsMeetingAddin", @"Microsoft\Office" };
+
+    /// <summary>
+    /// [u2] false-positive: OneDrive/Teams/מעדכניהם רצים מ-%LOCALAPPDATA% (כתיב למשתמש) ונהרגו באמצע עדכון. פטור רק אם: תחת תיקיית אפליקציית Microsoft ידועה,
+    /// חתימת Microsoft תקפה (לא שם!), וכרגע רצה תוכנה מהימנה שהופעלה דרך הגשר. חסומי-זהות (cmd וכו') נבדקים לפני ולא מגיעים לכאן
+    /// </summary>
+    internal static bool IsMicrosoftUserApp(string exe, string localAppData, bool trustedSoftwareRunning, ITrustEnv env)
+    {
+        if (!trustedSoftwareRunning || string.IsNullOrEmpty(exe) || string.IsNullOrEmpty(localAppData)) return false;
+        var roots = MsUserAppDirs.Select(d => Path.Combine(localAppData, d)).ToArray();
+        if (!IsUnderAnyRoot(exe, roots)) return false;
+        var s = env.Sig(exe);
+        return s.Valid && IsMicrosoftSubject(s.Subject);
+    }
+
     /// <summary>לפני הפעלה: הקובץ נבדק מחדש מול הנעיצה (או מיקום קבוע). קובץ שהוחלף — לא מופעל</summary>
     internal static bool LaunchAllowed(string path, string pinSha, string pinSigner, ITrustEnv env) =>
         PinMatches(path, pinSha, pinSigner, env) || env.IsTrustedLocation(path);
@@ -663,6 +678,40 @@ internal static class AppTrust
                 return info.Start.HasValue && Math.Abs((info.Start.Value - rec.start).TotalSeconds) < 1;
             if (now - rec.at > Validity) return false;   // שורש מת: תוקף 10 דקות
             return childStart.HasValue && childStart.Value >= rec.start;
+        }
+
+        /// <summary>
+        /// [u2] האם *אב קדמון* (לא pid עצמו) של pid הוא שורש שנפתח דרך הגשר. WHY: תהליך שהגשר הפעיל הוא התוכנה המותרת עצמה;
+        /// צאצא שלה (DDEAUTO/OLE/היפרלינק => wscript/powershell בלי חלון) אינו "עוזר של הגשר" ולכן לא מקבל פטור
+        /// </summary>
+        public bool HasLaunchedAncestor(int pid, Func<int, ProcInfo> probe, Func<int, int> parentOf, DateTime now)
+        {
+            for (int i = 0; i < 6 && pid > 4; i++)
+            {
+                var info = probe(pid);
+                if (i > 0 && Contains(pid, info, now)) return true;
+                if (!info.Alive || !info.Start.HasValue) return false;
+                int parent = parentOf(pid);
+                if (parent <= 4) return false;
+                var pi = probe(parent);
+                if (!pi.Alive) return Contains(parent, pi, now, info.Start);
+                if (!pi.Start.HasValue || pi.Start.Value > info.Start.Value) return false;
+                pid = parent;
+            }
+            return false;
+        }
+
+        /// <summary>[u2] האם יש כרגע שורש חי שנפתח דרך הגשר (תוכנה מהימנה רצה)</summary>
+        public bool AnyAlive(Func<int, ProcInfo> probe, DateTime now)
+        {
+            List<(int pid, DateTime start)> l;
+            lock (_g) l = _d.Where(x => now - x.Value.at <= MaxKeep).Select(x => (x.Key, x.Value.start)).ToList();
+            foreach (var (pid, start) in l)
+            {
+                var i = probe(pid);
+                if (i.Alive && i.Start.HasValue && Math.Abs((i.Start.Value - start).TotalSeconds) < 1) return true;
+            }
+            return false;
         }
 
         /// <summary>

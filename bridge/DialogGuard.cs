@@ -333,9 +333,10 @@ public static class DialogGuard
         bool restrictingNow = Kiosk.IsActive || mode != "open";
         List<string> values = ReadCandidateValues(ui, hwnd);
 
+        var allowedExts = restrictingNow ? Kiosk.DialogGuardAllowedExtensions() : null;
         if (restrictingNow)
         {
-            var allowed = Kiosk.DialogGuardAllowedExtensions();
+            var allowed = allowedExts;
             foreach (string raw in values)
             {
                 // [r1] shell:/CLSID/UNC/כתובת/משתנה סביבה בתיבת השם: ניווט שעוקף את בדיקת הנתיב — נחסם לפני ש-Enter ירוץ
@@ -366,8 +367,12 @@ public static class DialogGuard
         if (restrictingNow)
         {
             // [s2] קובץ (לא תיקיה) בלי סיומת: Windows/Word פותחים אותו לפי תוכן, ובדיקת הסיומת לא ראתה אותו. נבדקת רק תיבת "שם הקובץ" (AutomationId 1148)
+            // [u2] WHY: בעבר "Doc1" ב-Save As של Word (או שם בלי סיומת ב-Open כשהסיומות מוסתרות) סומן הפרה ו-Enter נחסם. עכשיו: Open - רק אם הקובץ
+            // הקיים בדיסק באמת בלי סיומת / עם סיומת אסורה; Save - Windows משלימה סיומת מסוג הקובץ שנבחר, ולכן נדרש סוג קובץ מותר ידוע
             string fname = ReadFileNameValue(ui, hwnd);
-            if (fname != null && HasExtensionlessFile(fname, ReadCurrentFolder(ui, hwnd), Directory.Exists))
+            bool isSave = IsSaveDialog(hwnd);
+            if (fname != null && ExtensionlessViolation(fname, ReadCurrentFolder(ui, hwnd), isSave, isSave ? ReadSaveTypeExt(ui, hwnd) : null,
+                                                        allowedExts, DangerousExt, Directory.Exists, FindExistingByStem))
             {
                 message = Lang.T("אי אפשר לבחור קובץ בלי סיומת בזמן נעילה.", "Files without an extension can't be selected while locked.");
                 return "noext:" + fname.Trim().ToLowerInvariant();
@@ -422,10 +427,14 @@ public static class DialogGuard
     }
 
     /// <summary>
-    /// [s2] האם בתיבת שם הקובץ יש קובץ בלי סיומת. תיקיה קיימת (נתיב מלא, או יחסית לתיקיה הנוכחית אם נקראה) מותרת (ניווט);
-    /// תבניות (* ?) מותרות (סינון). שם יחסי כשהתיקיה הנוכחית לא ידועה = הפרה (נכשלים סגור; עם דיביונס, כך שהקלדה באמצע לא סוגרת מיד)
+    /// [u2] האם שם בתיבת "שם הקובץ" הוא הפרה של כלל "קובץ בלי סיומת". תיקיה קיימת (ניווט) ותבניות (* ?) מותרות.
+    /// Open: הפרה רק אם בדיסק קיים קובץ בדיוק בשם הזה בלי סיומת, או שקיים "שם.*" עם סיומת מסוכנת/אסורה (סיומות מוסתרות: "report" = report.docx).
+    ///       שם שלא קיים בדיסק אינו נפתח ולכן אינו הפרה. תיקיה נוכחית לא ידועה ושם יחסי = הפרה (fail-closed, עם דיביונס).
+    /// Save: Windows משלימה סיומת מסוג הקובץ ("Word Document (*.docx)"), לכן שם בלי סיומת תקין כשסוג הקובץ הנבחר (saveTypeExt) הוא סיומת מותרת ולא מסוכנת;
+    ///       סוג לא ידוע/"כל הקבצים" = הפרה (fail-closed).
     /// </summary>
-    internal static bool HasExtensionlessFile(string raw, string curFolder, Func<string, bool> dirExists)
+    internal static bool ExtensionlessViolation(string raw, string curFolder, bool isSave, string saveTypeExt, ISet<string> allowed, ISet<string> dangerous,
+                                                Func<string, bool> dirExists, Func<string, string, IEnumerable<string>> findExistingByStem)
     {
         if (string.IsNullOrWhiteSpace(raw)) return false;
         string s = raw.Trim();
@@ -434,17 +443,89 @@ public static class DialogGuard
         if (s.Contains('"'))
             foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(s, "\"([^\"]*)\"")) names.Add(m.Groups[1].Value);
         else names.Add(s);
+        bool IsOk(string e) => !string.IsNullOrEmpty(e) && !dangerous.Contains(e) && (allowed == null || allowed.Contains(e));
         foreach (string n in names)
         {
             string t = NormalizeName(n.Trim().Trim('"'));
             if (t.Length == 0 || t.IndexOfAny(new[] { '*', '?' }) >= 0) continue;
-            if (ExtOfName(n) != null) continue;
+            if (ExtOfName(n) != null) continue;   // סיומת מפורשת נבדקת ב-ExtensionsOf (ext:/danger:)
             string full = null;
             try { full = IsFullPath(t) ? t : (curFolder != null ? Path.Combine(curFolder.Trim(), t) : null); } catch { }
             if (full != null && dirExists(full)) continue;
-            return true;
+            if (isSave)
+            {
+                if (!IsOk(saveTypeExt)) return true;
+                continue;
+            }
+            if (full == null) return true;   // Open: שם יחסי בלי תיקיה ידועה - לא ניתן לאמת
+            string dir = Path.GetDirectoryName(full), stem = Path.GetFileName(full);
+            if (string.IsNullOrEmpty(dir) || string.IsNullOrEmpty(stem)) return true;
+            foreach (string existing in findExistingByStem(dir, stem) ?? Array.Empty<string>())
+            {
+                string e = ExtOfName(Path.GetFileName(existing));
+                if (e == null || !IsOk(e)) return true;
+            }
         }
         return false;
+    }
+
+    /// <summary>קבצים בתיקיה ששמם בדיוק stem (בלי סיומת) או stem.* . כשל בגישה = ריק</summary>
+    private static IEnumerable<string> FindExistingByStem(string dir, string stem)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(dir, stem + "*").Where(f =>
+            {
+                string n = Path.GetFileName(f);
+                return n.Equals(stem, StringComparison.OrdinalIgnoreCase) || n.StartsWith(stem + ".", StringComparison.OrdinalIgnoreCase);
+            }).Take(50).ToList();
+        }
+        catch { return Array.Empty<string>(); }
+    }
+
+    /// <summary>[u2] דיאלוג שמירה: כותרת/כפתור ראשי מכילים "Save"/"שמור"/"שמירה" (לא נבדק מול דיאלוג חי)</summary>
+    internal static bool LooksLikeSaveTitle(string title, string okText)
+    {
+        static bool Has(string t) => !string.IsNullOrEmpty(t) &&
+            (t.Contains("save", StringComparison.OrdinalIgnoreCase) || t.Contains("שמור", StringComparison.Ordinal) || t.Contains("שמירה", StringComparison.Ordinal));
+        return Has(title) || Has(okText);
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextW(IntPtr h, StringBuilder sb, int max);
+    [DllImport("user32.dll")] private static extern IntPtr GetDlgItem(IntPtr h, int id);
+
+    private static bool IsSaveDialog(IntPtr hwnd)
+    {
+        try
+        {
+            var sb = new StringBuilder(256); GetWindowTextW(hwnd, sb, 256);
+            var ok = new StringBuilder(64); IntPtr b = GetDlgItem(hwnd, 1); if (b != IntPtr.Zero) GetWindowTextW(b, ok, 64);
+            return LooksLikeSaveTitle(sb.ToString(), ok.ToString());
+        }
+        catch { return false; }
+    }
+
+    /// <summary>[u2] הסיומת הראשונה מתוך טקסט סוג הקובץ ("Word Document (*.docx)" / "*.txt;*.log"), או null</summary>
+    internal static string FirstExtOfFilterText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var m = System.Text.RegularExpressions.Regex.Match(text, @"\*\.([A-Za-z0-9_\-]+)");
+        return m.Success && m.Groups[1].Value != "*" ? m.Groups[1].Value.ToLowerInvariant() : null;
+    }
+
+    /// <summary>[u2] סוג הקובץ הנבחר בדיאלוג שמירה (combo AutomationId 1136), או null אם לא נקרא. לא נבדק מול דיאלוג חי</summary>
+    private static string ReadSaveTypeExt(IUIAutomation ui, IntPtr hwnd)
+    {
+        try
+        {
+            var root = ui.ElementFromHandle(hwnd);
+            var combo = root?.FindFirst(TreeScope.TreeScope_Descendants, ui.CreatePropertyCondition((int)UIA_PropertyIds.UIA_AutomationIdPropertyId, "1136"));
+            if (combo == null) return null;
+            string v = GetElementValue(combo);
+            if (string.IsNullOrEmpty(v)) { try { v = combo.CurrentName; } catch { } }
+            return FirstExtOfFilterText(v);
+        }
+        catch { return null; }
     }
 
     /// <summary>[s2] הערך בתיבת "שם הקובץ" (AutomationId 1148) בלבד, או null אם לא נמצאה. לא נבדק מול דיאלוג חי</summary>

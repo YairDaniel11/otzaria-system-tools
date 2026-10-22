@@ -807,6 +807,14 @@ public static class Programs
     /// <summary>האם התהליך נפתח דרך הגשר, או שהוא תהליך בן (עד 6 דורות) של תהליך שנפתח כך. תוקף 10 דקות, והשוואת זמן יצירה (PID reuse)</summary>
     private static bool IsLaunchedTree(int pid) => Launched.IsTree(pid, Probe, ParentOf, DateTime.UtcNow, ChildTrusted);
 
+    /// <summary>[u2] האם לתהליך יש אב קדמון שנפתח דרך הגשר (כלומר הוא צאצא של תוכנה מותרת, לא עוזר של הגשר עצמו)</summary>
+    internal static bool HasLaunchedAncestor(int pid) => Launched.HasLaunchedAncestor(pid, Probe, ParentOf, DateTime.UtcNow);
+
+    /// <summary>[u2] רצה כרגע תוכנה שהופעלה דרך הגשר</summary>
+    internal static bool AnyLaunchedAlive() => Launched.AnyAlive(Probe, DateTime.UtcNow);
+
+    internal static bool ChildTrustedPid(int pid) => ChildTrusted(pid);
+
     /// <summary>
     /// [s2] צאצא של תוכנה מותרת מקבל אמון רק אם הקובץ שלו עובר TreeChildTrusted (מיקום מנהל-בלבד / חבילת Microsoft / חתימה נעוצה).
     /// WHY: בלי זה VBA ב-Word שהריץ קובץ מהמשתמש (או hh/msdt) נחשב "תוכנה מותרת" רק כי אבא שלו מותר.
