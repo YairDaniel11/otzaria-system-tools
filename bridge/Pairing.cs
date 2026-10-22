@@ -42,6 +42,7 @@ public static class Pairing
             {
                 string id = c["id"]?.ToString(), hash = c["hash"]?.ToString();
                 if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(hash)) continue;
+                if (!Trusted(c)) continue;
                 res[id] = ProofFor(hash, nonce);
             }
         return res;
@@ -52,6 +53,22 @@ public static class Pairing
     {
         byte[] key = Encoding.ASCII.GetBytes(tokenSha256Hex.ToUpperInvariant());
         return Convert.ToHexString(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(nonce))).ToLowerInvariant();
+    }
+
+    /// <summary>הנתונים שנחתמים לכל צימוד: מזהה, שם תוסף וגיבוב הטוקן (לא lastUsed, שמשתנה כל שעה)</summary>
+    internal static string Canon(JsonObject c) =>
+        "pair|" + c["id"] + "|" + c["client"] + "|" + c["hash"];
+
+    /// <summary>
+    /// האם רשומת צימוד מהימנה. WHY (S3): auth.clients.json נשמר ב-config.json הכתיב למשתמש, ורשומה שנוספה לשם ישירות (גיבוב של טוקן שהתוקף בחר)
+    /// הייתה מתקבלת בלי חלון אישור. כשהחתימה נאכפת (שירות שתומך ב-config-sign) רק רשומה עם sig תקף, שנוצרה ב-Request אחרי אישור, מתקבלת.
+    /// בלי שירות/עם שירות ישן: התנהגות קודמת (אין מקור אמון לאכוף)
+    /// </summary>
+    internal static bool Trusted(JsonObject c)
+    {
+        if (!ConfigSeal.Enforced) return true;
+        string sig = c["sig"]?.ToString();
+        return !string.IsNullOrEmpty(sig) && ConfigSeal.Verify(Canon(c), sig);
     }
 
     private static string Sha(string token) =>
@@ -94,7 +111,7 @@ public static class Pairing
             foreach (var c in a.OfType<JsonObject>())
             {
                 byte[] e = Encoding.ASCII.GetBytes(c["hash"]?.ToString() ?? "");
-                if (e.Length == h.Length && CryptographicOperations.FixedTimeEquals(e, h))
+                if (e.Length == h.Length && CryptographicOperations.FixedTimeEquals(e, h) && Trusted(c))
                 {
                     // עדכון "שימוש אחרון" לכל היותר פעם בשעה, כדי לא לכתוב לדיסק בכל בקשה
                     string id = c["id"]?.ToString() ?? "";
@@ -175,7 +192,7 @@ public static class Pairing
             lock (Gate)
             {
                 var a = Clients();
-                a.Add(new JsonObject
+                var entry = new JsonObject
                 {
                     ["id"] = Convert.ToHexString(RandomNumberGenerator.GetBytes(6)).ToLowerInvariant(),
                     ["client"] = client,
@@ -183,7 +200,12 @@ public static class Pairing
                     ["hash"] = Sha(token),
                     ["created"] = DateTime.Now.ToString("s"),
                     ["lastUsed"] = DateTime.Now.ToString("s"),
-                });
+                };
+                // S3: החתימה נעשית רק כאן, אחרי אישור המשתמש. כשהיא נאכפת ואין שירות זמין לחתום: נכשלים (בלי טוקן שלא יתקבל)
+                string sig = ConfigSeal.Sign(Canon(entry));
+                if (sig != null) entry["sig"] = sig;
+                else if (ConfigSeal.Enforced) throw new BridgeException("unsupported", "רכיב ההקשחה אינו זמין לחתימת הצימוד", 503);
+                a.Add(entry);
                 SaveClients(a);
             }
             Config.Log("pair: אושר צימוד ל-" + client + " (" + name + ")");

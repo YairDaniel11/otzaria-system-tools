@@ -9,7 +9,14 @@ namespace OtzariaBridge;
 /// </summary>
 public static class TwoFactor
 {
-    public static bool Enabled => Config.Get("kiosk.twoFactor", false);
+    // S3: config.json כתיב למשתמש, והעברת kiosk.twoFactor ל-false בקובץ כיבתה את Hello. כשהשירות מחזיק את ההגדרה (HardLock.ServiceTwoFactor,
+    // הוא מקור האמת, מסונכרן ב-SetTwoFactor) היא מחייבת גם אם הקובץ אומר false. OR ולא AND: עריכת הקובץ יכולה רק להחמיר.
+    public static bool Enabled => Config.Get("kiosk.twoFactor", false) || ServiceSays();
+
+    private static bool ServiceSays()
+    {
+        try { return HardLock.ServiceTwoFactor; } catch { return false; }
+    }
 
     private static bool _avail;
     private static DateTime _availAt = DateTime.MinValue;
