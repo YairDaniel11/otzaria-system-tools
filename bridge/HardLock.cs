@@ -61,6 +61,9 @@ public static class HardLock
             var r = new StreamReader(pipe, Encoding.UTF8);
             w.WriteLine(req.ToJsonString());
             var readTask = r.ReadLineAsync();
+            // WHY: בפסק זמן ה-using סוגר את ה-pipe בזמן שהקריאה תלויה, והיא נופלת ב-ObjectDisposedException שאף אחד לא צופה בו =>
+            // UnobservedTaskException (הוצף ב-136 דיווחים אוטומטיים). צופים בחריג כדי שלא יגיע ל-finalizer.
+            _ = readTask.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
             // בעיה #14 סעיף 2: רצפת המתנה קשיחה, לא 15ש' שחוסמות חוט HTTP גם כשנדרש timeout קצר בהרבה
             if (!readTask.Wait(Math.Max(timeoutMs, 3000))) return null;
             return JsonNode.Parse(readTask.Result ?? "") as JsonObject;
