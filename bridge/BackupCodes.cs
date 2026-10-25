@@ -30,7 +30,21 @@ internal static class BackupCodes
     }
 
     /// <summary>כמה קודי גיבוי שלא נוצלו נשארו</summary>
-    public static int Left => Config.GetList(Key).Length;
+    public static int Left => ServiceHolds ? (HardLock.ServiceBackupLeft() ?? 0) : Config.GetList(Key).Length;
+
+    /// <summary>
+    /// F2 WHY: כשהשירות (SYSTEM) מותקן ועונה, הוא מקור האמת לקודי הגיבוי. config.json כתיב למשתמש: תוקף שכותב לשם גיבוב
+    /// של קוד ידוע היה עובר את הבדיקה המקומית (דילוג על Verify/2FA). שירות ישן שלא מדווח backupLeft: נשארים עם העותק המקומי.
+    /// </summary>
+    internal static bool ServiceHolds => HardLock.Available && HardLock.ServiceBackupLeft() != null;
+
+    /// <summary>מחיקת העותק המקומי כשהשירות מחזיק רשימה (נקרא מ-Kiosk.PurgeLocalPassword). true = נמחק</summary>
+    internal static bool PurgeLocal()
+    {
+        if (Config.GetList(Key).Length == 0 || !ServiceHolds || (HardLock.ServiceBackupLeft() ?? 0) <= 0) return false;
+        Config.Remove(Key);
+        return true;
+    }
 
     /// <summary>"salt|hash" לכל קוד</summary>
     private static string Pack(string code)
@@ -53,11 +67,18 @@ internal static class BackupCodes
     }
 
     /// <summary>האם זה קוד גיבוי בתוקף (בלי לשרוף). שימו לב — לא נבדק מול רכיב ההקשחה; הוא בודק בעצמו</summary>
-    public static bool Matches(string code) => IndexOf(code) >= 0;
+    public static bool Matches(string code)
+    {
+        if (ServiceHolds) return Secret.NormalizeRecovery(code).Length == 12 && HardLock.IsBackupCode(code);
+        // שירות מותקן ורץ אבל לא עונה/מופסק-לא-באמת: fail-closed, בלי עותק מקומי. רק בלי שירות או כשהוא מופסק ב-SCM (מסלול חירום)
+        if (HardLock.ServiceInstalled() && !Kiosk.ServiceStopped()) return false;
+        return IndexOf(code) >= 0;
+    }
 
     /// <summary>שורף את הקוד (אחרי שימוש מוצלח). מחזיר false אם לא היה קוד כזה</summary>
     public static bool Consume(string code)
     {
+        if (ServiceHolds) return false; // השירות שורף בעצמו בזמן disable/set-password; העותק המקומי לא רלוונטי
         int i = IndexOf(code);
         if (i < 0) return false;
         var list = Config.GetList(Key).ToList();
@@ -80,8 +101,15 @@ internal static class BackupCodes
         var codes = Enumerable.Range(0, Count).Select(_ => Secret.NewRecoveryCode()).ToArray();
         var packed = codes.Select(Pack).ToArray();
         // כשרכיב ההקשחה מותקן הוא מקור האמת — אם השמירה שם נכשלת, לא משנים כלום כאן
-        if (HardLock.Available) HardLock.SetBackupCodes(pw, packed);
-        Config.Set(Key, new JsonArray(packed.Select(s => (JsonNode)JsonValue.Create(s)).ToArray()));
+        // F2: שירות מותקן שלא עונה => נכשלים (אחרת הקודים שהוצגו לא היו עובדים בשירות); ובשירות לא שומרים עותק מקומי
+        if (!HardLock.Available && HardLock.ServiceInstalled())
+            throw new BridgeException("unsupported", Lang.T("רכיב ההקשחה לא מגיב; אי אפשר ליצור קודי גיבוי כרגע", "The hardening service is not responding; cannot create backup codes now"), 503);
+        if (HardLock.Available)
+        {
+            HardLock.SetBackupCodes(pw, packed);
+            Config.Remove(Key);
+        }
+        else Config.Set(Key, new JsonArray(packed.Select(s => (JsonNode)JsonValue.Create(s)).ToArray()));
         Config.Save();
         AdminLog.Add("נוצרו " + Count + " קודי גיבוי לשחזור (הקודמים בוטלו)");
 
@@ -92,8 +120,8 @@ internal static class BackupCodes
             path = WriteFile(codes);
             try
             {
-                if (mode == "print") Process.Start(new ProcessStartInfo("notepad.exe", "/p \"" + path + "\"") { UseShellExecute = false });
-                else Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = false });
+                if (mode == "print") Process.Start(new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "notepad.exe"), "/p \"" + path + "\"") { UseShellExecute = false });
+                else Process.Start(new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe"), "/select,\"" + path + "\"") { UseShellExecute = false });
             }
             catch (Exception ex) { Config.Log("backup codes open: " + ex.Message); }
         }

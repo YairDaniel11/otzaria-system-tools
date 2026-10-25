@@ -446,6 +446,22 @@ public static class HardLock
         try { return ServiceStatus()?["hasRecovery"]?.GetValue<bool>() == true; } catch { return false; }
     }
 
+    /// <summary>
+    /// F2: כמה קודי גיבוי השירות מחזיק (null = שירות ישן שלא מדווח, או שהוא לא עונה). WHY: כשהשירות מחזיק אותם העותק המקומי
+    /// ב-config.json (כתיב למשתמש) לא נחשב ונמחק; null = לא מוחקים ולא סומכים על "אפס".
+    /// </summary>
+    public static int? ServiceBackupLeft()
+    {
+        try { var n = ServiceStatus()?["backupLeft"]; return n == null ? (int?)null : n.GetValue<int>(); } catch { return null; }
+    }
+
+    /// <summary>F2: האם הקוד הוא קוד גיבוי תקף בשירות (בדיקה בלי לשרוף; השריפה נעשית ב-disable/set-password). דלי ניסיונות נפרד בשירות</summary>
+    public static bool IsBackupCode(string code)
+    {
+        try { return Call(new JsonObject { ["op"] = "verify", ["backupOnly"] = true, ["password"] = code ?? "" })?["ok"]?.GetValue<bool>() == true; }
+        catch { return false; } // fail-closed
+    }
+
     public static string UninstallWithPassword(string password)
     {
         JsonObject r;
@@ -1242,7 +1258,7 @@ public class HardLockService : ServiceBase
     }
 
     /// <summary>#69: קוד גיבוי חד-פעמי — אם תואם, נשרף מיד (נשמר לדיסק) ומחזיר true. תחת אותה השהיה של ניסיונות שגויים</summary>
-    private bool UseBackup(string code)
+    private bool UseBackup(string code, bool burn = true)
     {
         if (_corrupt || _state["backupCodes"] is not JsonArray arr) return false;
         string n = Secret.NormalizeRecovery(code);
@@ -1255,6 +1271,7 @@ public class HardLockService : ServiceBase
             if (parts.Length == 2 && Secret.Matches(n, parts[1], parts[0]))
             {
                 _limiter.Success(bkKey);
+                if (!burn) return true; // F2: בדיקה בלבד (הגשר שואל "האם קוד גיבוי"), בלי לשרוף
                 arr.RemoveAt(i);
                 Save();
                 HardLock.SvcLog("service: נוצל קוד גיבוי חד-פעמי, נשארו " + arr.Count);
@@ -1731,6 +1748,8 @@ public class HardLockService : ServiceBase
                     return Ok();
 
                 case "verify":
+                    if (q["backupOnly"]?.GetValue<bool>() == true)
+                        return UseBackup(pw, burn: false) ? Ok() : Err("wrong_password", "לא קוד גיבוי"); // F2: מקור האמת לקודי גיבוי הוא השירות
                     if (q["recoveryOnly"]?.GetValue<bool>() == true)
                     {
                         // U1: "האם זה קוד השחזור" (פטור 2FA בביטול חירום). עותק ה-hash המקומי נמחק, ולכן השאלה עוברת לשירות. דלי נפרד ("|rec"): לא שורף את סיסמת ההורה

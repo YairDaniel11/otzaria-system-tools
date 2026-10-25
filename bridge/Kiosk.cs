@@ -50,11 +50,13 @@ public static partial class Kiosk
             bool recovery = (!string.IsNullOrEmpty(Config.Get<string>("kiosk.recoveryHash", null)) || !string.IsNullOrEmpty(Config.Get<string>("kiosk.recoverySalt", null)))
                             && HardLock.ServiceHasRecovery();
             bool password = !string.IsNullOrEmpty(Config.Get<string>("kiosk.passwordHash", null)) || !string.IsNullOrEmpty(Config.Get<string>("kiosk.salt", null));
-            if (!password && !recovery) return;
+            // F2 WHY: גם גיבובי קודי הגיבוי. עותק מקומי כתיב למשתמש איפשר להוסיף גיבוב של קוד ידוע; נמחק רק כשהשירות מחזיק רשימה (backupLeft>0)
+            bool backup = BackupCodes.PurgeLocal();
+            if (!password && !recovery && !backup) return;
             if (password) { Config.Remove("kiosk.passwordHash"); Config.Remove("kiosk.salt"); }
             if (recovery) { Config.Remove("kiosk.recoveryHash"); Config.Remove("kiosk.recoverySalt"); }
             Config.Save();
-            Config.Log("kiosk: עותק hash הסיסמה" + (recovery ? " וקוד השחזור" : "") + " המקומי הוסר (השירות מקור האמת)");
+            Config.Log("kiosk: עותק hash הסיסמה" + (recovery ? " וקוד השחזור" : "") + (backup ? " וקודי הגיבוי" : "") + " המקומי הוסר (השירות מקור האמת)");
         }
         catch (Exception ex) { Config.Log("purge local password: " + ex.Message); }
     }

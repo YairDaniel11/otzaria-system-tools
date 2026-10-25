@@ -18,7 +18,12 @@ internal static class LocationApi
     {
         Server.Route("/sys/location", Get);
         Server.Route("/location", Get);
-        Server.Route("/sys/location/settings", _ => { OpenSettings(); return new { opened = true }; });
+        Server.Route("/sys/location/settings", _ =>
+        {
+            // F2 WHY: ms-settings בזמן נעילה = פתח לחלון הגדרות Windows (עוקף את שער SectionRoutes). הנעילה סוגרת אותו בכל מקרה, אז לא פותחים בכלל
+            if (Kiosk.IsActive) throw BridgeException.Locked("פתיחת הגדרות המיקום חסומה במצב נעילה");
+            OpenSettings(); return new { opened = true };
+        });
         Server.Route("/feedback", b =>
         {
             // אותו פורמט כמו /sys/feedback (GhFeedback.cs): { text, plugin, version, repo? }

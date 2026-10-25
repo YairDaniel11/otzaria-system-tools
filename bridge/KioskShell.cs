@@ -90,6 +90,14 @@ internal static class ShellPolicy
     };
 
     /// <summary>[r1] שמות שמסומנים עוינים (לשימוש הקורא שרוצה לבדוק לפני כל "אמון" אחר)</summary>
+    /// <summary>
+    /// F2 WHY: osk נשאר ב-Hostile (מקלדת וירטואלית = פתח ל-Win+R/הרצה, ומתחזה בשם osk.exe). חריג מפורש רק כשכל התנאים מתקיימים:
+    /// הפיצ'ר sideBarKeyboard דלוק (המנהל הפעיל), הנתיב System32\osk.exe (IsScreenKeyboardPid), חתימת Microsoft תקפה, והתהליך נפתח ע"י הגשר עצמו
+    /// (הורה = הגשר). אחרת נשאר Kill. הסכנה (נעילה תקועה/false-positive) רק בכיוון "המקלדת נחסמת"; לא נפתח שום דבר נוסף.
+    /// </summary>
+    internal static bool OskAllowed(string name, bool featureOn, bool systemOskPath, bool msSigned, bool parentIsBridge) =>
+        Stem(name).Equals("osk", StringComparison.OrdinalIgnoreCase) && featureOn && systemOskPath && msSigned && parentIsBridge;
+
     internal static bool IsHostileName(string name) => Hostile.ContainsKey(Stem(name));
 
     // רכיבי מערכת שחלונותיהם לגיטימיים (IME, מסך כניסה, UAC...). נשארים רק אם הנתיב+ACL+חתימת Microsoft תקינים (IsTrustedSystem),
@@ -530,7 +538,11 @@ public static partial class Kiosk
                 string name = p.ProcessName, path = ImagePath(pid);
                 // [r1] עוין (דפדפן/LOLBin/כלי ניהול) נבדק קודם: לא נפטר גם אם הוא "חדש אחרי הפעלה"/בעץ הגשר (IsAllowedForeground בודק זהות חסומה ראשון)
                 bool hostile = ShellPolicy.IsHostileName(name);
-                if (pid == (uint)Environment.ProcessId || (!hostile && (IsOtzariaImage(pid, path) || Programs.IsAllowedForeground(pid))))
+                if (pid == (uint)Environment.ProcessId || (!hostile && (IsOtzariaImage(pid, path) || Programs.IsAllowedForeground(pid))) ||
+                    // F2: מקלדת וירטואלית שהגשר הפעיל מהסרגל (נתיב System32 + חתימת Microsoft + הורה=הגשר); כל השאר ב-Hostile נהרג
+                    (ShellPolicy.Stem(name).Equals("osk", StringComparison.OrdinalIgnoreCase) &&
+                     ShellPolicy.OskAllowed(name, Config.Get("kiosk.sideBarKeyboard", false), IsScreenKeyboardPid(pid) && path.EndsWith(@"\osk.exe", StringComparison.OrdinalIgnoreCase),
+                                            ShellPolicy.IsTrustedSystem(path, AppTrust.Env), ParentPidOf(pid) == (uint)Environment.ProcessId)))
                     r = new PidInfo(now, true, name, false, false);
                 else
                 {
