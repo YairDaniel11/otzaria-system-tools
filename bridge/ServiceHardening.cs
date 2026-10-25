@@ -83,25 +83,55 @@ internal static class BridgeProcs
 
 /// <summary>
 /// אימות צד השרת של ה-pipe (בצד הלקוח), לפני שליחת סיסמה. WHY: תהליך משתמש שיצר את ה-pipe "OtzariaBridgeService" לפני
-/// השירות היה מקבל את הסיסמאות בטקסט גלוי. השרת האמיתי = תהליך בסשן 0 (שירות) שנתיב ה-exe שלו הוא ServiceExe (Program Files). תהליך משתמש לעולם לא בסשן 0, ולכן נתיב לא קריא
-/// (אין גישת query) לא מפיל את החיבור — אחרת כשל קריאה היה חוסם גם את קוד השחזור (נעילה תקועה).
+/// השירות היה מקבל את הסיסמאות בטקסט גלוי. השרת האמיתי = התהליך שה-SCM מדווח כמריץ את השירות הרשום.
+/// WHY (באג VM): בדיקה לפי סשן + נתיב תמונה של תהליך השרת נכשלה למשתמש לא-מורם (OpenProcess/ProcessIdToSessionId על תהליך SYSTEM = access denied),
+/// ולכן כל קריאה נחסמה. שאילתת סטטוס ב-SCM (SERVICE_QUERY_STATUS) מותרת למשתמש רגיל, ותהליך משתמש אינו יכול להיות ה-pid של השירות.
 /// </summary>
 internal static class PipePeer
 {
-    internal static bool IsTrustedServer(string imagePath, int session, string serviceExe) =>
-        session == 0 && (string.IsNullOrEmpty(imagePath) || BridgeProcs.SamePath(imagePath, serviceExe));
+    /// <summary>pid שרת ה-pipe חייב להיות זהה ל-pid שה-SCM מדווח לשירות. ערך לא ידוע (0/שלילי) = לא מהימן (fail-closed). לא תלוי בנתיב/סשן</summary>
+    internal static bool IsServicePid(long pipeServerPid, long scmServicePid) =>
+        pipeServerPid > 0 && scmServicePid > 0 && pipeServerPid == scmServicePid;
 
     [DllImport("kernel32.dll")] private static extern bool GetNamedPipeServerProcessId(IntPtr pipe, out uint pid);
-    [DllImport("kernel32.dll")] private static extern bool ProcessIdToSessionId(uint pid, out uint session);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr OpenSCManager(string machine, string db, uint access);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr OpenService(IntPtr scm, string name, uint access);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool QueryServiceStatusEx(IntPtr svc, int infoLevel, IntPtr buf, int size, out int needed);
+    [DllImport("advapi32.dll")] private static extern bool CloseServiceHandle(IntPtr h);
 
-    /// <summary>הלקוח מאמת את השרת של ה-pipe המחובר. כל כשל (pid/נתיב/סשן לא ידועים) = לא מהימן (fail-closed)</summary>
+    private const uint SC_MANAGER_CONNECT = 0x1, SERVICE_QUERY_STATUS = 0x4;
+
+    /// <summary>ה-pid של תהליך השירות לפי ה-SCM (0 = לא רץ / אין שירות / אין גישה)</summary>
+    internal static uint ServicePidFromScm(string serviceName)
+    {
+        IntPtr scm = OpenSCManager(null, null, SC_MANAGER_CONNECT);
+        if (scm == IntPtr.Zero) return 0;
+        try
+        {
+            IntPtr svc = OpenService(scm, serviceName, SERVICE_QUERY_STATUS);
+            if (svc == IntPtr.Zero) return 0;
+            IntPtr buf = Marshal.AllocHGlobal(64);   // SERVICE_STATUS_PROCESS: dwCurrentState באופסט 4, dwProcessId באופסט 28
+            try
+            {
+                if (!QueryServiceStatusEx(svc, 0, buf, 64, out _)) return 0;
+                if (Marshal.ReadInt32(buf, 4) != 4) return 0;   // לא SERVICE_RUNNING
+                return (uint)Marshal.ReadInt32(buf, 28);
+            }
+            finally { Marshal.FreeHGlobal(buf); CloseServiceHandle(svc); }
+        }
+        finally { CloseServiceHandle(scm); }
+    }
+
+    /// <summary>הלקוח מאמת את השרת של ה-pipe המחובר. כל כשל (pid/SCM לא ידועים) = לא מהימן (fail-closed)</summary>
     internal static bool ServerIsService(IntPtr pipeHandle)
     {
         try
         {
             if (!GetNamedPipeServerProcessId(pipeHandle, out uint pid) || pid == 0) return false;
-            if (!ProcessIdToSessionId(pid, out uint sess)) return false;
-            return IsTrustedServer(BridgeProcs.ImagePath((int)pid), (int)sess, HardLock.ServiceExe);
+            return IsServicePid(pid, ServicePidFromScm(HardLock.ServiceName));
         }
         catch { return false; }
     }

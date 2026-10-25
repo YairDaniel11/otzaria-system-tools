@@ -20,15 +20,6 @@ public class ServiceHardeningR3Tests
     }
 
     [Fact]
-    public void Pipe_server_must_be_session0_and_service_path()
-    {
-        Assert.True(PipePeer.IsTrustedServer(Exe, 0, Exe));
-        Assert.False(PipePeer.IsTrustedServer(Exe, 1, Exe));                       // תהליך משתמש
-        Assert.False(PipePeer.IsTrustedServer(@"C:\Users\u\x.exe", 0, Exe));       // נתיב אחר
-        Assert.True(PipePeer.IsTrustedServer(null, 0, Exe));                      // נתיב לא קריא אבל סשן 0 (לא משתמש) - לא חוסם קוד שחזור
-    }
-
-    [Fact]
     public void Backoff_grows_exponentially_and_is_capped()
     {
         var l = new AttemptLimiter(maxFailures: 3, lockSeconds: 10, maxLockSeconds: 60);

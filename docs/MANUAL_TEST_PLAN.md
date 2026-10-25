@@ -60,7 +60,13 @@
 4. קיום `%ProgramData%\OtzariaBridge\net` (תיקיית חילוץ): כתיבה רק ל-SYSTEM/Admins. הגשר עולה (`/health`) ואין שגיאות ב-`service.log`. (פרק 4, פריט תיקיית חילוץ.)
 5. אתחול מחדש: השירות והגשר עולים לבד.
 
-צפוי: ללא נעילה, המחשב נראה רגיל. ב-`service.log` רשומות install/הכנה, בלי חריגות.
+6. **Boot hardening מופעל כבר בשלב הזה (מכוון, החלטת S1: "כל עוד השירות Configured", גם כשהנעילה כבויה).** אחרי ההתקנה: `reagentc /info` = Disabled, `bcdedit /enum` מראה `recoveryenabled No` + `bootstatuspolicy IgnoreAllFailures`, ויש `HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\OtzariaBridgeService` (וגם `Network`). כלומר המחשב כבר ללא WinRE גם בלי נעילה. זו לא תקלה.
+7. אימות pipe כמשתמש לא-מורם: `/kiosk/hard/status` מחזיר תשובה (לא 503), ובלוג הגשר אין "שרת ה-pipe אינו תהליך השירות המותקן". האימות הוא מול ה-pid ש-SCM מדווח לשירות (`sc queryex OtzariaBridgeService` > PID), לא מול נתיב/סשן.
+8. קיצור הדרך `קיוסק אוצריא.lnk` נוצר (גם כש-ACP של Windows אינו עברית).
+
+שחזור (לבטל את Boot hardening): הדרך המומלצת `--uninstall` (בסיסמה/קוד שחזור), שמחזיר הכול ממקור. ידנית, ממנהל מורם: `bcdedit /set {default} recoveryenabled Yes`, `reagentc /enable`, ומחיקת `reg delete HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\OtzariaBridgeService /f` וכן `...\SafeBoot\Network\OtzariaBridgeService`. (השירות עלול לאכוף מחדש כל עוד הוא Configured; לכן קודם `--uninstall`, או עצירה והשבתה `sc config OtzariaBridgeService start= disabled`.)
+
+צפוי: ללא נעילה, המחשב נראה רגיל (חוץ מהשינויי האתחול שלעיל). ב-`service.log` רשומות install/הכנה, בלי חריגות.
 נתקעים: `service.log` (כמנהל). אם הגשר לא עולה כלל: `--uninstall`, ואז snapshot.
 
 ### 3. pipe והתחברות
@@ -136,11 +142,12 @@
 נתקעים: אם נהרג תהליך נחוץ: לרשום שם+נתיב, לכבות נעילה, ולהוסיף לרשימה הלבנה (או לתקן בקוד) לפני פריסה.
 
 ### 10. Safe Mode ו-WinRE (**מסוכן; רק אחרי snapshot**)
-- [ ] עם נעילה פעילה: קיים `HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\OtzariaBridgeService` וגם `Network`.
+הערה: Boot hardening (WinRE כבוי, `recoveryenabled No`, SafeBoot) פעיל מרגע שהשירות Configured (שלב 2), **גם כשהנעילה כבויה**, לפי החלטת S1. "סגירת נעילה" לבדה לא מחזירה אותם; רק `--uninstall` (או שחזור ידני: `bcdedit /set {default} recoveryenabled Yes`, `reagentc /enable`, מחיקת מפתחות SafeBoot של OtzariaBridgeService).
+- [ ] עם השירות מותקן (נעילה פעילה או לא): קיים `HKLM\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\OtzariaBridgeService` וגם `Network`.
 - [ ] `reagentc /info`: Disabled. `bcdedit /enum`: `recoveryenabled No`, `bootstatuspolicy IgnoreAllFailures`, `bootmenupolicy Standard`. הקובץ `%ProgramData%\OtzariaBridge\boothardening.json` קיים עם ערכים מקוריים.
 - [ ] `msconfig` > Boot > Safe boot > Minimal, אתחול. צפוי: השירות רץ ואוכף. `--unlock` מ-cmd מורם עובד גם בתוך Safe Mode.
 - [ ] Safe Mode עם רשת.
-- [ ] סגירת נעילה: `bcdedit`/`reagentc` חוזרים למקור (רק מה שהשתנה). `boothardening.json` מתעדכן.
+- [ ] סגירת נעילה בלבד: הרכיב עדיין Configured, ולכן `bcdedit`/`reagentc`/SafeBoot נשארים מוקשחים (מכוון, S1). חזרה למקור (רק מה שהשתנה, `boothardening.json` מתעדכן) מתבצעת בהסרה.
 - [ ] הסרה מלאה (`--uninstall`): אין יותר רישום SafeBoot, WinRE חזר.
 - [ ] 3 כשלי אתחול מכוונים (כיבוי כוח באמצע עליית Windows): צפוי שאין "תיקון אוטומטי" וש-Windows עולה; לוודא שיש ISO.
 - [ ] המצב "recoveryenabled No": אם Windows לא עולה, ליפול ל-0.2 סעיף 4.

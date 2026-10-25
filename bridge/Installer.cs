@@ -1,5 +1,8 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+using System.Text;
 using Microsoft.Win32;
 
 namespace OtzariaBridge;
@@ -190,23 +193,47 @@ public static class Installer
         Process.Start(new ProcessStartInfo("explorer.exe", "\"" + PluginsDir + "\"") { UseShellExecute = true });
     }
 
+    // WHY: WScript.Shell מעביר את הנתיב דרך ה-ANSI codepage; כש-ACP אינו עברית 'קיוסק אוצריא.lnk' לא נשמר ("Unable to save shortcut").
+    // IShellLink + IPersistFile.Save הם Unicode מקצה לקצה.
+    [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IShellLinkW
+    {
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder f, int c, IntPtr fd, uint fl);
+        void GetIDList(out IntPtr p);
+        void SetIDList(IntPtr p);
+        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder f, int c);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string s);
+        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder f, int c);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string s);
+        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder f, int c);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string s);
+        void GetHotkey(out short h);
+        void SetHotkey(short h);
+        void GetShowCmd(out int i);
+        void SetShowCmd(int i);
+        void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder f, int c, out int i);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string s, int i);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string s, uint r);
+        void Resolve(IntPtr h, uint f);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string s);
+    }
+
+    [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+    private class ShellLinkCoClass { }
+
     private static void CreateShortcut()
     {
-        var t = Type.GetTypeFromProgID("WScript.Shell");
-        if (t == null) return;
-        dynamic shell = Activator.CreateInstance(t)!;
+        var link = (IShellLinkW)new ShellLinkCoClass();
         try
         {
-            dynamic lnk = shell.CreateShortcut(ShortcutPath);
-            lnk.TargetPath = InstalledExe;
-            lnk.Arguments = "--background";
-            lnk.WorkingDirectory = Config.Dir;
-            lnk.Description = Program.AppFullName;
-            lnk.IconLocation = InstalledExe + ",0";
-            lnk.Save();
-            System.Runtime.InteropServices.Marshal.FinalReleaseComObject(lnk);
+            link.SetPath(InstalledExe);
+            link.SetArguments("--background");
+            link.SetWorkingDirectory(Config.Dir);
+            link.SetDescription(Program.AppFullName);
+            link.SetIconLocation(InstalledExe, 0);
+            ((IPersistFile)link).Save(ShortcutPath, true);
         }
-        finally { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shell); }
+        finally { Marshal.FinalReleaseComObject(link); }
     }
 
     private static void StopOtherInstances()
