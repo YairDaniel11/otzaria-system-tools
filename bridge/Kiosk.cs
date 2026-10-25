@@ -240,7 +240,7 @@ public static partial class Kiosk
                       (allowRecovery && Matches(Secret.NormalizeRecovery(password), "kiosk.recoveryHash", "kiosk.recoverySalt"));
             if (ok)
             {
-                _failures = 0;
+                ResetBackoff();
                 return;
             }
             Fail("סיסמה שגויה");
@@ -250,6 +250,7 @@ public static partial class Kiosk
     /// <summary>השהיה אחרי 5 ניסיונות שגויים — משותפת לסיסמת הנעילה ולסיסמת הפתיחה הזמנית. נקרא תחת Gate</summary>
     private static void ThrowIfLockedOut()
     {
+        LoadBackoff();
         if (DateTime.UtcNow < _lockoutUntil)
         {
             int secs = (int)Math.Ceiling((_lockoutUntil - DateTime.UtcNow).TotalSeconds);
@@ -257,14 +258,55 @@ public static partial class Kiosk
         }
     }
 
-    /// <summary>רושם ניסיון שגוי (ואחרי 5 — השהיה של דקה) וזורק. נקרא תחת Gate</summary>
+    private static bool _backoffLoaded;
+    private static long _lastFailTicks;
+
+    /// <summary>טוען מצב backoff שנשמר (שורד אתחול). WHY: קודם הכל היה בזיכרון ואתחול איפס את ההשהיה. נקרא תחת Gate</summary>
+    private static void LoadBackoff()
+    {
+        if (_backoffLoaded) return;
+        _backoffLoaded = true;
+        try
+        {
+            long now = DateTime.UtcNow.Ticks;
+            _lastFailTicks = Config.Get<long>("kiosk.bo.last", 0);
+            _failures = BridgeBackoff.EffectiveFails(Config.Get<int>("kiosk.bo.fails", 0), _lastFailTicks, now);
+            long until = BridgeBackoff.ClampUntil(Config.Get<long>("kiosk.bo.until", 0), now);
+            _lockoutUntil = until > 0 ? new DateTime(until, DateTimeKind.Utc) : DateTime.MinValue;
+        }
+        catch (Exception ex) { Config.Log("backoff load: " + ex.Message); }
+    }
+
+    private static void SaveBackoff()
+    {
+        try
+        {
+            Config.Set("kiosk.bo.fails", _failures);
+            Config.Set("kiosk.bo.last", _lastFailTicks);
+            Config.Set("kiosk.bo.until", _lockoutUntil == DateTime.MinValue ? 0L : _lockoutUntil.Ticks);
+            Config.Save();
+        }
+        catch (Exception ex) { Config.Log("backoff save: " + ex.Message); }
+    }
+
+    /// <summary>הצלחה: מאפסת (גם בקובץ). [x1] נקודת חיבור מ-Verify/VerifyTempSecret</summary>
+    private static void ResetBackoff()
+    {
+        LoadBackoff();
+        if (_failures == 0 && _lockoutUntil == DateTime.MinValue) return;
+        _failures = 0; _lockoutUntil = DateTime.MinValue; _lastFailTicks = 0;
+        SaveBackoff();
+    }
+
+    /// <summary>רושם ניסיון שגוי (מ-5: השהיה 1,2,4,... דקות עד שעה, נשמרת) וזורק. נקרא תחת Gate. קוד שחזור/--unlock לא עוברים כאן</summary>
     private static void Fail(string message)
     {
-        if (++_failures >= 5)
-        {
-            _failures = 0;
-            _lockoutUntil = DateTime.UtcNow.AddSeconds(60);
-        }
+        LoadBackoff();
+        _failures++;
+        _lastFailTicks = DateTime.UtcNow.Ticks;
+        int lockSecs = BridgeBackoff.LockSeconds(_failures);
+        if (lockSecs > 0) _lockoutUntil = DateTime.UtcNow.AddSeconds(lockSecs);
+        SaveBackoff();
         throw new BridgeException("wrong_password", message, 401);
     }
 
@@ -623,7 +665,7 @@ public static partial class Kiosk
         lock (Gate)
         {
             ThrowIfLockedOut();
-            if (Matches(secret, KTuHash, KTuSalt)) { _failures = 0; return; }
+            if (Matches(secret, KTuHash, KTuSalt)) { ResetBackoff(); return; }
             Fail("סיסמת הפתיחה הזמנית שגויה");
         }
     }

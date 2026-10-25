@@ -674,7 +674,7 @@ public static class HardLock
             else
                 Sc($"config {ServiceName} binPath= \"{bin.Replace("\"", "\\\"")}\" start= auto DisplayName= \"{Program.AppFullName}\"");
             Sc($"description {ServiceName} \"{Program.AppFullName} — רכיב הנעילה המוקשחת\"");
-            Sc($"failure {ServiceName} reset= 86400 actions= restart/5000/restart/5000/restart/30000");
+            foreach (string a in ServiceRecovery.FailureArgs(ServiceName)) Sc(a);
 
             PrepareBundleDir();
             using var sc = new ServiceController(ServiceName);

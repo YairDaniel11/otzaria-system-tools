@@ -861,3 +861,42 @@ internal sealed class LogThrottle
         return true;
     }
 }
+
+/// <summary>
+/// הגדרות התאוששות השירות ב-SCM.
+/// WHY: reset=86400 עם 3 פעולות restart בלבד גרר שאחרי הכשל הרביעי ביממה אין פעולה והשירות נשאר למטה (נעילה נעלמת).
+/// עכשיו: חלון איפוס קצר (15 דקות) ושרשרת restart ארוכה שהפעולה האחרונה בה חוזרת (SCM חוזר על הפעולה האחרונה),
+/// ו-failureflag כדי שגם יציאה עם קוד שגיאה (לא רק קריסה) תפעיל התאוששות.
+/// </summary>
+internal static class ServiceRecovery
+{
+    internal const int ResetSeconds = 900;
+    internal const string Actions = "restart/5000/restart/5000/restart/10000/restart/30000/restart/60000";
+
+    internal static string[] FailureArgs(string service) => new[]
+    {
+        $"failure {service} reset= {ResetSeconds} actions= {Actions}",
+        $"failureflag {service} 1",
+    };
+}
+
+/// <summary>
+/// backoff מעריכי להגבלת ניסיונות סיסמה בגשר (מצב מקומי, כשהשירות לא זמין). מצב טהור + נשמר ב-Config.
+/// WHY: קודם 5 ניסיונות = דקה בזיכרון בלבד ואיפוס באתחול. עכשיו הספירה והמועד נשמרים בהגדרות (חתומות ע"י ConfigSeal כשהשירות פעיל),
+/// וההשהיה גדלה 1,2,4,... דקות עד שעה. סיסמה נכונה מאפסת. השעה נחתכת לתקרה כך ששעון שגוי לא נועל מעבר לשעה.
+/// </summary>
+internal static class BridgeBackoff
+{
+    internal const int Threshold = 5, BaseSeconds = 60, CapSeconds = 3600, ForgetHours = 24;
+
+    internal static int LockSeconds(int fails) =>
+        fails < Threshold ? 0 : (int)Math.Min((long)BaseSeconds << Math.Min(fails - Threshold, 20), CapSeconds);
+
+    /// <summary>מועד סיום ההשהיה (UTC ticks) לאחר ספירת כשלונות; 0 = אין. חתוך לתקרה ביחס ל-now</summary>
+    internal static long ClampUntil(long untilTicks, long nowTicks) =>
+        untilTicks <= nowTicks ? 0 : Math.Min(untilTicks, nowTicks + TimeSpan.TicksPerSecond * CapSeconds);
+
+    /// <summary>ספירה ישנה (יותר מ-ForgetHours מהכשל האחרון) נשכחת</summary>
+    internal static int EffectiveFails(int fails, long lastTicks, long nowTicks) =>
+        lastTicks > 0 && nowTicks - lastTicks > TimeSpan.TicksPerHour * ForgetHours ? 0 : Math.Max(0, fails);
+}
