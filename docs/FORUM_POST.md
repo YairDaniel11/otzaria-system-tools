@@ -12,11 +12,11 @@
 
 שני התוספים בעברית ובאנגלית, עם כפתור "שליחת הערה" דרך מערכת הדיווח של אוצריא.
 
-**הורדה:** https://github.com/e0548433917-gif/otzaria-system-tools/releases/latest
+**הורדה:** https://github.com/e0548433917-gif/achat-shaalti/releases/latest
 1. מפעילים פעם אחת את `OtzariaBridge.exe`.
 2. באוצריא: התקנת תוסף מקובץ → `file-explorer.otzplugin` ו-`system-settings.otzplugin`.
 
-הקוד עבר לריפו נפרד: https://github.com/e0548433917-gif/otzaria-system-tools
+הקוד עבר לריפו נפרד: https://github.com/e0548433917-gif/achat-shaalti
 
 **עדיין צריך עזרה — כפי שנכתב כאן בשרשור:**
 - בדיקה על כמה שיותר מחשבים (Windows 10/11, נייח ונייד) — בעיקר Wi-Fi, החלפת התקן שמע ובלוטות׳.

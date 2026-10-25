@@ -53,6 +53,8 @@ public static class Server
         FsApi.Register();
         RecycleApi.Register();
         OcrApi.Register();
+        SnipApi.Register();
+        OneOcrApi.Register();
         UpdateApi.Register();
         SysApi.Register();
         OfflineMode.Register();
@@ -60,9 +62,20 @@ public static class Server
         MoreApi.Register();
         BiosHardening.Register();
         Kiosk.Register();
+        PackG.Register();
+        BackupCodes.Register(); // #69: קודי גיבוי חד-פעמיים
         Pairing.Register();
         HardLock.Register();
         Zmanim.Register();
+        Theme.Register();
+        AdminLog.Register();
+        SettingsIO.Register();
+        PdfApi.Register();      // שלבים א-ב של docs/PDF-INTEGRATION-SPEC.md
+        PdfOps.Register();      // שלב ג: פעולות PDF במנוע מותקן (PDF24/Ghostscript, qpdf)
+        CompassApi.Register();  // כיוון תפילה: כיוון הצפון
+        PdfAssoc.Register();    // שלב ד: "פתח באמצעות" לתוסף + תור פתיחה
+        LocationApi.Register(); // מיקום מ-Windows ו-/feedback (כיוון תפילה 2.6)
+        LocationAddress.Register(); // #105: כתובת לפי מיקום (MapLocationFinder, ניסיון בלבד)
 
         int port = FindPort();
         var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = AppContext.BaseDirectory });
@@ -157,7 +170,7 @@ public static class Server
             // בעיה #2: בקשת צימוד היא הנקודה היחידה שפתוחה בלי מפתח; היא מציגה חלון אישור למשתמש
             if (path.Equals("/pair/request", StringComparison.OrdinalIgnoreCase))
             {
-                await WriteOk(ctx, await Pairing.Request(body));
+                await WriteOk(ctx, await Pairing.Request(body, ctx.Connection.RemotePort));
                 return;
             }
             if (path.Equals("/fs/search", StringComparison.OrdinalIgnoreCase))
@@ -173,7 +186,9 @@ public static class Server
             string section = Kiosk.SectionOf(path, body);
             if (section != null) Kiosk.EnsureSectionAllowed(section);
 
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             object data = await handler(body);
+            if (sw.ElapsedMilliseconds > 1500) Config.Log("slow " + path + " " + sw.ElapsedMilliseconds + "ms"); /* משוב 3.9: לאתר מה מאט את טאב הנעילה */
             await WriteOk(ctx, data);
         }
         catch (Exception ex)

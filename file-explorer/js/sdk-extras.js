@@ -13,9 +13,12 @@
   X.call = call;
 
   /* התראות: notifications.system, ואם אין - הודעה בתוך האפליקציה */
+  /* #69: שם הקריאה הנכון הוא notifications.sendSystem (notifications.system הוא שם ההרשאה — הקריאה הקודמת תמיד נכשלה) */
+  function tr(s) { return window.I18N && I18N.t ? I18N.t(s) : s; }
   X.notify = async function (title, body) {
-    var r = await call('notifications.system', { title: title, body: body || '' });
-    if (r == null) await call('notifications.showInApp', { message: title + (body ? ' — ' + body : '') });
+    title = tr(title); body = body ? tr(body) : '';
+    var r = await call('notifications.sendSystem', { title: title, body: body });
+    if (r == null) await call('notifications.showInApp', { message: title + (body ? ' — ' + body : ''), type: 'info' });
   };
 
   /* לוח: clipboard.read, ואם אין - ה-API של הדפדפן */
@@ -39,9 +42,11 @@
 
   /* שינוי שפה/ערכת נושא חי (events.subscribe:settings.changed) */
   on('settings.changed', function (p) {
-    var lang = p && (p.locale || p.language || (p.settings && p.settings.locale));
-    if (lang && window.I18N && window.I18N.set && (!window.I18N.pref || window.I18N.pref() === 'auto')) {
-      window.I18N.set(/^en/i.test(lang) ? 'en' : 'he');
+    /* #69: רק כשהשפה באמת התחלפה, ובלי לשמור העדפה (אחרת "אוטומטי" היה הופך לקבוע, וכל שינוי הגדרה באוצריא טען את הדף מחדש) */
+    var lang = p && (p.locale || p.language || (p.settings && p.settings.locale) || (p.key === 'key-language' && p.value));
+    if (lang && window.I18N && I18N.lang && (!I18N.pref || I18N.pref() === 'auto')) {
+      var want = /^en/i.test(lang) ? 'en' : 'he';
+      if (want !== I18N.lang()) { try { location.reload(); } catch (e) { /* כלום */ } }
     }
   });
 
@@ -53,21 +58,22 @@
     if (!Array.isArray(list)) return;
     if (granted && !first) {
       var lost = granted.filter(function (p) { return list.indexOf(p) < 0; });
-      if (lost.length) X.notify('הרשאה כובתה', 'חלק מהיכולות לא יעבדו: ' + lost.join(', ') + '. אפשר להפעיל מחדש בהגדרות התוספים של אוצריא.');
+      if (lost.length) X.notify('הרשאה כובתה', tr('חלק מהיכולות לא יעבדו:') + ' ' + lost.join(', ') + '. ' + tr('אפשר להפעיל מחדש בהגדרות התוספים של אוצריא.'));
     }
     granted = list;
   }
   on('plugin.permissions_changed', function () { checkPerms(false); });
   checkPerms(true);
 
-  /* קיצור מקלדת (app.shortcuts): Ctrl+Shift+E פותח את הסייר. ניתן לשינוי: storage 'shortcut.explorer' */
-  X.registerShortcut = async function (id, keys, onCmd) {
-    await call('app.registerShortcut', { id: id, keys: keys, shortcut: keys });
-    on('app.command', function (p) { if (p && (p.id === id || p.command === id)) onCmd(); });
-  };
+  /* #69: קיצורי מקלדת מוצהרים במניפסט (contributes.startup.shortcuts) — אוצריא מעירה את התוסף גם כשהדף לא פתוח,
+     והמשתמש יכול לשנות/לבטל אותם בהגדרות → קיצורי מקשים. כאן רק מאזינים לאירוע app.command ({ command, shortcutId }) */
+  var cmds = {};
+  on('app.command', function (p) { var f = p && (cmds[p.command] || cmds[p.shortcutId]); if (f) f(p); });
+  X.onCommand = function (command, fn) { cmds[command] = fn; };
+  X.openSelf = function (param) { return call('plugin.openSelf', param == null ? {} : { param: param }); };
 
   /* ספרים מתוסף בחיפוש הספרייה (library.books.provide): קובצי PDF/Word מתיקיות שנבחרו */
-  X.setLibraryBooks = function (books) { return call('library.setProviderBooks', { books: books }); };
+  X.setLibraryBooks = function (books, provider) { return call('library.setProviderBooks', { provider: provider || 'fxfolders', books: books }); };
   X.onLibraryBookOpen = function (fn) { on('library.providerBook.openRequested', fn); };
 
   X.self = SELF;

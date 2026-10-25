@@ -7,14 +7,22 @@ namespace OtzariaBridge;
 
 public static class Program
 {
-    public const string Version = "3.6.1";
+    // הגרסה נגזרת מ-<Version> שב-csproj (מקור אחד) — קבוע ידני נשכח ב-3.8.5 והגשר דיווח 3.8.0
+    public static readonly string Version = typeof(Program).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
     public static int Port { get; set; }
 
-    // שם המוצר (מהגרסה האישית/פורק הזה): "קיוסק אוצריא", בלי זיקה לשם הגמ"ח הקודם
-    public const string AppName = "קיוסק אוצריא";
-    public const string AppNameEn = "Otzaria Kiosk";
-    public const string AppFullName = AppName + " - תוכנה לחסימת המחשב ללימוד";
-    public const string AppFullNameEn = AppNameEn + " - software for locking the computer for study";
+    // שם המוצר (13.10.2026): "אחת שאלתי". קודם: "תוכנת חסימת אוצריא". הוחלף מ"תורת אסתר" לשם שמתאר בעברית פשוטה את מה שהתוכנה עושה, כי "קיוסק" ואפילו
+    // "תורת אסתר" לבדו לא היו ברורים למשתמשים בלי רקע טכני. "תורת אסתר" נשאר כשם ההנצחה (הגמ"ח).
+    public const string AppName = "אחת שאלתי";
+    public const string AppNameEn = "Achat Sha'alti";
+    public const string GemachName = "גמח תורת אסתר";
+    public const string GemachNameEn = "Torat Esther Gemach";
+    // סלוגן מדויק לפי בעלת הריפו (14.10.2026)
+    public const string Slogan = "תוכנת חסימת מחשב לתוכנות תורניות בלבד";
+    public const string SloganEn = "Computer lock for Torah software only";
+    public const string Dedication = "לע\"נ אסתר גיטה דינר ע\"ה";
+    public const string AppFullName = AppName + " - " + Slogan;
+    public const string AppFullNameEn = AppNameEn + " — " + SloganEn;
 
     [DllImport("kernel32.dll")] private static extern bool AttachConsole(int pid);
 
@@ -28,7 +36,15 @@ public static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        // בקשות הגשר חוסמות חוטים (powercfg/WMI/PowerShell) — בלי הגדלת המינימום ה-ThreadPool מתנפח לאט ובקשת /health נתקעת מאחוריהן, והתוסף חושב שהגשר נפל
+        System.Threading.ThreadPool.SetMinThreads(64, 64);
+        string Arg(string name)
+        {
+            int i = Array.IndexOf(args, name);
+            return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+        }
         bool Has(string name) => Array.IndexOf(args, name) >= 0;
+        var stc = SelfTestMore.Child(args); if (stc != null) return stc.Value; // E1/E4
 
         try
         {
@@ -89,15 +105,22 @@ public static class Program
 
             InstallTrust.CaptureSelf(); // גיבוב ה-exe הרץ נתפס עכשיו (לאימות התקנה מוגברת מאוחרת), לפני שמשתמש יספיק להחליף את הקובץ
 
+            // "פתח באמצעות ← צופה PDF+OCR": הקובץ נכנס לתור ואוצריא נפתחת בתוסף; אם הגשר כבר רץ — יוצאים, אחרת ממשיכים לעלות כרגיל
+            if (Has("--open-pdf")) PdfAssoc.Enqueue(Arg("--open-pdf"));
+
             using var mutex = new Mutex(true, @"Local\OtzariaBridge", out bool first);
             if (ShouldExitOnMutex(first, Has("--from-service"))) return 0;
+            Installer.CleanupOldExe();
 
             Application.SetHighDpiMode(HighDpiMode.SystemAware);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
             Tray.Init();
+            Screenshot.Init(); // #60
             Outbox.Init();
+            GhRelay.Init(); GhFeedback.Register();
+            Watermark.Init();
             Reports.Init();
             Port = Server.Start();
             Kiosk.RestoreOnStartup();
@@ -105,6 +128,10 @@ public static class Program
             Kiosk.StartScheduler();
             UpdateRollback.StartHealthReporter(); // X3 (נקודת חיבור): סימן תקינות אחרי עדכון
             HandleLock.StartSync();               // X3 (נקודת חיבור): handle ללא FILE_SHARE_DELETE בזמן נעילה
+            Zmanim.StartAlerts(); // #33
+            LockScreenImage.Start(); // משוב 15.10
+            Saver.Start(); // D2+D3
+            SelfTest.Init(); // D6
             // אכיפת FxPolicy/Kiosk.AllowedExtensions על דיאלוגי פתיחה/שמירה מקוריים של Windows בכל תהליך
             // (בעיה #53/וורד: "קובץ ← פתיחה ← עיון" בתוכנה חיצונית מאושרת עוקף את הסייר הפנימי). ר' DialogGuard.cs
             DialogGuard.Start();
@@ -161,6 +188,11 @@ public static class Config
         }
     }
 
+    public static bool Has(string key)
+    {
+        lock (Gate) { return Data[key] != null; }
+    }
+
     public static bool HasList(string key)
     {
         lock (Gate) { return Data[key] is JsonArray; }
@@ -179,6 +211,15 @@ public static class Config
     public static void Set(string key, JsonNode value)
     {
         lock (Gate) { Data[key] = value; }
+    }
+
+    public static string[] Keys()
+    {
+        lock (Gate) { return Data.Select(kv => kv.Key).ToArray(); }
+    }
+    public static JsonNode Raw(string key)
+    {
+        lock (Gate) { return Data[key]?.DeepClone(); }
     }
 
     public static void Remove(string key)

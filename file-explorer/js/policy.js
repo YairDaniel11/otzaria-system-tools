@@ -93,6 +93,8 @@
       var shell = document.querySelector('.fx-shell');
       var box = document.getElementById('fx-lock');
       if (!shell || !box) return;
+      /* כבר מוצג: לא בונים מחדש (בנייה מחדש מוחקת את מה שהוקלד ומאבדת פוקוס אחרי כל ספרה) */
+      if (box.querySelector('#fx-lock-pw')) { shell.classList.add('is-locked'); return; }
       var mins = state && state.unlockMinutes || 15;
       box.innerHTML = '<div class="fx-lock-card">' +
         '<div class="fx-lock-ic">' + ic('lock') + '</div>' +
@@ -134,7 +136,7 @@
     editorHtml: function () {
       if (!available()) {
         return '<div class="fx-set-card"><div class="fx-set-title">' + ic('lock') + 'נעילה והגבלה של הסייר</div>' +
-          '<p class="muted">הגדרות הנעילה דורשות את קיוסק אוצריא. בלעדיה הסייר מוגבל ממילא לתיקיות שאישרתם.</p></div>';
+          '<p class="muted">הגדרות הנעילה דורשות את תוכנת חסימת אוצריא. בלעדיה הסייר מוגבל ממילא לתיקיות שאישרתם.</p></div>';
       }
       var s = state || { mode: 'off', roots: [], unlockMinutes: 15, defaults: [], effective: 'open' };
       var chosen = (s.roots || []).map(function (r) { return String(r).toLowerCase(); });
@@ -146,8 +148,10 @@
         return '<label class="fx-pol-mode"><input type="radio" name="fx-pol-mode" value="' + v + '"' + (s.mode === v ? ' checked' : '') + '>' +
           '<span><b>' + title + '</b><span class="muted small">' + hint + '</span></span></label>';
       }
-      var status = s.effective === 'locked' ? 'מצב נוכחי: נעול' : s.effective === 'restricted' ? 'מצב נוכחי: מוגבל לתיקיות שנבחרו' :
-        (s.tempUnlockSeconds > 0 && s.mode !== 'off' ? 'מצב נוכחי: פתוח (המחשב פתוח זמנית)' : 'מצב נוכחי: פתוח');
+      /* מצב נוכחי בצבע: ירוק = פתוח, אדום = נעול, כתום = מוגבל לתיקיות */
+      var polTemp = s.tempUnlockSeconds > 0 && s.mode !== 'off';
+      var status = 'מצב נוכחי: ' + (s.effective === 'locked' ? '<span class="pol-state bad"><i></i>נעול</span>' : s.effective === 'restricted' ? '<span class="pol-state mid"><i></i>מוגבל לתיקיות שנבחרו</span>' :
+        '<span class="pol-state ok"><i></i>פתוח</span>' + (polTemp ? ' (המחשב פתוח זמנית)' : ''));
       var warn = (s.invalidRoots || []).length
         ? '<div class="form-msg">תיקיות שאינן קיימות עוד מדולגות: ' + esc(s.invalidRoots.join(', ')) + (s.fallback ? '. אין תיקיות תקפות, ולכן הסייר נעול.' : '') + '</div>' : '';
       return '<div class="fx-set-card fx-pol"><div class="fx-set-title">' + ic('lock') + 'נעילה והגבלה של הסייר</div>' +

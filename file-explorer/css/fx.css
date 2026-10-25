@@ -245,7 +245,7 @@ body.fx-busy .fx-list { pointer-events: none; opacity: 0.7; }
 @media (max-width: 45em) { .fx-doc.two { column-count: 1; } .fx-doc { padding: 1em; } }
 
 /* אייקוני הקו של הסייר */
-svg.ic { fill: none; stroke: currentColor; stroke-width: 1.85; stroke-linecap: round; stroke-linejoin: round; }
+svg.ic { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 svg.ic .fill { fill: currentColor; fill-opacity: 0.16; }
 /* איזון משקל חזותי בין 8 מצבי התצוגה: עובי הקו של ה-SVG קבוע ביחידות ה-viewBox (24x24), אז כשאותו
    אייקון מוצג בגדלים שונים מאוד (18px ב"סמלים קטנים" עד 80px ב"סמלים גדולים מאוד") עובי הקו בפיקסלים
@@ -531,3 +531,48 @@ mark.fx-hit.cur { background: var(--color-tertiary-container); color: var(--colo
 .topbar .fx-nav .icon-btn { width: 2em; height: 2em; }
 .topbar .fx-crumbs, .topbar .fx-search .input { height: 2em; }
 .topbar .fx-search { flex-basis: 14em; }
+
+/* #56: ספרים מספריית אוצריא בזמן חיפוש */
+.fx-libhits { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--color-outline-variant); }
+.fx-libhits-title { font-weight: 600; margin-inline-end: 6px; }
+.fx-libhit { border: 1px solid var(--color-outline-variant); background: var(--color-primary-subtle, transparent); color: inherit; border-radius: 14px; padding: 2px 10px; cursor: pointer; font: inherit; }
+.fx-libhit:hover, .fx-libhit:focus-visible { border-color: var(--color-primary); }
+
+/* בורר מקטעים (תצוגה/גודל טקסט): נשבר לשורות בצורה נקייה — כרטיסיות מעוגלות עם רווח, בלי מסגרת כמוסה שנשברת */
+.fx-seg { gap: 0.25em; padding: 0.25em; border: 0; background: var(--color-surface-container); border-radius: var(--radius-md); overflow: visible; max-width: 100%; }
+.fx-seg-btn { border-radius: calc(var(--radius-md) - 0.25em); }
+.fx-seg-btn + .fx-seg-btn { border-inline-start: 0; }
+
+/* עמוד ההגדרות: התוכן ממלא את כל הרוחב (בלי אזור ריק בצד) */
+.fx-set-content { max-width: none; }
+.fx-set-lockcard { text-align: center; padding: 1.25em; }
+.fx-lock-btn { width: 100%; justify-content: center; font-size: 1.2em; padding: 0.9em 1em; gap: 0.6em; }
+.fx-lock-btn .ic { width: 1.4em; height: 1.4em; }
+
+/* אודות: כותרת וגרסה במרכז */
+.fx-set-hero > div:last-child { flex: 1; min-width: 0; }
+.fx-set-hero h3, .fx-set-hero p.muted { text-align: center; }
+
+/* כפתורי "English" ו"הצגת קבצים מוסתרים" הוסרו מסרגל העליון — שניהם קיימים בהגדרות (כללי / תצוגה) */
+#fx-lang, #fx-hidden { display: none !important; }
+
+/* גודל טקסט: מגדיל במלואו את רשימת הקבצים, אבל את הממשק (כפתורים, סרגלים, הגדרות) רק בשליש מההגדלה — כדי שהכפתורים לא יתנפחו */
+:root { --fx-ui-zoom: calc(0.9 + (var(--fx-zoom) - 0.9) * 0.35); }
+.fx-shell, .fx-viewer, #dialogs, .fx-menu, #toasts { font-size: calc(var(--fx-ui-zoom) * 1em); }
+.fx-setpage { font-size: calc(var(--fx-ui-zoom) * 1em); }
+.fx-list { font-size: calc(var(--fx-zoom) / var(--fx-ui-zoom) * 1em); }
+
+/* חיפוש הגדרה בראש עמוד ההגדרות */
+.fx-set-search { width: 100%; box-sizing: border-box; padding: 0.6em 0.9em; margin-bottom: 0.5em; border: 1px solid var(--color-outline-variant); border-radius: var(--radius-md); background: var(--color-surface); color: inherit; font: inherit; }
+.fx-set-search:focus { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+
+/* מצב נוכחי: ירוק = פתוח/דולק, אדום = נעול/כבוי, כתום = מוגבל */
+.pol-state { display: inline-flex; align-items: center; gap: 0.4em; font-weight: 700; padding: 0.1em 0.75em; border-radius: 99px; }
+.pol-state i { width: 0.6em; height: 0.6em; border-radius: 50%; background: currentColor; display: inline-block; }
+.pol-state.ok { color: var(--color-ok); background: color-mix(in srgb, var(--color-ok) 16%, transparent); }
+.pol-state.bad { color: var(--color-error); background: color-mix(in srgb, var(--color-error) 14%, transparent); }
+.pol-state.mid { color: #B26A00; background: rgba(178, 106, 0, 0.14); }
+
+/* אודות: הטקסט התיאורי גדול ומודגש יותר */
+.fx-set-hero p:not(.muted) { font-size: 1.2em; font-weight: 600; line-height: 1.7; text-align: center; }
+.fx-set-hero p.muted { font-size: 1.05em; }

@@ -17,6 +17,7 @@ public static partial class Kiosk
 
     private static System.Threading.Timer _fastGuard;
     private static int _fastBusy;
+    private static readonly int MySession = Process.GetCurrentProcess().SessionId;
 
     private static void StartFastGuard() => _fastGuard ??= new System.Threading.Timer(_ => FastGuard(), null, 0, 300);
 
@@ -60,18 +61,24 @@ public static partial class Kiosk
 
     private static void FastGuard()
     {
-        if (!IsActive || Interlocked.Exchange(ref _fastBusy, 1) == 1) return;
+        if (!IsActive)
+        {
+            if (_taskbarHidden) SetTaskbars(true); // Release כבר רץ - לא משאירים את שורת המשימות מוסתרת
+            return;
+        }
+        if (Interlocked.Exchange(ref _fastBusy, 1) == 1) return;
         try
         {
-            if (_snipSeen != DateTime.MinValue) SetTaskbars(false); // explorer חי בזמן הצילום - שורת המשימות לא תוצג
-            else if (_taskbarHidden) SetTaskbars(true);             // הצילום הסתיים: מחזירים (explorer יעלה מחדש/יימחק כרגיל)
+            // כל עוד הנעילה פעילה שורת המשימות מוסתרת: Windows מרימה את explorer מחדש אחרי כל הריגה (כל 2 שניות),
+            // והסתרה בכל מחזור של 300ms מונעת מהפס להבהב (דיווח בפורום). שחרור הנעילה מחזיר אותה (StopFastGuard).
+            SetTaskbars(false);
 
             IntPtr fg = GetForegroundWindow();
             if (fg == IntPtr.Zero) return;
             GetWindowThreadProcessId(fg, out uint pid);
             if (pid == 0 || pid == (uint)Environment.ProcessId) return;
             using var p = Process.GetProcessById((int)pid);
-            if (p.SessionId != Process.GetCurrentProcess().SessionId) return;
+            if (p.SessionId != MySession) return;
 
             string name = p.ProcessName;
             var sb = new StringBuilder(128);
@@ -81,7 +88,8 @@ public static partial class Kiosk
             bool closeIt =
                 name.Equals("PickerHost", StringComparison.OrdinalIgnoreCase) ||   // [s2] WHY: בלי תלות במחלקה (#32770 בלבד החמיץ חלונות אחרים של PickerHost)
                 (name.Equals("explorer", StringComparison.OrdinalIgnoreCase) &&
-                 cls is "ApplicationFrameWindow" or "XamlExplorerHostIslandWindow" or "CabinetWClass" or "#32770"); // [r1] #32770 = חלון Run (Win+R/הפעלה) של explorer, גם בזמן צילום
+                 (cls is "ApplicationFrameWindow" or "XamlExplorerHostIslandWindow" or "#32770" || // [r1] #32770 = חלון Run (Win+R/הפעלה) של explorer, גם בזמן צילום
+                  (cls == "CabinetWClass" && !Programs.InForegroundGrace))); // "הצגה בסייר Windows" נפתח בכוונה, עם חלון חסד
             if (closeIt)
             {
                 PostMessage(fg, 0x0010 /* WM_CLOSE */, IntPtr.Zero, IntPtr.Zero);

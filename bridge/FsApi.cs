@@ -46,6 +46,8 @@ public static class FsApi
         Server.Route("/fs/delete", Delete);
         Server.Route("/fs/read", Read);
         Server.Route("/fs/write-text", WriteText);
+        Server.Route("/fs/write-binary", WriteBinary);
+        Server.Route("/fs/pick-save-file", PickSaveFile);
         Server.Route("/fs/open", Open);
         Server.Route("/fs/reveal", Reveal);
         Server.Route("/fs/clipboard-get", _ => ClipboardGet());
@@ -599,9 +601,13 @@ public static class FsApi
         string path = FullPath(b.Req("path"));
         if (!File.Exists(path)) throw BridgeException.NotFound("הקובץ לא נמצא: " + path);
         long max = Math.Clamp(b.Long("maxBytes", 5L * 1024 * 1024), 1, 50L * 1024 * 1024);
+        // offset: קריאה בחלקים של קובץ גדול מ-50MB. binary: תמיד base64 (גם בסיומת טקסט), כדי שחיתוך באמצע תו לא ישבש.
+        long offset = Math.Max(0, b.Long("offset", 0));
+        bool binary = b.Bool("binary");
         var fi = new FileInfo(path);
         string ext = fi.Extension;
         long flen;
+        bool truncated;
         byte[] buf;
         // TOCTOU: הבדיקה (סודות + מדיניות) על הנתיב הסופי של ה-handle שנפתח בפועל, והקריאה ממנו. לא נפתח שוב בשם
         using (var fs = PathPolicy.OpenVerifiedRead(path, fin => { EnsureNotReadable(fin); FxPolicy.EnsurePathAllowed(fin); }))
@@ -610,8 +616,12 @@ public static class FsApi
             if (Kiosk.IsActive && PathPolicy.HardLinkCountOfHandle(fs.SafeFileHandle) > 1)
                 throw BridgeException.Forbidden("הקובץ מקושר בקישור קשיח (hardlink) לשם נוסף: הקריאה חסומה");
             flen = fs.Length;
-            int len = (int)Math.Min(flen, max);
+            // offset (upstream): קריאה בחלקים; המדיניות והבדיקות כבר רצו על ה-handle
+            long remaining = Math.Max(0, flen - offset);
+            truncated = remaining > max;
+            int len = (int)Math.Min(remaining, max);
             buf = new byte[len];
+            if (offset > 0) fs.Seek(Math.Min(offset, fs.Length), SeekOrigin.Begin);
             int read = 0;
             while (read < len)
             {
@@ -622,14 +632,13 @@ public static class FsApi
             if (read < len) Array.Resize(ref buf, read);
         }
 
-        bool truncated = flen > max;
         string mime = Mime.TryGetValue(ext, out var m) ? m : "application/octet-stream";
-        if (TextExt.Contains(ext))
+        if (!binary && offset == 0 && TextExt.Contains(ext))
         {
             string content = DecodeText(buf);
-            return new { name = fi.Name, size = flen, mime, encoding = "utf8", content, truncated };
+            return new { name = fi.Name, size = flen, mime, encoding = "utf8", content, truncated, offset };
         }
-        return new { name = fi.Name, size = flen, mime, encoding = "base64", content = Convert.ToBase64String(buf), truncated };
+        return new { name = fi.Name, size = flen, mime, encoding = "base64", content = Convert.ToBase64String(buf), truncated, offset };
     }
 
     private static string DecodeText(byte[] buf)
@@ -653,6 +662,90 @@ public static class FsApi
         }
     }
 
+    /// <summary>חלון "שמירה בשם" של Windows (ללא מגבלת גודל של אוצריא). גוף: { suggestedName, initialDir?, title?, filter? } →
+    /// { cancelled, path }. לאחר מכן כותבים את הקובץ עם /fs/write-binary (overwrite — החלון כבר שאל על דריסה).</summary>
+    private static object PickSaveFile(JsonElement b)
+    {
+        Kiosk.EnsureFileWriteAllowed();
+        string name = b.Str("suggestedName", "document.pdf");
+        string initial = b.Str("initialDir", "");
+        string title = b.Str("title", "שמירה");
+        string filter = b.Str("filter", "PDF (*.pdf)|*.pdf");
+        string result = null;
+        Exception error = null;
+        var t = new Thread(() =>
+        {
+            try
+            {
+                // חלון בעלים בלתי נראה וקבוע-מלמעלה, כדי שחלון השמירה יופיע מעל אוצריא
+                using var owner = new Form
+                {
+                    TopMost = true, ShowInTaskbar = false, FormBorderStyle = FormBorderStyle.None,
+                    StartPosition = FormStartPosition.Manual, Location = new System.Drawing.Point(-32000, -32000), Size = new System.Drawing.Size(1, 1),
+                };
+                owner.Show();
+                using var dlg = new SaveFileDialog
+                {
+                    Title = title, FileName = name, Filter = filter, OverwritePrompt = true,
+                    AddExtension = true, DefaultExt = "pdf", CheckPathExists = true, RestoreDirectory = true,
+                };
+                if (!string.IsNullOrEmpty(initial) && Directory.Exists(initial)) dlg.InitialDirectory = initial;
+                if (dlg.ShowDialog(owner) == DialogResult.OK) result = dlg.FileName;
+                owner.Close();
+            }
+            catch (Exception ex) { error = ex; }
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.IsBackground = true;
+        t.Start();
+        if (!t.Join(115000)) throw new BridgeException("timeout", "חלון השמירה לא נסגר בזמן", 408);
+        if (error != null) throw error;
+        if (result == null) return new { cancelled = true, path = (string)null };
+        EnsureNotProtected(result);
+        return new { cancelled = false, path = result };
+    }
+
+    /// <summary>כתיבת קובץ בינארי בחתיכות. גוף: { path, content (base64), append?, overwrite?, unique?, makeDirs? }.
+    /// unique = אם הקובץ קיים — "שם (2).סיומת" (לא דורס). החתיכה הראשונה מחזירה את הנתיב הסופי; הבאות מצרפות אליו עם append.</summary>
+    private static object WriteBinary(JsonElement b)
+    {
+        string path = FullPath(b.Req("path"));
+        Kiosk.EnsureFileWriteAllowed();
+        EnsureNotProtected(path);
+        bool append = b.Bool("append"), overwrite = b.Bool("overwrite"), unique = b.Bool("unique"), makeDirs = b.Bool("makeDirs");
+        if (Directory.Exists(path)) throw BridgeException.Exists("קיימת תיקייה בשם זה");
+        string dir = Path.GetDirectoryName(path);
+        if (!Directory.Exists(dir))
+        {
+            if (!makeDirs) throw BridgeException.NotFound("התיקייה לא נמצאה: " + dir);
+            Directory.CreateDirectory(dir); // יוצר גם תתי-תיקיות חסרות (מבנה תיקיות משוכפל)
+        }
+        byte[] data;
+        try { data = Convert.FromBase64String(b.Str("content", "")); }
+        catch (FormatException) { throw BridgeException.BadRequest("התוכן אינו base64 תקין"); }
+
+        if (!append)
+        {
+            if (File.Exists(path))
+            {
+                if (unique)
+                {
+                    string stem = Path.GetFileNameWithoutExtension(path), ext = Path.GetExtension(path);
+                    int n = 2;
+                    do { path = Path.Combine(dir, stem + " (" + n + ")" + ext); n++; } while (File.Exists(path));
+                }
+                else if (!overwrite) throw BridgeException.Exists("הקובץ כבר קיים: " + path);
+            }
+            File.WriteAllBytes(path, data);
+        }
+        else
+        {
+            if (!File.Exists(path)) throw BridgeException.NotFound("הקובץ לא נמצא להמשך כתיבה: " + path);
+            using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+            fs.Write(data, 0, data.Length);
+        }
+        return new { path, size = new FileInfo(path).Length };
+    }
     private static object WriteText(JsonElement b)
     {
         string path = FullPath(b.Req("path"));
@@ -710,6 +803,13 @@ public static class FsApi
         if (!Exists(path)) throw BridgeException.NotFound("לא נמצא: " + path);
         if (!(Kiosk.IsActive || FxPolicy.IsRestricted))
         {
+            // #59 (upstream): "לשאול כל פעם באיזו תוכנה לפתוח" - חלון "פתח באמצעות" של Windows. רק כאן (לא בנעילה/מצב מוגבל):
+            // החלון מאפשר לדפדף לכל תוכנה במחשב, ולכן בנעילה נשארת הפתיחה בתוכנת ברירת המחדל בלבד.
+            if (b.Has("openWith") && b.Bool("openWith") && File.Exists(path))
+            {
+                PdfAssoc.ShowOpenWith(path);
+                return new { opened = true, chooser = true };
+            }
             Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
             return new { opened = true };
         }
@@ -719,6 +819,9 @@ public static class FsApi
             if (Kiosk.IsActive) throw BridgeException.Locked();
             throw FxPolicy.Outside("במצב מוגבל אי אפשר לפתוח תיקיות וקיצורי דרך בסייר Windows");
         }
+        // משוב 15.10 (upstream): קובץ הפעלה — רק הגשר עצמו או תוכנה מהרשימה, בלי חלון "כיצד לפתוח" של Windows
+        if (File.Exists(path) && Path.GetExtension(path).Equals(".exe", StringComparison.OrdinalIgnoreCase))
+            return OpenExe(path);
         EnsureOpenExtAllowed(path);
         // TOCTOU (S3, U3): handle אחד נפתח וננעל נגד כתיבה/מחיקה (FileShare.Read), הכול נבדק על ה-handle ועל נתיבו הסופי.
         // WHY (U3): סגירת ה-handle מיד אחרי Process.Start השאירה חלון של שניות (Word קורא אחרי הפעלה איטית) להחלפת הקובץ הנקי, וה-fallback
@@ -795,6 +898,23 @@ public static class FsApi
             ds.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(sid, System.Security.AccessControl.FileSystemRights.FullControl, inh,
                 System.Security.AccessControl.PropagationFlags.None, System.Security.AccessControl.AccessControlType.Allow));
         di.SetAccessControl(ds);
+    }
+
+    private static object OpenExe(string path)
+    {
+        string full = Path.GetFullPath(path);
+        // WHY (הקשחה, עיקרון 3): זהות לפי נתיב מלא ולא לפי שם קובץ. upstream התיר גם כל exe ששמו מכיל "achat"/"OtzariaBridge"
+        // מכל תיקייה (כולל כתיבה למשתמש) - עקיפה של הרשימה הלבנה, ולכן הוסר. הגשר עצמו = רק ה-exe הרץ או המותקן.
+        if (string.Equals(full, Environment.ProcessPath, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(full, Path.GetFullPath(Installer.InstalledExe), StringComparison.OrdinalIgnoreCase))
+        {
+            Tray.Invoke(Hub.ShowMain);
+            return new { opened = true, app = "self" };
+        }
+        // תוכנה מרשימת התוכנות התורניות/המותרות — אותה הפעלה כמו מסרגל התוכנות (בלי כפילות אם כבר פתוחה)
+        var hit = Programs.Load().FirstOrDefault(e => !Programs.IsShellApp(e.Path) && string.Equals(Path.GetFullPath(e.Path), full, StringComparison.OrdinalIgnoreCase));
+        if (hit != null) { Programs.Activate(hit); return new { opened = true, app = hit.Name }; }
+        throw BridgeException.Forbidden("אפשר להפעיל מהסייר רק את הגשר ואת התוכנות שברשימת התוכנות התורניות. להוספת תוכנה: הגדרות מערכת ← נעילה ← תוכנות");
     }
 
     private static object Reveal(JsonElement b)

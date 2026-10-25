@@ -507,6 +507,13 @@ public static class Energy
     private static readonly Regex PlanRe = new(@"([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\s+\((.*?)\)(\s*\*)?");
     private static readonly Regex HexRe = new(@"0x([0-9a-fA-F]{8})");
 
+    private static readonly (string guid, (string he, string en) name)[] StandardPlans =
+    {
+        ("a1841308-3541-4fab-bc81-f71556f20b4a", ("חיסכון בחשמל", "Power saver")),
+        ("381b4222-f694-41f0-9685-ff5bb260df2e", ("מאוזן", "Balanced")),
+        ("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", ("ביצועים גבוהים", "High performance")),
+    };
+
     private static string Pc(string args) => Config.Run("cmd.exe", "/c chcp 65001 >nul & powercfg " + args, 15000);
 
     private static List<(string guid, string name, bool active)> Plans()
@@ -541,13 +548,18 @@ public static class Energy
             };
 
         var plans = Plans();
+        // תוכניות הצריכה הסטנדרטיות שחסרות במחשב (במחשבים חדשים Windows מציג רק "מאוזן") — מוצעות, ונוצרות בבחירה
+        var shown = plans.Select(p => new { id = p.guid, name = p.name, active = p.active }).ToList();
+        foreach (var (guid, name) in StandardPlans)
+            if (!plans.Any(p => p.guid == guid || p.name.Equals(name.en, StringComparison.OrdinalIgnoreCase)))
+                shown.Add(new { id = guid, name = name.he, active = false });
         var screen = Query(SubVideo, ScreenOff);
         var sleep = Query(SubSleep, SleepAfter);
         var saver = Query(SubSaver, SaverThreshold);
         return new
         {
             battery,
-            plans = plans.Select(p => new { id = p.guid, name = p.name, active = p.active }).ToList(),
+            plans = shown,
             screenOff = screen.HasValue ? new { ac = screen.Value.ac, dc = screen.Value.dc } : null,
             sleepAfter = sleep.HasValue ? new { ac = sleep.Value.ac, dc = sleep.Value.dc } : null,
             saverThreshold = saver.HasValue ? (int?)Math.Clamp(saver.Value.dc, 0, 100) : null,
@@ -565,9 +577,17 @@ public static class Energy
         string plan = b.Str("plan");
         if (!string.IsNullOrEmpty(plan))
         {
-            if (!GuidRe.IsMatch(plan) || !Plans().Any(p => p.guid == plan.ToLowerInvariant()))
-                throw BridgeException.NotFound("תוכנית הצריכה לא נמצאה");
-            Pc("/setactive " + plan);
+            string pl = plan.ToLowerInvariant();
+            if (!GuidRe.IsMatch(plan)) throw BridgeException.NotFound("תוכנית הצריכה לא נמצאה");
+            if (!Plans().Any(p => p.guid == pl))
+            {
+                // תוכנית סטנדרטית שלא קיימת במחשב: יוצרים אותה (powercfg -duplicatescheme) ומפעילים את העותק החדש
+                if (!StandardPlans.Any(s => s.guid == pl)) throw BridgeException.NotFound("תוכנית הצריכה לא נמצאה");
+                var created = PlanRe.Match(Pc("-duplicatescheme " + pl));
+                if (!created.Success) throw BridgeException.Unsupported("Windows במחשב זה אינו מאפשר ליצור את תוכנית הצריכה הזו");
+                pl = created.Groups[1].Value.ToLowerInvariant();
+            }
+            Pc("/setactive " + pl);
         }
 
         void Apply(string kind, string sub, string setting, int? v)

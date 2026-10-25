@@ -18,7 +18,7 @@ namespace OtzariaBridge;
 /// </summary>
 public static class UpdateApi
 {
-    public const string Repo = "YairDaniel11/otzaria-system-tools";
+    public const string Repo = "Hadabadra/achat-shaalti";
     public const string ReleasesUrl = "https://github.com/" + Repo + "/releases/latest";
     public const string AllReleasesUrl = "https://github.com/" + Repo + "/releases";
     private const string ApiUrl = "https://api.github.com/repos/" + Repo + "/releases?per_page=20";
@@ -222,10 +222,14 @@ public static class UpdateApi
     /// WHY (U3): בחירה לפי התגית הגבוהה בלבד אפשרה לכל מי שמפרסם הוצאה v999 בלי חתימה (או בחתימה שגויה) לחסום עדכונים לצמיתות (DoS).
     /// עכשיו הוצאה לא חתומה/פגומה נדלגת ונבחרת הבאה בתור (עד 5 ניסיונות). הורדה נכשלת (רשת) = נדלגת. אין מאומתת = null.
     /// </summary>
-    public static async Task<Release> SelectVerifiedRelease(string json, Func<string, long, Task<byte[]>> download, string publicKeySpkiBase64)
+    public static async Task<Release> SelectVerifiedRelease(string json, Func<string, long, Task<byte[]>> download, string publicKeySpkiBase64, string latestTag = null)
     {
         int tried = 0;
-        foreach (var r in SelectCandidates(json))
+        var cands = SelectCandidates(json);
+        // latest מ-GitHub משמש כמסנן רק אם הוא אכן ברשימה; אחרת (או בלי latest) כל המועמדים
+        if (latestTag != null && cands.Any(c => string.Equals(c.Tag, latestTag, StringComparison.OrdinalIgnoreCase)))
+            cands = cands.Where(c => string.Equals(c.Tag, latestTag, StringComparison.OrdinalIgnoreCase)).ToList();
+        foreach (var r in cands)
         {
             if (r.SumsUrl == null || r.SigUrl == null || r.BridgeVerUrl == null || r.ExeUrl == null) continue;
             if (++tried > 5) break;
@@ -375,8 +379,23 @@ public static class UpdateApi
                 throw new BridgeException("internal", "בדיקת העדכון נכשלה (אין חיבור לאינטרנט או ש-GitHub לא זמין): " + ex.Message, 502);
             }
 
-            // WHY (U3): בוחרים את ההוצאה הגבוהה ביותר שחתימתה מאומתת, לא פשוט את הגבוהה ביותר (הוצאה לא חתומה לא חוסמת עדכונים)
-            var rel = await SelectVerifiedRelease(json, DownloadCapped, PublicKeySpkiBase64);
+            // 1.0.5 (מהמפתח): ה-Release שמסומן ב-GitHub כ-latest קובע, לא "הגבוה לפי מספר" (בריפו יש הוצאות ישנות ממספור 3.x).
+            // כאן זה רק מסנן על המועמדים: ההוצאה עדיין חייבת לעבור אימות חתימה מלא ב-SelectVerifiedRelease (fail-closed).
+            string latestTag = null;
+            try
+            {
+                using var lreq = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/repos/" + Repo + "/releases/latest");
+                lreq.Headers.Accept.ParseAdd("application/vnd.github+json");
+                using var lres = await Http.SendAsync(lreq);
+                if (lres.IsSuccessStatusCode)
+                    using (var ld = JsonDocument.Parse(await lres.Content.ReadAsStringAsync()))
+                        if (ld.RootElement.ValueKind == JsonValueKind.Object && ld.RootElement.TryGetProperty("tag_name", out var lt) && lt.ValueKind == JsonValueKind.String)
+                            latestTag = lt.GetString();
+            }
+            catch { /* בלי latest: ממשיכים לפי הגבוהה שמאומתת */ }
+
+            // WHY (U3): בוחרים הוצאה מאומתת (עם OtzariaBridge.exe, חתימה, תגית ומפתח תקפים), לא פשוט את הגבוהה ביותר
+            var rel = await SelectVerifiedRelease(json, DownloadCapped, PublicKeySpkiBase64, latestTag);
             Version latestBridgeVer = null;
             if (rel?.BridgeVerUrl != null)
             {
@@ -384,6 +403,8 @@ public static class UpdateApi
                 try { latestBridgeVer = Parse(System.Text.Encoding.ASCII.GetString(await DownloadCapped(rel.BridgeVerUrl, MaxSmallDownload)).Trim()); }
                 catch { /* ההשוואה תיכשל בבטחה (לא "newer") אם זה נכשל */ }
             }
+            // במאגר הראשי תגית ה-Release היא גרסת הגשר עצמה (v3.7.0) - אם אין BRIDGE_VERSION.txt משווים מול התגית
+            if (latestBridgeVer == null && rel?.Tag != null) latestBridgeVer = Parse(rel.Tag.TrimStart('v', 'V'));
             var cur = Parse(Program.Version);
             _last = new Info(Program.Version, latestBridgeVer?.ToString(3), rel?.Tag, latestBridgeVer != null && cur != null && latestBridgeVer > cur,
                 rel?.Url ?? ReleasesUrl, rel?.ExeUrl, rel?.SumsUrl, rel?.SigUrl, rel?.Notes, rel?.BridgeVerUrl);

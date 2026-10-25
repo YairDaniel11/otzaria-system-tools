@@ -13,7 +13,30 @@
   I.add = function (d, p) {
     Object.keys(d || {}).forEach(function (k) { dict[k] = d[k]; });
     (p || []).forEach(function (x) { pats.push(x); });
+    frags = null; fcache = {};
   };
+
+  /* #69: מחרוזת שהורכבה מכמה חלקים (טקסט + מספר + טקסט) — מתרגמים כל חלק עברי מוכר בנפרד.
+     רק התאמה של מילים שלמות (לא באמצע מילה), מהארוך לקצר; מתקבל רק כשלא נשאר עברית בכלל. */
+  var frags = null, fcache = {};
+  var HEBL = /[\u05D0-\u05EA\u05F3\u05F4]/;
+  function fragTr(s) {
+    if (Object.prototype.hasOwnProperty.call(fcache, s)) return fcache[s];
+    if (!frags) frags = Object.keys(dict).filter(function (k) { return k.length >= 2 && HEB.test(k); }).sort(function (a, b) { return b.length - a.length; });
+    var out = s;
+    for (var i = 0; i < frags.length && HEB.test(out); i++) {
+      var k = frags[i], at = 0, j;
+      while ((j = out.indexOf(k, at)) >= 0) {
+        var before = j > 0 ? out.charAt(j - 1) : '', after = out.charAt(j + k.length);
+        if ((before && HEBL.test(before)) || (after && HEBL.test(after))) { at = j + 1; continue; }
+        out = out.slice(0, j) + dict[k] + out.slice(j + k.length);
+        at = j + dict[k].length;
+      }
+    }
+    var r = HEB.test(out) ? null : out;
+    fcache[s] = r;
+    return r;
+  }
   I.lang = function () { return lang; };
   I.isEn = function () { return lang === 'en'; };
 
@@ -29,7 +52,8 @@
         return m[1] + out + m[3];
       }
     }
-    return null;
+    var f = fragTr(core);
+    return f == null ? null : m[1] + f + m[3];
   }
   I.t = function (s) {
     if (lang !== 'en' || s == null) return s;

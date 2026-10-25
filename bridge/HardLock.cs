@@ -61,9 +61,9 @@ public static class HardLock
             var r = new StreamReader(pipe, Encoding.UTF8);
             w.WriteLine(req.ToJsonString());
             var readTask = r.ReadLineAsync();
-            // WHY: בפסק זמן ה-using סוגר את ה-pipe בזמן שהקריאה תלויה, והיא נופלת ב-ObjectDisposedException שאף אחד לא צופה בו =>
-            // UnobservedTaskException (הוצף ב-136 דיווחים אוטומטיים). צופים בחריג כדי שלא יגיע ל-finalizer.
-            _ = readTask.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            // #83-#92: בפסק זמן הצינור נסגר (using) והקריאה נכשלת אחר כך ב-ObjectDisposedException שאיש לא צופה בה —
+            // מסמנים אותה כנצפית כדי שלא תדווח כ-task-error
+            readTask.Observe("hardlock pipe read", quiet: true);
             // בעיה #14 סעיף 2: רצפת המתנה קשיחה, לא 15ש' שחוסמות חוט HTTP גם כשנדרש timeout קצר בהרבה
             if (!readTask.Wait(Math.Max(timeoutMs, 3000))) return null;
             return JsonNode.Parse(readTask.Result ?? "") as JsonObject;
@@ -324,7 +324,13 @@ public static class HardLock
         var res = Call(req, timeoutMs);
         if (res?["code"]?.ToString() == "two_factor")
         {
-            req["hello"] = RunHello(password);
+            string nonce = RunHello(password);
+            req["hello"] = nonce;
+            // #32 ממצא 1: אם לשירות אין עדיין מפתח HMAC (התקנה ישנה) — מצמידים אותו עכשיו, עם אותו אישור Hello טרי
+            if (res["macPaired"]?.GetValue<bool>() == false)
+                Must(Call(new JsonObject { ["op"] = "set-mac-key", ["password"] = password ?? "", ["hello"] = nonce,
+                                           ["key"] = Convert.ToBase64String(PipeMac.EnsureKey()) }, timeoutMs));
+            PipeMac.Sign(req);
             res = Call(req, timeoutMs);
         }
         return res;
@@ -384,6 +390,8 @@ public static class HardLock
         {
             ["op"] = "settings", ["password"] = password ?? "",
             ["scheduleEnabled"] = enabled, ["scheduleStart"] = start ?? "", ["scheduleEnd"] = end ?? "",
+            ["scheduleDays"] = string.Join(",", PackG.Days),   // סבב G: ימי שבוע ("" = כל הימים)
+            ["scheduleExtra"] = SchedMulti.ExtraCsv,           // חלונות "הוסף זמן" נוספים (HH:mm-HH:mm,...) - נאכפים גם בשירות
         }, password));
 
     /// <summary>
@@ -392,6 +400,11 @@ public static class HardLock
     /// </summary>
     public static void Skip(string password, string untilIso) =>
         Must(CallSensitive(new JsonObject { ["op"] = "skip", ["password"] = password ?? "", ["until"] = untilIso ?? "" }, password));
+
+    /// <summary>#69: גיבובי קודי הגיבוי החד-פעמיים ("salt|hash") — השירות שומר ושורף אותם בעצמו</summary>
+    public static void SetBackupCodes(string password, string[] packed) =>
+        Must(CallSensitive(new JsonObject { ["op"] = "set-backup", ["password"] = password ?? "",
+            ["codes"] = new JsonArray(packed.Select(s => (JsonNode)JsonValue.Create(s)).ToArray()) }, password));
 
     /// <summary>קוד שחזור משורת הפקודה: מבטל גם בשירות (פטור מ-2FA — ביטול חירום)</summary>
     public static bool EmergencyDisable(string code)
@@ -481,6 +494,7 @@ public static class HardLock
                 ["recoveryHash"] = Config.Get<string>("kiosk.recoveryHash", ""),
                 ["recoverySalt"] = Config.Get<string>("kiosk.recoverySalt", ""),
                 ["twoFactor"] = Config.Get("kiosk.twoFactor", false),
+                ["macKey"] = Convert.ToBase64String(PipeMac.EnsureKey()), // #32: סוד משותף לחתימת פקודות רגישות
             });
             if (setupRes?["ok"]?.GetValue<bool>() != true)
                 Config.Log("hardlock install: setup (רשת ביטחון) נכשל: " + (setupRes?["message"]?.ToString() ?? "אין תשובה"));
@@ -602,7 +616,7 @@ public static class HardLock
             using var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Policies\System", true);
             if (k == null) return;
             bool cleared = false;
-            foreach (string name in new[] { "DisableTaskMgr", "DisableRegistryTools" })
+            foreach (string name in new[] { "DisableTaskMgr", "DisableRegistryTools", "DisableLockWorkstation" })
                 if (k.GetValue(name) is int v && v == 1) { k.DeleteValue(name, false); cleared = true; }
             if (cleared) Config.Log("hardlock: מדיניות נעילה יתומה (השירות הוסר בלי SelfUninstall) נוקתה בחשבון הנוכחי");
         }
@@ -610,6 +624,31 @@ public static class HardLock
     }
 
     // ================= התקנת השירות (רץ בהרשאות מנהל) =================
+
+    /// <summary>#21: אחרי התקנה/עדכון — אם השירות מותקן והנעילה הקפדנית כבויה, מעדכנים את עותק השירות (UAC אחד).
+    /// כשהנעילה פעילה לא נוגעים: העדכון עובר דרך הגדרות מערכת עם סיסמה.</summary>
+    public static void AutoUpdateServiceIfUnlocked()
+    {
+        try
+        {
+            if (!ServiceInstalled() || !File.Exists(ServiceExe)) return;
+            var st = ServiceStatus(fresh: true);
+            if (st == null) { Config.Log("service-update: אין תשובה מהשירות — מדלגים (לא ידוע אם הנעילה פעילה)"); return; }
+            if (st["active"]?.GetValue<bool>() == true) { Config.Log("service-update: נעילה פעילה — נשאר עדכון עם סיסמה"); return; }
+            string cur = FileVersionInfo.GetVersionInfo(ServiceExe).FileVersion ?? "";
+            string mine = FileVersionInfo.GetVersionInfo(Environment.ProcessPath!).FileVersion ?? "";
+            if (cur == mine && new FileInfo(ServiceExe).Length == new FileInfo(Environment.ProcessPath!).Length) return;
+            // E2: קודם מבקשים מהשירות לעדכן את עצמו מההוצאה הרשמית (בלי UAC על קובץ ניתן-לכתיבה)
+            var su = Call(new JsonObject { ["op"] = "self-update", ["version"] = Program.Version }, 120_000);
+            if (su?["ok"]?.GetValue<bool>() == true) { Config.Log("service-update: השירות עודכן מההוצאה הרשמית"); return; }
+            Config.Log("service-update: עדכון עצמי לא זמין (" + (su?["message"]?.ToString() ?? "שירות ישן") + ") — חוזרים ל-UAC");
+            using var p = Process.Start(new ProcessStartInfo(Installer.InstalledExe, "--install-service") { UseShellExecute = true, Verb = "runas" });
+            p?.WaitForExit(180_000);
+            Config.Log("service-update: הסתיים, קוד " + (p?.HasExited == true ? p.ExitCode : -1));
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223) { Config.Log("service-update: המשתמש ביטל את UAC"); }
+        catch (Exception ex) { Config.Log("service-update: " + ex.Message); }
+    }
 
     /// <summary>
     /// תיקון שריד: אם ניסיון התקנה קודם נעצר באמצע (אחרי שהשירות כתב DisableTaskMgr וכו' לחשבון
@@ -673,7 +712,7 @@ public static class HardLock
                 Sc($"create {ServiceName} binPath= \"{bin.Replace("\"", "\\\"")}\" start= auto DisplayName= \"{Program.AppFullName}\"");
             else
                 Sc($"config {ServiceName} binPath= \"{bin.Replace("\"", "\\\"")}\" start= auto DisplayName= \"{Program.AppFullName}\"");
-            Sc($"description {ServiceName} \"{Program.AppFullName} — רכיב הנעילה המוקשחת\"");
+            Sc($"description {ServiceName} \"{Program.AppFullName} — רכיב הנעילה המוקשחת, לעילוי נשמת אסתר גיטה דינר ע״ה\"");
             foreach (string a in ServiceRecovery.FailureArgs(ServiceName)) Sc(a);
 
             PrepareBundleDir();
@@ -698,6 +737,7 @@ public static class HardLock
                     ["recoveryHash"] = Config.Get<string>("kiosk.recoveryHash", ""),
                     ["recoverySalt"] = Config.Get<string>("kiosk.recoverySalt", ""),
                     ["twoFactor"] = Config.Get("kiosk.twoFactor", false),
+                    ["macKey"] = Convert.ToBase64String(PipeMac.EnsureKey()), // #32: גם ב-setup שמתוך ההתקנה המורמת
                 });
                 if (setupRes?["ok"]?.GetValue<bool>() != true)
                     SvcLog("install: setup נכשל: " + (setupRes?["message"]?.ToString() ?? "אין תשובה מהשירות"));
@@ -896,6 +936,33 @@ public static class HardLock
 /// <summary>השירות עצמו (LocalSystem). מופעל עם OtzariaBridge.exe --service</summary>
 public class HardLockService : ServiceBase
 {
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int RegOpenKeyEx(IntPtr hKey, string sub, int opts, int sam, out IntPtr res);
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int RegQueryValueEx(IntPtr hKey, string name, IntPtr res, out int type, IntPtr data, ref int len);
+    [System.Runtime.InteropServices.DllImport("advapi32.dll")]
+    private static extern int RegCloseKey(IntPtr hKey);
+
+    /// <summary>האם אחד המפתחות בנתיב (תחת HKEY_USERS) הוא קישור סמלי של הרישום</summary>
+    internal static bool RegPathHasLink(string path)
+    {
+        var hku = new IntPtr(unchecked((int)0x80000003));
+        string cur = "";
+        foreach (var part in path.Split('\\'))
+        {
+            cur = cur.Length == 0 ? part : cur + "\\" + part;
+            // REG_OPTION_OPEN_LINK = 8, KEY_QUERY_VALUE = 1
+            if (RegOpenKeyEx(hku, cur, 8, 1, out var h) != 0) return false; // המפתח לא קיים — מכאן ייווצר כרגיל
+            try
+            {
+                int len = 0;
+                if (RegQueryValueEx(h, "SymbolicLinkValue", IntPtr.Zero, out _, IntPtr.Zero, ref len) == 0) return true;
+            }
+            finally { RegCloseKey(h); }
+        }
+        return false;
+    }
+
     private const string PoliciesSub = @"Software\Microsoft\Windows\CurrentVersion\Policies\System";
     private const string UsbStorKey = @"SYSTEM\CurrentControlSet\Services\USBSTOR";
     private static readonly Regex UserSid = new(@"^S-1-5-21-[\d-]+$", RegexOptions.Compiled);
@@ -1174,6 +1241,30 @@ public class HardLockService : ServiceBase
         return Err("wrong_password", "סיסמה שגויה");
     }
 
+    /// <summary>#69: קוד גיבוי חד-פעמי — אם תואם, נשרף מיד (נשמר לדיסק) ומחזיר true. תחת אותה השהיה של ניסיונות שגויים</summary>
+    private bool UseBackup(string code)
+    {
+        if (_corrupt || _state["backupCodes"] is not JsonArray arr) return false;
+        string n = Secret.NormalizeRecovery(code);
+        if (n.Length != 12) return false; // לא יכול להיות קוד גיבוי: לא נספר ניסיון (אחרת סיסמה רגילה שגויה הייתה שורפת את הדלי)
+        string bkKey = _clientKey + "|backup"; // דלי נפרד: ניחושי קוד גיבוי לא שורפים את דלי הסיסמה, ולהפך
+        if (!_limiter.CanTry(bkKey, NowMs, out _)) return false;
+        for (int i = 0; i < arr.Count; i++)
+        {
+            var parts = (arr[i]?.ToString() ?? "").Split('|');
+            if (parts.Length == 2 && Secret.Matches(n, parts[1], parts[0]))
+            {
+                _limiter.Success(bkKey);
+                arr.RemoveAt(i);
+                Save();
+                HardLock.SvcLog("service: נוצל קוד גיבוי חד-פעמי, נשארו " + arr.Count);
+                return true;
+            }
+        }
+        _limiter.Fail(bkKey, NowMs);
+        return false;
+    }
+
     private static JsonObject Err(string code, string message) => new() { ["ok"] = false, ["code"] = code, ["message"] = message };
     private static JsonObject Ok() => new() { ["ok"] = true };
 
@@ -1214,9 +1305,8 @@ public class HardLockService : ServiceBase
     {
         res = new Dictionary<string, JsonNode>();
         static bool ExePath(string p) =>
-            Programs.IsShellApp(p) || // אפליקציית חנות (shell:AppsFolder\...) - בלי exe, מזהה מאומת בנפרד
-            (Path.IsPathFullyQualified(p) && p.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) &&
-            !Programs.IsBlockedName(Path.GetFileNameWithoutExtension(p)));
+            Path.IsPathFullyQualified(p) && p.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) &&
+            !Programs.IsBlockedName(Path.GetFileNameWithoutExtension(p));
 
         if (q["programs"] is JsonNode pn)
         {
@@ -1335,7 +1425,7 @@ public class HardLockService : ServiceBase
                 if (!_conns.TryEnter(cpid, csid, celev)) { pipe.Dispose(); continue; }
                 // ביקורת #30 ממצא 5: כל חיבור מטופל בנפרד, עם מגבלת אורך ודדליין, כך שלקוח תקוע
                 // לא חוסם את הבאים אחריו (ולא דוחף את הגשר ל-fallback של config.json)
-                _ = Task.Run(async () => { try { await ServeOne(pipe, ct); } finally { _conns.Leave(cpid, csid); } });
+                SafeTask.Run(async () => { try { await ServeOne(pipe, ct); } finally { _conns.Leave(cpid, csid); } }, "pipe ServeOne");
             }
             catch (OperationCanceledException) { return; }
             catch (Exception ex) { HardLock.SvcLog("pipe loop: " + ex.Message); await Task.Delay(1000); }
@@ -1400,7 +1490,11 @@ public class HardLockService : ServiceBase
     }
 
     /// <summary>null = מותר להמשיך. כש-2FA פעיל (או force) נדרש אישור Hello חד-פעמי; קוד שחזור פטור (ביטול חירום)</summary>
-    private JsonObject Need2fa(JsonObject q, string supplied, bool force = false)
+    private byte[] MacKey { get { try { var s = _state["macKey"]?.ToString(); return string.IsNullOrEmpty(s) ? null : Convert.FromBase64String(s); } catch { return null; } } }
+    private static bool ValidB64(string b64) { try { return !string.IsNullOrEmpty(b64) && Convert.FromBase64String(b64).Length >= 16; } catch { return false; } }
+    private static bool ValidKey(string b64) { try { return !string.IsNullOrEmpty(b64) && Convert.FromBase64String(b64).Length >= 32; } catch { return false; } }
+
+    private JsonObject Need2fa(JsonObject q, string supplied, bool force = false, bool consume = true, bool requireMac = true)
     {
         if (!TwoFactorOn && !force) return null;
         if (!force && !string.IsNullOrEmpty(supplied) && !Matches(supplied, "passwordHash", "salt")
@@ -1412,11 +1506,21 @@ public class HardLockService : ServiceBase
             PruneHello();
             if (nonce != null && _hello.TryGetValue(nonce, out var h) && h.State == "approved" && DateTime.UtcNow < h.ApprovedUntil)
             {
-                _hello.Remove(nonce); // חד-פעמי
+                // #32 ממצא 1: כשיש מפתח משותף — האישור תקף רק לפקודה חתומה וטרייה (HMAC על כל השדות, כולל hello)
+                var key = MacKey;
+                if (requireMac && key != null && !PipeMac.Verify(key, q, DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
+                {
+                    _hello.Remove(nonce); // ניסיון עם חתימה פגומה שורף את האישור
+                    HardLock.SvcLog("service: נדחתה פקודה רגישה עם חתימה לא תקינה (" + q["op"] + ")");
+                    return Err("two_factor", Lang.T("אישור Windows Hello אינו חתום כראוי — נסו שוב", "The Windows Hello approval is not properly signed — please try again"));
+                }
+                if (consume) _hello.Remove(nonce); // חד-פעמי
                 return null;
             }
         }
-        return Err("two_factor", "נדרש אימות Windows Hello (זיהוי פנים/טביעת אצבע/PIN)");
+        var err = Err("two_factor", "נדרש אימות Windows Hello (זיהוי פנים/טביעת אצבע/PIN)");
+        err["macPaired"] = MacKey != null;
+        return err;
     }
 
     private async Task ServeOne(NamedPipeServerStream pipe, CancellationToken ct)
@@ -1508,10 +1612,12 @@ public class HardLockService : ServiceBase
                         ["scheduleEnd"] = _state["scheduleEnd"]?.ToString() ?? "",
                         ["scheduleTz"] = _state["scheduleTz"]?.ToString() ?? "",
                         ["twoFactor"] = TwoFactorOn,
+                        ["macPaired"] = MacKey != null,
                         ["otzariaPath"] = _state["otzariaPath"]?.ToString() ?? "", ["sessions"] = _sessions,
                         ["policy"] = PolicyNode(),
                         ["tempUnlock"] = TempNode(),
                         ["stateCorrupt"] = _corrupt,
+                        ["backupLeft"] = (_state["backupCodes"] as JsonArray)?.Count ?? 0,
                         ["hasRecovery"] = !string.IsNullOrEmpty(_state["recoveryHash"]?.ToString()), // U1: הגשר מוחק את העותק המקומי רק כשהשירות מחזיק קוד שחזור
                         ["enforcementIssues"] = new JsonArray(_policyIssues.Select(kv => (JsonNode)(kv.Key + ": " + kv.Value)).ToArray()),
                     };
@@ -1603,6 +1709,10 @@ public class HardLockService : ServiceBase
                     return new JsonObject { ["ok"] = true, ["mac"] = Convert.ToBase64String(ConfigSealKey.Mac(_sealKey, cdata)) };
                 }
 
+
+                case "self-update": // E2/#30 ממצא 8 — ר' SvcUpdate.cs
+                    return SvcUpdate.Run(q["version"]?.ToString(), Enforced);
+
                 case "setup":
                     if (Configured && !_corrupt) return Err("bad_request", "כבר הוגדר");
                     // ביקורת #30 ממצא 2: רק מנהל (תהליך מורם) רשאי להגדיר לראשונה (וגם לשחזר מצב פגום: S1 ממצא 6)
@@ -1615,6 +1725,7 @@ public class HardLockService : ServiceBase
                     }
                     if (q["twoFactor"] is JsonValue tfSetup) _state["twoFactor"] = tfSetup.GetValue<bool>();
                     _corrupt = false; // הגדרה מחדש בידי מנהל מורם מחליפה את המצב הפגום
+                    if (ValidKey(q["macKey"]?.ToString())) _state["macKey"] = q["macKey"].ToString();
                     Save();
                     HardLock.SvcLog("service: הוגדרו סיסמה וקוד שחזור");
                     return Ok();
@@ -1642,29 +1753,37 @@ public class HardLockService : ServiceBase
                     if ((e = ApplyEnableOtzariaPath(_state, otz)) != null) return e;
                     Save();
                     HardLock.SvcLog("service: נעילה הופעלה");
-                    Task.Run(Tick);
+                    SafeTask.Run(Tick);
                     return Ok();
 
                 case "disable":
-                    if ((e = Check(pw, true)) != null) return e;
-                    if ((e = Need2fa(q, pw)) != null) return e;
+                    if (!UseBackup(pw)) // #69: קוד גיבוי חד-פעמי = כמו קוד השחזור (פטור מ-2FA), ונשרף
+                    {
+                        if ((e = Check(pw, true)) != null) return e;
+                        if ((e = Need2fa(q, pw)) != null) return e;
+                    }
                     _state["active"] = false;
                     _state["tempUnlockUntil"] = ""; // ביטול מלא: אין מה להחזיר בתום פתיחה זמנית
                     // ביטול בתוך חלון תזמון (גם בקוד שחזור) היה ננעל מחדש תוך שניות כי EvaluateSchedule מפעיל אותו
                     // שוב - מדלגים עד סוף החלון הנוכחי, כמו "ביטול הנעילה" באזהרת התזמון
                     if (_state["scheduleEnabled"]?.GetValue<bool>() == true &&
-                        Sched.CurrentWindowEnd(_state["scheduleStart"]?.ToString(), _state["scheduleEnd"]?.ToString(), DateTimeOffset.UtcNow,
-                            Sched.ResolveTz(_state["scheduleTz"]?.ToString())) is DateTimeOffset winEnd)
+                        Sched.CurrentWindowEnd(SvcWindows().Where(w => SvcDayOk(w.start, SvcLocalNow())), DateTimeOffset.UtcNow, Sched.ResolveTz(_state["scheduleTz"]?.ToString())) is DateTimeOffset winEnd)
                         _state["skipUntil"] = winEnd.ToString("o");
                     Save();
                     HardLock.SvcLog("service: נעילה בוטלה");
-                    Task.Run(Tick);
+                    SafeTask.Run(Tick);
                     return Ok();
 
                 case "set-password":
-                    if ((e = Check(q["old"]?.ToString(), true)) != null) return e;
-                    if ((e = Need2fa(q, q["old"]?.ToString())) != null) return e;
+                {
                     string np = q["new"]?.ToString() ?? "";
+                    // #69: קוד גיבוי חד-פעמי (שכחתי סיסמה) — נשרף רק אחרי שהסיסמה החדשה עברה את הבדיקות
+                    bool bk = PasswordPolicy.IsValid(np) && !Matches(np, "tempUnlockHash", "tempUnlockSalt") && UseBackup(q["old"]?.ToString());
+                    if (!bk)
+                    {
+                        if ((e = Check(q["old"]?.ToString(), true)) != null) return e;
+                        if ((e = Need2fa(q, q["old"]?.ToString())) != null) return e;
+                    }
                     if (!PasswordPolicy.IsValid(np)) return Err("bad_request", $"הסיסמה חייבת להכיל לפחות {PasswordPolicy.MinLength} תווים"); // S1 ממצא 8: זהה לגשר
                     if (Matches(np, "tempUnlockHash", "tempUnlockSalt")) return Err("bad_request", "סיסמת הנעילה חייבת להיות שונה מסיסמת הפתיחה הזמנית");
                     byte[] salt = RandomNumberGenerator.GetBytes(16);
@@ -1672,6 +1791,25 @@ public class HardLockService : ServiceBase
                     _state["passwordHash"] = Secret.Hash(np, salt);
                     Save();
                     return Ok();
+                }
+
+                case "set-backup": // #69: קודי גיבוי חד-פעמיים — מחליף את הרשימה כולה. סיסמה או קוד שחזור ראשי + 2FA
+                {
+                    if ((e = Check(pw, true)) != null) return e;
+                    if ((e = Need2fa(q, pw)) != null) return e;
+                    if (q["codes"] is not JsonArray src || src.Count > 20) return Err("bad_request", "רשימת קודים לא תקינה");
+                    var dst = new JsonArray();
+                    foreach (var n in src)
+                    {
+                        var parts = (n?.ToString() ?? "").Split('|');
+                        if (parts.Length != 2 || !ValidB64(parts[0]) || !ValidB64(parts[1])) return Err("bad_request", "רשימת קודים לא תקינה");
+                        dst.Add(n.ToString());
+                    }
+                    _state["backupCodes"] = dst;
+                    Save();
+                    HardLock.SvcLog("service: הוגדרו " + dst.Count + " קודי גיבוי");
+                    return Ok();
+                }
 
                 case "settings":
                 {
@@ -1691,11 +1829,14 @@ public class HardLockService : ServiceBase
                     if (q["scheduleEnabled"] is JsonValue se) _state["scheduleEnabled"] = se.GetValue<bool>();
                     if (q["scheduleStart"]?.ToString() is string ss && Sched.IsValid(ss)) _state["scheduleStart"] = ss;
                     if (q["scheduleEnd"]?.ToString() is string ee && Sched.IsValid(ee)) _state["scheduleEnd"] = ee;
+                    if (q["scheduleDays"]?.ToString() is string sd && System.Text.RegularExpressions.Regex.IsMatch(sd, "^[0-6]?(,[0-6])*$")) _state["scheduleDays"] = sd;
+                    if (q["scheduleExtra"]?.ToString() is string sx && System.Text.RegularExpressions.Regex.IsMatch(sx, @"^(\d{1,2}:\d{2}-\d{1,2}:\d{2})?(,\d{1,2}:\d{2}-\d{1,2}:\d{2}){0,9}$"))
+                        _state["scheduleExtra"] = string.Join(",", Sched.ParseWindows(sx).Select(w => w.start + "-" + w.end)); // רק חלונות תקינים
                     foreach (var kv in policy) _state[kv.Key] = kv.Value;
                     Save();
                     if (policy.Count > 0) HardLock.SvcLog("service: עודכנה מדיניות הנעילה (" + string.Join(", ", policy.Keys) + ")");
                     if (temp.Count > 0) HardLock.SvcLog("service: עודכנו הגדרות הפתיחה הזמנית (" + string.Join(", ", temp.Keys.Where(k => k != "tempUnlockSalt")) + ")");
-                    Task.Run(Tick);
+                    SafeTask.Run(Tick);
                     return Ok();
                 }
 
@@ -1722,7 +1863,7 @@ public class HardLockService : ServiceBase
                     _state["tempUnlockUntil"] = until.ToString("o");
                     Save();
                     HardLock.SvcLog($"service: פתיחה זמנית ל-{minutes} דקות (עד {until:HH:mm:ss})");
-                    Task.Run(Tick);
+                    SafeTask.Run(Tick);
                     return new JsonObject { ["ok"] = true, ["until"] = until.ToString("o"), ["secondsLeft"] = TempSecondsLeft };
                 }
 
@@ -1732,7 +1873,7 @@ public class HardLockService : ServiceBase
                     _state["tempUnlockUntil"] = "";
                     Save();
                     HardLock.SvcLog("service: הפתיחה הזמנית הסתיימה ידנית");
-                    Task.Run(Tick);
+                    SafeTask.Run(Tick);
                     return Ok();
 
                 case "skip":
@@ -1751,8 +1892,20 @@ public class HardLockService : ServiceBase
                         _state["skipUntil"] = until;
                     }
                     Save();
-                    Task.Run(Tick);
+                    SafeTask.Run(Tick);
                     return Ok();
+
+                case "set-mac-key":
+                {
+                    // הצמדת/החלפת המפתח המשותף: סיסמה ראשית (לא קוד שחזור) + Hello טרי בפועל; האישור לא נצרך (משמש לפקודה שאחריו)
+                    if ((e = Check(pw, false)) != null) return e;
+                    if ((e = Need2fa(q, pw, force: true, consume: false, requireMac: false)) != null) return e;
+                    if (!ValidKey(q["key"]?.ToString())) return Err("bad_request", "מפתח לא תקין");
+                    _state["macKey"] = q["key"].ToString();
+                    Save();
+                    HardLock.SvcLog("service: הוצמד מפתח חתימה לגשר");
+                    return Ok();
+                }
 
                 case "hello-start":
                 {
@@ -1820,7 +1973,7 @@ public class HardLockService : ServiceBase
                     _state["active"] = false;
                     _state["uninstalling"] = true;
                     Save();
-                    Task.Run(SelfUninstall);
+                    SafeTask.Run(SelfUninstall);
                     return Ok();
 
                 default:
@@ -1864,6 +2017,28 @@ public class HardLockService : ServiceBase
     /// בתוך החלון מפעיל נעילה (activatedBy=schedule); בסוף החלון מבטל רק נעילה שהתזמון הפעיל
     /// (נעילה ידנית נשמרת). נעילה ידנית שבוטלה בתוך החלון תחזור בטיק הבא — זו מהות התזמון.
     /// </summary>
+
+    /// <summary>סבב G: ימי שבוע לחלון התזמון ברכיב ההקשחה (חלון אחרי חצות שייך ליום שהתחיל בו)</summary>
+    private bool SvcDayOk(string start, DateTime now)
+    {
+        string days = _state["scheduleDays"]?.ToString() ?? "";
+        if (days.Length == 0) return true;
+        var t = Sched.ParseTime(start);
+        var day = t == null || now.TimeOfDay >= t.Value ? now.Date : now.Date.AddDays(-1);
+        return days.Split(',').Contains(((int)day.DayOfWeek).ToString());
+    }
+
+    /// <summary>הזמן המקומי הנוכחי באזור הזמן ששמור בתזמון (לא לפי אזור הזמן הנוכחי של Windows - ר' Sched.ResolveTz)</summary>
+    private DateTime SvcLocalNow() => Sched.LocalIn(Sched.ResolveTz(_state["scheduleTz"]?.ToString()), DateTimeOffset.UtcNow);
+
+    /// <summary>החלון הראשי + החלונות הנוספים ("הוסף זמן") שהגשר העביר לשירות</summary>
+    private List<(string start, string end)> SvcWindows()
+    {
+        var all = new List<(string, string)> { (_state["scheduleStart"]?.ToString(), _state["scheduleEnd"]?.ToString()) };
+        all.AddRange(Sched.ParseWindows(_state["scheduleExtra"]?.ToString()));
+        return all;
+    }
+
     private void EvaluateSchedule()
     {
         string start = _state["scheduleStart"]?.ToString();
@@ -1874,7 +2049,9 @@ public class HardLockService : ServiceBase
             System.Globalization.DateTimeStyles.RoundtripKind, out var su) && DateTimeOffset.Now < su;
         // החלון מחושב לפי אזור הזמן ששמרנו בהגדרת התזמון, לא לפי אזור הזמן הנוכחי של Windows (שמשתמש רגיל רשאי לשנות)
         var tz = Sched.ResolveTz(_state["scheduleTz"]?.ToString());
-        bool inWindow = _state["scheduleEnabled"]?.GetValue<bool>() == true && !skip && Sched.InWindow(start, end, DateTimeOffset.UtcNow, tz);
+        var nowUtc = DateTimeOffset.UtcNow;
+        bool inWindow = _state["scheduleEnabled"]?.GetValue<bool>() == true && !skip &&
+                        SvcWindows().Any(w => Sched.InWindow(w.start, w.end, nowUtc, tz) && SvcDayOk(w.start, Sched.LocalIn(tz, nowUtc)));
         bool active = Active;
         string by = _state["activatedBy"]?.ToString() ?? "manual";
         if (inWindow && !active)
@@ -1934,6 +2111,8 @@ public class HardLockService : ServiceBase
         {
             try
             {
+                // ביקורת #30 ממצא 10: לא כותבים כ-SYSTEM דרך מפתח שהוא קישור רישום (עלול להפנות ל-HKLM)
+                if (RegPathHasLink(sid + "\\" + PoliciesSub)) { HardLock.SvcLog("policy " + sid + ": registry link — skipped"); continue; }
                 if (active)
                 {
                     if (!ApplyPolicyValues(sid)) { RepairPolicyKeyAcl(sid); ApplyPolicyValues(sid); }
@@ -1944,6 +2123,7 @@ public class HardLockService : ServiceBase
                     using var k = Registry.Users.OpenSubKey(sid + "\\" + PoliciesSub, true);
                     k?.DeleteValue("DisableTaskMgr", false);
                     k?.DeleteValue("DisableRegistryTools", false);
+                    k?.DeleteValue("DisableLockWorkstation", false);
                     touched.Remove(sid);
                     changed = true;
                 }
@@ -1966,7 +2146,7 @@ public class HardLockService : ServiceBase
         try
         {
             using var k = Registry.Users.CreateSubKey(sid + "\\" + PoliciesSub);
-            foreach (var name in new[] { "DisableTaskMgr", "DisableRegistryTools" })
+            foreach (var name in new[] { "DisableTaskMgr", "DisableRegistryTools", "DisableLockWorkstation" })
             {
                 if (!(k.GetValue(name) is int v && v == 1)) k.SetValue(name, 1, RegistryValueKind.DWord);
                 if (!(k.GetValue(name) is int v2 && v2 == 1)) { _policyIssues[sid] = name + " לא אומת"; return false; }

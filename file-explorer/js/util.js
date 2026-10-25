@@ -209,7 +209,7 @@
       no_password: 'עדיין לא הוגדרה סיסמת נעילה',
       unsupported: 'הפעולה אינה נתמכת',
       bad_request: 'בקשה לא תקינה',
-      unreachable: 'אין חיבור לקיוסק אוצריא',
+      unreachable: 'אין חיבור ל"אחת שאלתי"',
       timeout: 'הפעולה ארכה זמן רב מדי',
       permission_denied: 'חסרה הרשאה מתאימה לתוסף'
     };

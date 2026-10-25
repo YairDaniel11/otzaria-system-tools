@@ -1,10 +1,10 @@
 {
-  "id": "com.otzariakiosk.systemsettings",
+  "id": "com.chadbedera.systemsettings",
   "name": "הגדרות מערכת",
-  "version": "3.6.0",
-  "description": "כל הגדרות המחשב מתוך אוצריא: מסך, שמע, חשמל, שעה, מקלדת, עכבר, מדפסות, USB, רשת, ומצב נעילה ללימוד. דורש את קיוסק אוצריא.",
+  "version": "1.0.6",
+  "description": "כל הגדרות המחשב מתוך אוצריא: מסך, שמע, חשמל, שעה, מקלדת, עכבר, מדפסות, USB, רשת, ומצב נעילה ללימוד. דורש את אחת שאלתי.",
   "author": "חד בדרא, יאיר דניאל",
-  "homepage": "https://github.com/YairDaniel11/otzaria-system-tools",
+  "homepage": "https://github.com/Hadabadra/achat-shaalti",
   "schemaVersion": 1,
   "sdkVersion": "1.x",
   "stability": "stable",
@@ -14,13 +14,21 @@
   "permissions": [
     "network.localhost",
     "app.open_url",
+    "plugin.open_other",
     "calendar.read",
+    "published_data.write",
     "events.subscribe:settings.changed",
     "events.subscribe:plugin.permissions_changed",
     "app.info.read",
     "notifications.system",
     "notifications.send",
-    "events.subscribe:calendar.city_changed"
+    "events.subscribe:calendar.city_changed",
+    "navigation.write",
+    "app.shortcuts",
+    "app.startup_contributions",
+    "app.run_on_startup",
+    "library.books.provide",
+    "reader.toolbar"
   ],
   "network": {
     "enabled": true,
@@ -36,6 +44,46 @@
       "allowOrderBeforeBuiltIns": true,
       "defaultPinned": false,
       "iconName": "settings_24_regular"
+    },
+    "startup": {
+      "shortcuts": [
+        {
+          "id": "open-system-settings",
+          "label": "פתיחת הגדרות מערכת",
+          "key": "ctrl+shift+alt+s",
+          "command": "openSystemSettings"
+        },
+        {
+          "id": "open-lock-settings",
+          "label": "הגדרות נעילה (אחת שאלתי)",
+          "key": "ctrl+shift+alt+l",
+          "command": "openLockSettings"
+        }
+      ],
+      "activationEvents": [
+        "app.startup",
+        "calendar.city_changed"
+      ],
+      "libraryBooks": [
+        {
+          "id": "settings-screens",
+          "provider": "systemsettings",
+          "title": "הגדרות מערכת",
+          "icon": "settings_24_regular"
+        }
+      ],
+      "toolbarItems": [
+        {
+          "id": "chadbedera-ss-lock",
+          "type": "button",
+          "title": "נעילה מיידית",
+          "icon": "lock_closed_24_regular",
+          "openPlugin": true
+        }
+      ]
+    },
+    "background": {
+      "entrypoint": "background.html"
     }
   }
 }

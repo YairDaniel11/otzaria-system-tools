@@ -1,0 +1,77 @@
+name: Release תוספים בלבד (בלי גשר)
+
+# מופעל על תג plugins-v<גרסה>. אורז את שני התוספים כמו ב-build.yml (בלי לדרוס את הגרסה במניפסט)
+# ויוצר Release שאינו מסומן latest — כדי לא לשבש את בדיקת העדכונים של הגשר (UpdateApi.cs).
+
+# WHY (מיזוג upstream, מדיניות הקשחה 7): הטריגר על תג/ענף release/plugins-v* הוסר. מי שיכול לדחוף תג/ענף שולט בקוד ה-workflow
+# (נלקח מה-commit שלו) ועם contents:write יכול לפרסם Release. עכשיו: הרצה ידנית בלבד ומ-main בלבד (ר' ה-if בג'וב).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "גרסת התוספים (למשל 1.0.6) — יוצר תג plugins-v<גרסה> על הקומיט שנבחר"
+        required: true
+      store:
+        description: "פרסום בחנות (לא נתמך כאן; תמיד false)"
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: שם התג
+        shell: pwsh
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          # WHY: הקלט עובר דרך env (לא אינטרפולציה ל-pwsh) ומאומת בתבנית קפדנית
+          if ($env:VERSION_INPUT -notmatch '^\d{1,4}\.\d{1,4}\.\d{1,6}$') { throw "גרסה לא תקינה" }
+          $t = "plugins-v$($env:VERSION_INPUT)"
+          "TAG=$t" >> $env:GITHUB_ENV
+          Write-Host "tag=$t"
+
+      - name: בדיקת גרסת המניפסטים מול התג
+        shell: pwsh
+        run: |
+          $want = "${{ env.TAG }}".Substring("plugins-v".Length)
+          foreach ($f in @("file-explorer/manifest.json", "system-settings/manifest.json")) {
+            $v = (Get-Content $f -Raw | ConvertFrom-Json).version
+            Write-Host "$f = $v"
+            if ($v -ne $want) { Write-Error "$f בגרסה $v, התג מבקש $want"; exit 1 }
+          }
+
+      - name: אריזת התוספים
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path system-settings/* -DestinationPath dist/system-settings.zip -Force
+          Get-ChildItem file-explorer -Exclude WIP.md | Compress-Archive -DestinationPath dist/file-explorer.zip -Force
+          Move-Item dist/system-settings.zip dist/system-settings.otzplugin -Force
+          Move-Item dist/file-explorer.zip dist/file-explorer.otzplugin -Force
+          $lines = foreach ($f in Get-ChildItem dist/*.otzplugin) { "{0}  {1}" -f (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower(), $f.Name }
+          $lines | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+          Get-Content dist/SHA256SUMS.txt
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: תוספים ${{ env.TAG }} (סייר קבצים + הגדרות מערכת)
+          prerelease: false
+          make_latest: false
+          body: |
+            תוספים בלבד — הגשר לא השתנה בגרסה זו.
+            באוצריא: התקנת תוסף מקובץ → **file-explorer.otzplugin** ו-**system-settings.otzplugin**.
+            פירוט השינויים: [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/next/CHANGELOG.md)
+          files: |
+            dist/file-explorer.otzplugin
+            dist/system-settings.otzplugin
+            dist/SHA256SUMS.txt

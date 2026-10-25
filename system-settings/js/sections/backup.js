@@ -35,7 +35,7 @@
     mount: function (body) {
       body.innerHTML = '<div class="card"><div class="card-title">גיבוי ושחזור הגדרות</div>' +
         '<p class="muted">הגדרות הגשר (נעילה, שומר מסך, תוכנות, זמנים) נשמרות לקובץ אחד בשולחן העבודה. סיסמאות, קודים וצימודים לא נכללים.</p>' +
-        '<div class="row-actions"><button class="btn btn-primary" data-act="exp">' + ui.icon('download') + 'גיבוי עכשיו</button>' +
+        '<div class="row-actions full"><button class="btn btn-primary" data-act="exp">' + ui.icon('download') + 'גיבוי עכשיו</button>' +
         '<button class="btn btn-tonal" data-act="imp">' + ui.icon('refresh') + 'שחזור מקובץ</button></div></div>';
       body.querySelector('[data-act=exp]').addEventListener('click', doExport);
       body.querySelector('[data-act=imp]').addEventListener('click', doImport);

@@ -1,3 +1,7 @@
+> **כלל:** לא מצהירים על הרשאה בלי קוד שמשתמש בה. כל הרשאה מוצגת למשתמש לאישור (וחלקן באדום/כתום), `network.access` דורשת PR לאוצריא, והצהרה ריקה רק מבהילה מתקינים ומקשה על אישור בחנות.
+
+> **#69 (15.10.2026):** נבדקו כל 58 ההרשאות מול spec.json העדכני. נוסף: קיצורים מוצהרים במניפסט בשני התוספים, `plugin.openSelf`, תיקון `notifications.sendSystem`, תיקון תצוגת לוח השנה. בסבב שני נוספו גם `app.run_on_startup` (הגדרות מערכת: background.html מעדכן זמני היום ולוח השנה בעליית אוצריא) ו-`library.content.read` (סייר: הקובץ המקורי של ספר). נשקלו ולא נוספו: `app.background_keep_alive` (מנוע חי לתמיד, באדום — אין צורך; העבודה קצרה), `notifications.scheduleSystem` (כפילות להתראת הגשר לפני נעילה), `fs.folder_access` (הסייר משתמש ב-`fs.pickUserFolder`), `settings.read` (מצב מנותק מגיע מ-`app.getConnectivity`), `feedback.send_email` (דיווחים הולכים ל-GitHub), `ui.create_shortcut` (נדחה בעבר).
+
 # מה אפשר להוסיף מ-SDK של אוצריא 0.9.97–0.9.98 (סריקה 11.10.2026)
 
 מקור: `Otzaria/otzaria` ענף `dev`, ‏`docs/plugin-sdk/spec.json` + `API_REFERENCE.md` (6000 שורות).

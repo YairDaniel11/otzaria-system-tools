@@ -4,8 +4,8 @@
   var SS = (window.SS = window.SS || {});
   var ui = SS.ui;
   SS.sections = SS.sections || [];
-  SS.VERSION = '3.4.0';
-  SS.BRIDGE_URL = 'https://github.com/YairDaniel11/otzaria-system-tools/releases/latest';
+  SS.VERSION = '1.0.6';
+  SS.BRIDGE_URL = 'https://github.com/Hadabadra/achat-shaalti/releases/latest';
 
   var state = { current: null, connected: false, probeTimer: null, suspended: false, booted: false };
 
@@ -52,30 +52,7 @@
   function unwrapOtzaria(r) { return r && r.data !== undefined ? r.data : r; }
   async function pushZmanimCache() {
     if (!window.Otzaria || !state.connected) return;
-    var st;
-    try { st = await SS.bridge.call('/kiosk/status'); } catch (e) { return; }
-    var city = (st.zmanimCity || '').trim();
-    var loc = (st.zmanimLocation || '').trim();
-    var args = { inIsrael: !st.zmanimDiaspora };
-    if (city) args.city = city;
-    else {
-      var m = /^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/.exec(loc);
-      if (m) { args.lat = +m[1]; args.lng = +m[2]; }
-      else return; /* אין עיר ואין קואורדינטות — אין מה לשלוח */
-    }
-    var dailyTimes = null, jewishDate = null, jewishDateTomorrow = null;
-    try { dailyTimes = unwrapOtzaria(await window.Otzaria.call('calendar.getDailyTimes', args)); } catch (e) { dailyTimes = null; }
-    try { jewishDate = unwrapOtzaria(await window.Otzaria.call('calendar.getJewishDate', {})); } catch (e) { jewishDate = null; }
-    try {
-      var t = new Date(); t.setDate(t.getDate() + 1);
-      jewishDateTomorrow = unwrapOtzaria(await window.Otzaria.call('calendar.getJewishDate', { date: t.toISOString().slice(0, 10) }));
-    } catch (e) { jewishDateTomorrow = null; }
-    if (!dailyTimes && !jewishDate) return;
-    try {
-      await SS.bridge.call('/kiosk/zmanim-cache', {
-        dailyTimes: dailyTimes || {}, jewishDate: jewishDate || {}, jewishDateTomorrow: jewishDateTomorrow || {}
-      });
-    } catch (e) { /* המטמון אינו קריטי; ננסה שוב בפעם הבאה */ }
+    await SS.sync.zmanim(); /* #69: js/sync.js */
   }
   function scheduleZmanim() {
     clearTimeout(zmanimTimer);
@@ -84,6 +61,14 @@
   }
   /* נקרא גם מיד אחרי חיבור/שחזור, וגם אחרי שמירת הגדרות הנעילה, כדי שהתצוגה תתעדכן בלי לחכות דקה */
   SS.pushZmanimNow = function () { clearTimeout(zmanimTimer); pushZmanimCache().finally(scheduleZmanim); };
+
+  /* #63: הצגת זמני הנעילה בלוח השנה של אוצריא. רק כאן (בתוך אוצריא) אפשר publishedData.*.
+     מפרסמים את חלונות הנעילה ל-7 הימים הקרובים כאירועים, ומסירים אירועים ישנים/כבויים. */
+  async function pushLockCalendar() {
+    if (!window.Otzaria || !state.connected) return;
+    await SS.sync.lockCalendar(); /* #69: הלוגיקה ב-js/sync.js — משותפת למופע הרקע (background.html) */
+  }
+  SS.pushLockCalendar = function () { pushLockCalendar(); };
 
   function sectionById(id) {
     return SS.sections.find(function (s) { return s.id === id; });
@@ -124,8 +109,24 @@
   SS._offline = false;
   SS.isOfflineMode = function () { return !!SS._offline; };
   async function syncOffline() {
-    try { var r = await SS.bridge.call('/sys/offline', {}); var on = !!(r && r.offline); if (on !== SS._offline) { SS._offline = on; refreshNav(); } } catch (e) { }
+    /* מקור אמת: אוצריא עצמה (app.getConnectivity → isOfflineMode). מדווחים לגשר כדי שגם המגש וחלון "אודות"
+       יסתירו רשת ועדכונים; כשאין תשובה מאוצריא — נשארים עם מה שהגשר יודע. */
+    var rep = null;
+    try {
+      if (window.Otzaria) {
+        var c = unwrapOtzaria(await window.Otzaria.call('app.getConnectivity', {}));
+        if (c && typeof c.isOfflineMode === 'boolean') rep = c.isOfflineMode;
+      }
+    } catch (e) { }
+    var on = rep;
+    try {
+      var r = await SS.bridge.call('/sys/offline', rep === null ? {} : { report: rep });
+      if (on === null) on = !!(r && r.offline);
+    } catch (e) { }
+    on = !!on;
+    if (on !== SS._offline) { SS._offline = on; document.documentElement.classList.toggle('otz-offline', on); refreshNav(); }
   }
+  SS.syncOffline = syncOffline;
   SS.lockOpen = null; /* רשימת ההגדרות הפתוחות בנעילה, כשהנעילה פעילה */
 
   function visible(s) {
@@ -134,6 +135,14 @@
     return true;
   }
   SS.sectionVisible = function (id) { var s = sectionById(id); return !!s && visible(s); };
+
+  /* 4ד: כל מסך הגדרות הוא "ספר" בספריית אוצריא — חיפוש "שמע"/"נעילה" בספרייה פותח את המסך */
+  function publishSettingsBooks() {
+    if (!window.SdkX || !SdkX.setLibraryBooks) return;
+    SdkX.setLibraryBooks(SS.sections.map(function (x) {
+      return { id: x.id, title: x.title + ' — הגדרות מערכת', categoryPath: '/הגדרות מערכת' };
+    }));
+  }
 
   function buildNav() {
     SS.sections.sort(function (a, b) {
@@ -197,27 +206,51 @@
       b.classList.toggle('active', b.dataset.id === s.id);
       b.setAttribute('aria-current', b.dataset.id === s.id ? 'page' : 'false');
     });
+    /* משוב 15.10: כל טאב נבנה ונטען פעם אחת ונשמר — מעבר בין טאבים רק מציג אותו, בלי רענון והמתנה.
+       רענון רק בכפתור "רענון", אחרי שמירה (הטאבים עצמם קוראים ל-load), או כשהטאב ישן מ-5 דקות */
     var main = document.getElementById('content');
-    main.innerHTML = '';
-    var wrap = ui.el('<section class="section fade-in" data-section="' + s.id + '">' +
-      '<div class="section-head"><div class="section-title">' + ui.icon(s.icon) + '<h2>' + ui.esc(s.title) + '</h2></div>' +
-      '<button class="btn btn-tonal btn-icon-text" data-act="refresh" title="רענון">' + ui.icon('refresh') + '<span>רענון</span></button></div>' +
-      '<div class="section-body"></div></section>');
-    main.appendChild(wrap);
+    var v = buildView(s);
+    Array.prototype.forEach.call(main.children, function (c) { c.hidden = c !== v.wrap; });
+    if (v.wrap.parentNode !== main) main.appendChild(v.wrap);
+    v.wrap.hidden = false;
     main.scrollTop = 0;
-    var body = wrap.querySelector('.section-body');
-    wrap.querySelector('[data-act=refresh]').addEventListener('click', function () {
-      var btn = this;
-      btn.classList.add('spinning');
-      Promise.resolve(s.load(body)).finally(function () { btn.classList.remove('spinning'); });
-    });
-    s.mount(body);
-    s.load(body);
+    if (Date.now() - v.at > 5 * 60 * 1000) { v.at = Date.now(); s.load(v.body); }
     try { localStorage.setItem('ss.section', s.id); } catch (e) { /* ignore */ }
   }
   SS.show = show;
 
+  var views = {};
+  function buildView(s) {
+    if (views[s.id]) return views[s.id];
+    var wrap = ui.el('<section class="section fade-in" data-section="' + s.id + '">' +
+      '<div class="section-head"><div class="section-title">' + ui.icon(s.icon) + '<h2>' + ui.esc(s.title) + '</h2></div>' +
+      '<button class="btn btn-tonal btn-icon-text" data-act="refresh" title="רענון">' + ui.icon('refresh') + '<span>רענון</span></button></div>' +
+      '<div class="section-body"></div></section>');
+    var body = wrap.querySelector('.section-body');
+    var v = views[s.id] = { wrap: wrap, body: body, at: Date.now(), loading: null };
+    wrap.querySelector('[data-act=refresh]').addEventListener('click', function () {
+      var btn = this;
+      btn.classList.add('spinning'); v.at = Date.now();
+      Promise.resolve(s.load(body)).finally(function () { btn.classList.remove('spinning'); });
+    });
+    wrap.hidden = true;
+    document.getElementById('content').appendChild(wrap);
+    s.mount(body);
+    v.loading = Promise.resolve(s.load(body)).catch(function () {});
+    return v;
+  }
+  /* טעינה מראש ברקע של כל הטאבים בזה אחר זה (לא במקביל — לא להעמיס על הגשר) */
+  async function prewarm() {
+    for (var i = 0; i < SS.sections.length; i++) {
+      var s = SS.sections[i];
+      if (views[s.id] || !visible(s)) continue;
+      try { await buildView(s).loading; } catch (e) { /* ממשיכים */ }
+    }
+  }
+  SS.prewarm = prewarm;
+
   function setStatus(connected) {
+    if (connected && SS.prefetchDetect) SS.prefetchDetect(); /* זיהוי תוכנות מראש — ריבוע הנעילה לא ימתין לו */
     var chip = document.getElementById('bridge-chip');
     var h = SS.bridge.health;
     chip.className = 'topbar-chip ' + (connected ? (h && h.kioskActive ? 'warn' : 'ok') : 'bad');
@@ -240,8 +273,8 @@
       off.innerHTML =
         '<div class="offline-card fade-in">' +
         '<div class="offline-art">' + ui.icon('bridge') + '</div>' +
-        '<h2>צריך את קיוסק אוצריא</h2>' +
-        '<p>כדי לשנות הגדרות של המחשב (שמע, מסך, בלוטות׳, רשת ונעילה), התוסף נעזר בתוכנה קטנה בשם <b>קיוסק אוצריא</b> שרצה ברקע במחשב שלכם. נראה שהיא עדיין לא מותקנת או לא פועלת.</p>' +
+        '<h2>התוסף דורש הפעלה של התוכנה "אחת שאלתי"</h2>' +
+        '<p>כדי לשנות הגדרות של המחשב (שמע, מסך, בלוטות׳, רשת ונעילה), התוסף נעזר בתוכנה קטנה בשם <b>אחת שאלתי</b> שרצה ברקע במחשב שלכם. נראה שהיא עדיין לא מותקנת או לא פועלת.</p>' +
         '<ol class="steps">' +
         '<li>מורידים את <b>OtzariaBridge.exe</b> מהקישור למטה.</li>' +
         '<li>מפעילים אותו פעם אחת — הוא מתקין את עצמו ויעלה אוטומטית בכל הפעלה של Windows.</li>' +
@@ -295,8 +328,11 @@
       try { start = localStorage.getItem('ss.section'); } catch (e) { start = null; }
       var hash = (location.hash || '').replace('#', '');
       show(hash || start || (h.kioskActive ? 'kiosk' : 'audio'));
+      setTimeout(prewarm, 300);
     }
     SS.pushZmanimNow();
+    SS.pushLockCalendar();
+    pushTheme();
     return true;
   }
   SS.reprobe = connect;
@@ -325,6 +361,33 @@
     reportsSent = false; /* מינימלי: מאפשר שליחה חוזרת בסבב הבא */
   }
   setInterval(function () { if (state.connected) sendPendingReports(); }, 30 * 60 * 1000);
+  setInterval(function () { if (state.connected) syncOffline(); }, 60 * 1000);
+  /* ריפוי אוטומטי: טאב שנטען בזמן שהגשר היה לא זמין נשאר עם "הגשר אינו מחובר". כל כמה שניות בודקים אם הגשר חזר,
+     ואם כן — טוענים מחדש (בלי לחכות ללחיצה על "רענון") כל טאב שמציג שגיאה. עד 4 ניסיונות לטאב, כדי לא להציף כששגיאה אמיתית. */
+  var healBusy = false, healTries = {};
+  setInterval(async function () {
+    if (healBusy || state.suspended || document.hidden) return;
+    var bad = Object.keys(views).filter(function (id) {
+      var v = views[id];
+      var has = v && v.body && v.body.querySelector('.state-box.error');
+      if (!has) healTries[id] = 0;
+      return has && (healTries[id] || 0) < 3;
+    });
+    if (!bad.length) return;
+    healBusy = true;
+    try {
+      var h = null;
+      try { h = await SS.bridge.probe(); } catch (e) { h = null; }
+      if (!h) return;
+      if (!state.connected) { await connect(); return; }
+      bad.forEach(function (id) {
+        healTries[id] = (healTries[id] || 0) + 1;
+        var sec = sectionById(id), v = views[id];
+        if (sec && v) { v.at = Date.now(); try { sec.load(v.body); } catch (e) { /* כלום */ } }
+      });
+    } finally { healBusy = false; }
+  }, 8000);
+
   SS.sendPendingReports = sendPendingReports;
 
   SS.bridge.onPairing = function (on) {
@@ -332,27 +395,39 @@
   };
   SS.bridge.onLost = function () {
     if (!state.connected) return;
-    SS.bridge.probe().then(function (h) { if (!h) showOffline(); else setStatus(true); });
+    /* גשר עמוס (בקשות כבדות במקביל) עלול לפספס בדיקה בודדת — מכריזים "לא מחובר" רק אחרי שלוש בדיקות כושלות ברצף */
+    (async function () {
+      for (var i = 0; i < 3; i++) {
+        var h = null;
+        try { h = await SS.bridge.probe(); } catch (e) { h = null; }
+        if (h) { setStatus(true); return; }
+        await new Promise(function (r) { setTimeout(r, 2000); });
+      }
+      showOffline();
+    })();
   };
 
   async function boot(payload) {
     if (state.booted) return;
     state.booted = true;
-    if (payload && payload.theme) ui.applyTheme(payload.theme);
+    if (payload && payload.theme) onTheme(payload.theme);
     try { await window.I18N.init(payload); } catch (e) { /* נשארים בעברית */ }
     var lb = document.getElementById('top-lang');
     lb.textContent = window.I18N.toggleLabel();
     lb.addEventListener('click', function () { window.I18N.toggle(); });
+    var ab = document.getElementById('top-about');
+    if (ab) { ab.innerHTML = ui.icon('info'); ab.addEventListener('click', function () { show('about'); }); }
     var fb = document.getElementById('top-feedback');
     fb.innerHTML = window.Feedback.ICON;
     fb.addEventListener('click', function () {
       window.Feedback.open({
-        ui: ui, plugin: 'הגדרות מערכת', version: SS.VERSION,
+        ui: ui, plugin: 'הגדרות מערכת', version: SS.VERSION, bridge: SS.bridge,
         extra: function () { return ['גשר: ' + (state.connected ? 'מחובר' : 'לא מחובר')]; }
       });
     });
     if (payload && payload.plugin && payload.plugin.version) SS.VERSION = payload.plugin.version;
     buildNav();
+    publishSettingsBooks();
     document.getElementById('top-refresh').addEventListener('click', function () {
       if (!state.connected) { connect(); return; }
       var s = sectionById(state.current);
@@ -363,11 +438,37 @@
     connect();
   }
 
+  /* #56: ערכת העיצוב של אוצריא גם לחלונות הגשר (שורת שעון בנעילה, מסך מנוחה) */
+  var lastTheme = null;
+  function pushTheme() {
+    if (!lastTheme || !state.connected) return;
+    var cs = lastTheme.colorScheme || {};
+    SS.bridge.call('/theme', { mode: lastTheme.mode === 'light' ? 'light' : 'dark', primary: String(cs.primary || '') }).catch(function () { /* גשר ישן */ });
+  }
+  function onTheme(th) { ui.applyTheme(th); lastTheme = th; pushTheme(); }
+  SS.pushTheme = pushTheme;
+
   function init() {
     if (window.Otzaria) {
       window.Otzaria.on('plugin.boot', boot);
-      window.Otzaria.on('theme.changed', ui.applyTheme);
+      window.Otzaria.on('theme.changed', onTheme);
+      window.Otzaria.on('plugin.page_opened', function (ev) { /* #56: נפתח מהסייר — {section} */
+        var pr = ev && (ev.param || (ev.data && ev.data.param));
+        if (pr && pr.section) { try { location.hash = pr.section; } catch (e) { /* כלום */ } if (state.connected) show(pr.section); }
+      });
+      window.Otzaria.on('reader.toolbar_item_clicked', function (ev) {
+        var id = ev && (ev.id || ev.itemId || (ev.item && ev.item.id));
+        if (id !== 'chadbedera-ss-lock') return;
+        SS.quickLockPending = true;
+        if (state.connected) show('kiosk'); else { try { location.hash = 'kiosk'; } catch (e) { /* כלום */ } }
+      });
       window.Otzaria.on('calendar.city_changed', function () { pushZmanimCache(); });
+      /* #69: קיצורים מהמניפסט — פתיחת הגדרות מערכת / ישר להגדרות הנעילה */
+      if (window.SdkX) {
+        SdkX.onCommand('openSystemSettings', function () { SdkX.openSelf(); });
+        SdkX.onCommand('openLockSettings', function () { SdkX.openSelf({ section: 'kiosk' }); });
+        SdkX.onLibraryBookOpen(function (ev) { var id = ev && (ev.id || (ev.data && ev.data.id)); if (id) { if (state.connected) show(id); else SdkX.openSelf({ section: id }); } });
+      }
       window.Otzaria.on('plugin.suspended', function () { state.suspended = true; clearTimeout(state.probeTimer); clearTimeout(zmanimTimer); });
       window.Otzaria.on('plugin.resumed', function () {
         state.suspended = false;

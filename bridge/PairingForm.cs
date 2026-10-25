@@ -23,9 +23,7 @@ internal sealed class PairingForm : Form
 
     public static void Open()
     {
-        if (_open is { IsDisposed: false }) { _open.Activate(); return; }
-        _open = new PairingForm();
-        _open.Show();
+        Hub.Show("pairing", () => _open = new PairingForm());
     }
 
     private PairingForm()

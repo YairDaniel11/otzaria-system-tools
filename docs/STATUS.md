@@ -29,3 +29,9 @@
 - בתוסף ההגדרות הנחתי ש-`network.fetchStream` מחזיר את גוף התשובה גם בקודי שגיאה (401/500). לא אומת.
 - בקבצי JS אין להשתמש בגרש ASCII בודד בהערות (תוקע את הוולידטור של החנות).
 - צילומי המסך לחנות של הגדרות מערכת: `system-settings-screenshots/`.
+- 14.10: סבב E חלקי — E5/E6/E7 ✅; E9 חלקי (README); נותרו E1–E4, E8 (Windows/SignPath).
+- 14.10: E1/E4 בדיקות עצמיות אוטומטיות (SelfTestMore.cs); E2 ממצא 8 — עדכון עצמי מאומת של השירות (SvcUpdate.cs). שליחה ל-GitHub — ממתינה (A7).
+- 14.10: נוסף סבב F (ניקוי GitHub + גרסה רשמית) ב-ROUNDS-3.7.1.md.
+- 20.10: נוספו בלי אריזה: `LocationApi.cs` (`/sys/location`, `/location`, `/sys/location/settings`, `/feedback`) ו-`PdfApi.cs` (`/pdf/handlers`, `/pdf/open`, שלבים א-ב של PDF-INTEGRATION-SPEC). נבנה בהצלחה (dotnet build), לא נבדק ב-Windows.
+  **נשאר לאריזה הבאה:** בדיקה ב-Windows (מיקום כבוי/דלוק, אישור הרשאת מיקום לאפליקציות שולחן עבודה, Sumatra/Acrobat בעמוד מסוים, נעילה); הוספת `/location` ו-`/pdf/*` לבדיקה העצמית; כפתור "מיקום" בהגדרות מערכת (לא חובה); שלבים ג-ה של PDF לפי תשובות לסעיף 9.
+- 20.10: **שוחרר 1.0.1** (גשר + שני התוספים). שני ה-patch-ים של המסירה הוחלו על `next` ונדחפו; `main` קודם ב-fast-forward ל-`e494ee8` (אחרי מיזוג `main` ל-`next` ללא שינוי תוכן, כי ל-`main` היה commit מיזוג של PR #80). ה-CI יצר את התג `v1.0.1` ואת המהדורה, שאינה טיוטה וכוללת: `OtzariaBridge-Setup-1.0.1.exe`, `OtzariaBridge.exe`, `file-explorer.otzplugin`, `system-settings.otzplugin`, `SHA256SUMS.txt`. לא פורסם לחנות. `dotnet build` לא רץ בסשן השחרור (אין dotnet); הבנייה נעשתה ב-CI, ובמסירה נרשם שהבנייה המקומית עברה. עדיין לא נבדק ב-Windows.

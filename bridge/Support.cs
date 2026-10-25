@@ -22,9 +22,14 @@ internal static class Outbox
         Server.Route("/diag/ack", b => Ack(b));
     }
 
+    private static bool IsNetworkNoise(string t) =>
+        System.Text.RegularExpressions.Regex.IsMatch(t, @"HttpRequestException|SocketException|WebException|TaskCanceledException|No such host|UpdateApi",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
     public static void Add(string kind, string text)
     {
         if (!Config.Get("diag.autoReport", true) || string.IsNullOrWhiteSpace(text)) return;
+        if (IsNetworkNoise(text)) return; // A7: אין רשת / בדיקת עדכונים — לא תקלה
         try
         {
             string firstLine = text.Split('\n')[0].Trim();
@@ -39,8 +44,11 @@ internal static class Outbox
             if (files.Length >= MaxFiles) return;
             string body = "סוג: " + kind + "\nגרסת גשר: " + Program.Version + "\nמערכת: " + Environment.OSVersion +
                           "\nנעילה פעילה: " + Kiosk.IsActive + "\nזמן: " + DateTime.Now.ToString("s") + "\n\n" + Clean(text);
-            File.WriteAllText(Path.Combine(Dir, DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + "-" + kind + ".txt"),
-                body.Length > 4000 ? body[..4000] : body, new UTF8Encoding(false));
+            string id = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + "-" + kind;
+            if (body.Length > 4000) body = body[..4000];
+            File.WriteAllText(Path.Combine(Dir, id + ".txt"), body, new UTF8Encoding(false));
+            // הקריסה המכוונת של הבדיקה העצמית נשמרת ב-outbox (הבדיקה מאמתת זאת ומוחקת), אבל לא נשלחת ל-GitHub כ-issue
+            if (!text.Contains("selftest-crash", StringComparison.Ordinal)) GhRelay.Queue(id, body); // #65
         }
         catch { }
     }
@@ -57,7 +65,12 @@ internal static class Outbox
         var list = new JsonArray();
         if (Directory.Exists(Dir))
             foreach (var f in Directory.GetFiles(Dir, "*.txt").OrderBy(x => x).Take(10))
-                list.Add(new JsonObject { ["id"] = Path.GetFileNameWithoutExtension(f), ["text"] = File.ReadAllText(f) });
+            {
+                string t = File.ReadAllText(f);
+                // #81-#90: קריסת הבדיקה העצמית דלפה ל-GitHub דרך התוסף (/diag/pending) — לא נמסרת לשליחה
+                if (t.Contains("selftest-crash", StringComparison.Ordinal)) continue;
+                list.Add(new JsonObject { ["id"] = Path.GetFileNameWithoutExtension(f), ["text"] = t });
+            }
         return new JsonObject { ["enabled"] = Config.Get("diag.autoReport", true), ["items"] = list };
     }
 

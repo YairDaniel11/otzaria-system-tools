@@ -81,7 +81,7 @@
     copy: '<rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M15.5 8.5V5.5A1.5 1.5 0 0 0 14 4H5.5A1.5 1.5 0 0 0 4 5.5V14a1.5 1.5 0 0 0 1.5 1.5h3"/>'
   };
   ui.icon = function (name, cls) {
-    return '<svg class="ic ' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (P[name] || '') + '</svg>';
+    return '<svg class="ic ' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (P[name] || '') + '</svg>';
   };
 
   /* ---------- helpers ---------- */
@@ -139,6 +139,9 @@
   /* ---------- toasts ---------- */
   ui.toast = function (message, kind) {
     var host = document.getElementById('toasts');
+    /* אותה הודעה כבר מוצגת — לא מכפילים */
+    var dup = Array.prototype.some.call(host.querySelectorAll('.toast span'), function (s) { return s.textContent === message; });
+    if (dup) return;
     var t = ui.el('<div class="toast ' + (kind || '') + '" role="status">' +
       ui.icon(kind === 'error' ? 'warning' : kind === 'success' ? 'check' : 'info') +
       '<span>' + ui.esc(message) + '</span></div>');
@@ -171,36 +174,15 @@
   /* options: title, body (html), icon, tone (danger|primary), actions [{label, value, kind}], fields [{name,label,type,placeholder,value,disabled}],
      onSubmit(values) -> may throw to keep dialog open (shows message), dismissible.
      disabled: השדה מושבת (data-locked) ונשאר מושבת גם אחרי מצב "שומר…"; onOpen יכול לשנות זאת עם ui.lockField */
-  /* f.type === 'group': כותרת קבוצה מתקפלת (<details>/<summary>) - כל השדות שאחריה נכנסים
-     לתוכה עד הקבוצה הבאה (או סוף הרשימה). שימושי לטפסים ארוכים (למשל הגדרות נעילה) כדי
-     שלא כל השדות יוצגו פרושים ביחד - ר' kiosk.js editSettings */
-  function fieldHtml(f) {
-    if (f.type === 'note') {
-      return '<div class="field-note muted small">' + f.label + '</div>';
-    }
-    if (f.type === 'checkbox') {
-      return '<label class="check-row' + (f.disabled ? ' is-disabled' : '') + '"><input type="checkbox" name="' + f.name + '"' + (f.value ? ' checked' : '') + (f.disabled ? ' disabled data-locked' : '') + '>' +
-        '<span class="check-box">' + ui.icon('check') + '</span><span class="check-text">' + f.label +
-        (f.hint ? '<small>' + f.hint + '</small>' : '') + '</span></label>';
-    }
-    if (f.type === 'select') {
-      var opts = (f.options || []).map(function (o) {
-        return '<option value="' + ui.esc(o.value) + '"' + (o.value === f.value ? ' selected' : '') + '>' + ui.esc(o.label) + '</option>';
-      }).join('');
-      return '<label class="field"><span class="field-label">' + ui.esc(f.label) + '</span>' +
-        '<select class="input" name="' + f.name + '"' + (f.dir ? ' dir="' + f.dir + '"' : '') + '>' + opts + '</select>' +
-        (f.hint ? '<small>' + f.hint + '</small>' : '') + '</label>';
-    }
-    return '<label class="field"><span class="field-label">' + ui.esc(f.label) + '</span>' +
-      '<input class="input" name="' + f.name + '" type="' + (f.type || 'text') + '"' +
-      (f.placeholder ? ' placeholder="' + ui.esc(f.placeholder) + '"' : '') +
-      (f.value ? ' value="' + ui.esc(f.value) + '"' : '') +
-      (f.dir ? ' dir="' + f.dir + '"' : '') + (f.disabled ? ' disabled data-locked' : '') + ' autocomplete="off"></label>';
-  }
+  /* C7: שדות עם more:true מקובצים לאזור מתקפל "עוד" (מוסתרים, לא נמחקים).
+     f.type === 'group' (יאיר, 049b564): כותרת קבוצה מתקפלת (<details>/<summary>) - כל השדות שאחריה
+     נכנסים לתוכה עד הקבוצה הבאה (או סוף הרשימה). ר' kiosk.js editSettings */
   ui.fieldsHtml = function (fields) {
-    var out = '', inGroup = false;
+    var out = '', more = '', inGroup = false;
+    function flushMore() { if (more) { out += '<details class="field-more"><summary class="muted small">עוד…</summary>' + more + '</details>'; more = ''; } }
     (fields || []).forEach(function (f) {
       if (f.type === 'group') {
+        flushMore();
         if (inGroup) out += '</div></details>';
         out += '<details class="field-group"' + (f.open ? ' open' : '') + '><summary>' +
           (f.icon ? ui.icon(f.icon) : '') + '<span>' + ui.esc(f.label) + '</span>' +
@@ -208,10 +190,59 @@
         inGroup = true;
         return;
       }
-      out += fieldHtml(f);
+      var h = ui.fieldHtml(f);
+      if (f.more) more += h; else { flushMore(); out += h; }
     });
+    flushMore();
     if (inGroup) out += '</div></details>';
     return out;
+  };
+  ui.fieldHtml = function (f) {
+    return [f].map(function (f) {
+        if (f.type === 'note') {
+          return '<div class="field-note muted small">' + f.label + '</div>';
+        }
+        if (f.type === 'pills') {
+          /* משוב 15.10: כמה מתגים קטנים בשורה אחת (כל פריט בחירה נפרדת, בלי תפריט) */
+          return '<div class="field"><span class="field-label">' + ui.esc(f.label) + '</span><div class="pill-row">' +
+            f.items.map(function (it) {
+              return '<label class="mini-switch pill"><input type="checkbox" name="' + it.name + '"' + (it.value ? ' checked' : '') + '>' +
+                '<span class="mini-track"></span><span class="mini-text">' + ui.esc(it.label) + '</span></label>';
+            }).join('') + '</div>' + (f.hint ? '<small>' + f.hint + '</small>' : '') + '</div>';
+        }
+        if (f.type === 'textarea') {
+          return '<label class="field"><span class="field-label">' + ui.esc(f.label) + '</span><textarea class="input" rows="' + (f.rows || 3) + '" name="' + f.name + '"' +
+            (f.placeholder ? ' placeholder="' + ui.esc(f.placeholder) + '"' : '') + '>' + ui.esc(f.value || '') + '</textarea>' + (f.hint ? '<small>' + f.hint + '</small>' : '') + '</label>';
+        }
+      if (f.type === 'checkpair') {
+          /* שורה אחת: תיבת סימון + מתג קטן בצד (משוב 15.10: "להציג" + "התראה" לכל זמן) */
+          return '<div class="check-pair"><label class="check-row switch-row"><input type="checkbox" name="' + f.name + '"' + (f.value ? ' checked' : '') + '>' +
+            '<span class="mini-track big"></span><span class="check-text">' + f.label + '</span></label>' +
+            '<label class="mini-switch" title="' + ui.esc(f.label2) + '"><input type="checkbox" name="' + f.name2 + '"' + (f.value2 ? ' checked' : '') + '>' +
+            '<span class="mini-track"></span><span class="mini-text">' + ui.esc(f.label2) + '</span></label></div>';
+        }
+        if (f.type === 'checkbox') {
+          /* משוב 15.10: מתג בסגנון אוצריא (ולא תיבת סימון) לכל הגדרת הפעלה/כיבוי */
+          return '<label class="check-row switch-row' + (f.disabled ? ' is-disabled' : '') + '"><input type="checkbox" name="' + f.name + '"' + (f.value ? ' checked' : '') + (f.disabled ? ' disabled data-locked' : '') + '>' +
+            '<span class="mini-track big"></span><span class="check-text">' + f.label +
+            (f.hint ? '<small>' + f.hint + '</small>' : '') + '</span></label>';
+        }
+        if (f.type === 'select') {
+          /* בחירה: תפריט נפתח */
+          var lb = !!f.listbox; /* תפריט נפתח כברירת מחדל (משוב 15.10) — רשימה פתוחה רק אם מבקשים במפורש */
+          var opts = (f.options || []).map(function (o) {
+            return '<option value="' + ui.esc(o.value) + '"' + (o.value === f.value ? ' selected' : '') + '>' + ui.esc(o.label) + '</option>';
+          }).join('');
+          return '<label class="field"><span class="field-label">' + ui.esc(f.label) + '</span>' +
+            '<select class="input' + (lb ? ' listbox' : '') + '" name="' + f.name + '"' + (lb ? ' size="' + Math.min(f.options.length, 6) + '"' : '') + (f.dir ? ' dir="' + f.dir + '"' : '') + '>' + opts + '</select>' + (f.hint ? '<small>' + f.hint + '</small>' : '') + '</label>';
+        }
+        var half = f.half || (f.half !== false && f.dir === 'ltr' && !f.type && String(f.value || '').length <= 6 && String(f.label).length <= 50);
+        return '<label class="field' + (half ? ' half' : '') + '"><span class="field-label">' + ui.esc(f.label) + '</span>' +
+          '<input class="input" name="' + f.name + '" type="' + (f.type || 'text') + '"' +
+          (f.placeholder ? ' placeholder="' + ui.esc(f.placeholder) + '"' : '') +
+          (f.value ? ' value="' + ui.esc(f.value) + '"' : '') +
+          (f.dir ? ' dir="' + f.dir + '"' : '') + (f.disabled ? ' disabled data-locked' : '') + ' autocomplete="off"></label>';
+    }).join('');
   };
 
   /* ערכי שדות מתוך טופס (גם בתוך עמוד, לא רק בדיאלוג) */
@@ -220,7 +251,9 @@
     (fields || []).forEach(function (f) {
       if (f.type === 'note' || f.type === 'group') return;
       var inp = form.querySelector('[name="' + f.name + '"]');
-      if (inp) v[f.name] = f.type === 'checkbox' ? inp.checked : inp.value;
+      if (f.type === 'pills') { f.items.forEach(function (it) { var e = form.querySelector('[name="' + it.name + '"]'); if (e) v[it.name] = e.checked; }); return; }
+      if (f.type === 'checkpair') { var i2 = form.querySelector('[name="' + f.name2 + '"]'); if (i2) v[f.name2] = i2.checked; }
+      if (inp) v[f.name] = (f.type === 'checkbox' || f.type === 'checkpair') ? inp.checked : inp.value;
     });
     return v;
   };
@@ -396,4 +429,17 @@
     for (var i = 1; i <= 4; i++) s += '<i class="' + (i <= n ? 'on' : '') + '" style="height:' + (i * 25) + '%"></i>';
     return s + '</span>';
   };
+
+  /* נר מרצד רלוונטי רק בסגנון "עמודה": בסגנון "קבועה" השדה מוסתר */
+  function syncCandle() {
+    Array.prototype.forEach.call(document.querySelectorAll('select[name="dedStyle"]'), function (sel) {
+      var scope = sel.closest('form') || document;
+      var cb = scope.querySelector('input[name="candleFlicker"]');
+      var wrap = cb && cb.closest('label');
+      if (wrap) wrap.hidden = sel.value !== 'column';
+    });
+  }
+  document.addEventListener('change', function (e) { if (e.target && e.target.name === 'dedStyle') syncCandle(); });
+  function watchCandle() { try { new MutationObserver(syncCandle).observe(document.body, { childList: true, subtree: true }); } catch (e) { /* כלום */ } syncCandle(); }
+  if (document.body) watchCandle(); else document.addEventListener('DOMContentLoaded', watchCandle);
 })();

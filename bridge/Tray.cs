@@ -5,7 +5,7 @@ namespace OtzariaBridge;
 public static class Tray
 {
     private static NotifyIcon _icon;
-    private static ToolStripMenuItem _status, _exit, _plugins, _install, _lang, _about, _unpair, _changelog, _report;
+    private static ToolStripMenuItem _status, _exit, _plugins, _install, _lang, _about, _unpair, _changelog, _report, _shot, _shotRegion;
     private static ContextMenuStrip _menu;
     private static Control _invoker;
 
@@ -25,7 +25,38 @@ public static class Tray
         _unpair = new ToolStripMenuItem("", null, (_, _) => PairingForm.Open());
         _changelog = new ToolStripMenuItem("", null, (_, _) => ChangelogForm.Open());
         _report = new ToolStripMenuItem("", null, (_, _) => ReportsForm.Open());
-        menu.Items.AddRange(new ToolStripItem[] { _status, _about, _changelog, _report, _install, _plugins, _unpair, _lang, new ToolStripSeparator(), _exit });
+        _shot = new ToolStripMenuItem("", null, (_, _) => _invoker.BeginInvoke(() => { _menu.Close(); Thread.Sleep(250); Screenshot.Capture(false); }));
+        _shotRegion = new ToolStripMenuItem("", null, (_, _) => _invoker.BeginInvoke(() => { _menu.Close(); Thread.Sleep(250); Screenshot.Capture(true); }));
+        // משוב 15.10 (תיקון): במגש נשארים כל הפריטים; הקיצור הוא בסרגל הנעילה (Extras.cs)
+        // משוב 15.10: סמל ברקע בפינה (לפי בחירה) + גודל
+        var wm = new ToolStripMenuItem(Lang.En ? "Corner logo" : "סמל ברקע בפינה");
+        var wmOn = new ToolStripMenuItem(Lang.En ? "Show" : "הצג", null, (_, _) => Watermark.Toggle());
+        wm.DropDownItems.Add(wmOn);
+        wm.DropDownItems.Add(new ToolStripSeparator());
+        foreach (var (n, he, en) in new[] { (112, "קטן", "Small"), (152, "בינוני", "Medium"), (192, "גדול", "Large") })
+        {
+            var it = new ToolStripMenuItem(Lang.En ? en : he, null, (_, _) => Watermark.SetSize(n)) { Tag = n };
+            wm.DropDownItems.Add(it);
+        }
+        wm.DropDownItems.Add(new ToolStripSeparator());
+        foreach (var (c, he, en) in new[] { ("tl", "שמאל למעלה", "Top left"), ("tr", "ימין למעלה", "Top right"), ("bl", "שמאל למטה", "Bottom left"), ("br", "ימין למטה", "Bottom right") })
+            wm.DropDownItems.Add(new ToolStripMenuItem(Lang.En ? en : he, null, (_, _) => Watermark.SetCorner(c)) { Tag = c });
+        wm.DropDownOpening += (_, _) =>
+        {
+            foreach (ToolStripItem x in wm.DropDownItems)
+                if (x is ToolStripMenuItem m && m.Tag is string cc) m.Checked = cc == Config.Get("watermark.corner", "bl");
+            wmOn.Checked = Config.Get("watermark.enabled", false);
+            foreach (ToolStripItem x in wm.DropDownItems)
+                if (x is ToolStripMenuItem m && m.Tag is int sz) m.Checked = sz == Config.Get("watermark.size", 112);
+        };
+        menu.Items.AddRange(new ToolStripItem[] { _about, _changelog, _report, _shot, _shotRegion, wm, _install, _plugins, _unpair, _lang, new ToolStripSeparator(), _exit });
+
+        foreach (var (item, glyph) in new (ToolStripItem, string)[] { (_about, ""), (_changelog, ""), (_report, ""), (_shot, ""), (_shotRegion, ""),
+                     (wm, ""), (_install, ""), (_plugins, ""), (_unpair, ""), (_lang, ""), (_exit, "") })
+            TrayMenuStyle.Glyph(item, glyph);
+        menu.Items.Insert(3, new ToolStripSeparator());
+        menu.Items.Insert(7, new ToolStripSeparator());
+        TrayMenuStyle.Apply(menu);
 
         _icon = new NotifyIcon
         {
@@ -67,6 +98,7 @@ public static class Tray
         });
         Application.ApplicationExit += (_, _) =>
         {
+            try { if (!Kiosk.IsActive) LockScreenImage.RestoreOnExit(); } catch { }
             _icon.Visible = false;
             _icon.Dispose();
         };
@@ -99,6 +131,8 @@ public static class Tray
     {
         if (_menu == null) return;
         _menu.RightToLeft = Lang.En ? RightToLeft.No : RightToLeft.Yes;
+        _shot.Text = Lang.T("צילום מסך (Ctrl+Shift+F11)", "Screenshot (Ctrl+Shift+F11)");
+        _shotRegion.Text = Lang.T("צילום אזור (Ctrl+Shift+F12)", "Region screenshot (Ctrl+Shift+F12)");
         _plugins.Text = Lang.T("פתח את תיקיית התוספים", "Open the plugins folder");
         _about.Text = Lang.T("אודות ועדכונים…", "About and updates…");
         _changelog.Text = Lang.T("יומן שינויים (מקומי)…", "Changelog (offline)…");
@@ -150,7 +184,11 @@ public static class Tray
         string text = Lang.T(Program.AppName + " ", Program.AppNameEn + " ") + Program.Version + Lang.T(" — פורט ", " — port ") + Program.Port;
         if (Kiosk.IsActive) text += Lang.T(" (נעילה פעילה)", " (lock mode on)");
         _status.Text = text;
-        if (_icon != null) _icon.Text = text.Length > 63 ? text[..63] : text;
+        if (_icon != null)
+        {
+            string tip = Lang.T(Program.AppName, Program.AppNameEn) + " — " + (Kiosk.IsActive ? Lang.T("החסימה פעילה", "lock on") : Lang.T("החסימה כבויה", "lock off"));
+            _icon.Text = tip.Length > 63 ? tip[..63] : tip;
+        }
     }
 }
 
@@ -159,14 +197,12 @@ internal sealed class AboutForm : Form
 {
     private static AboutForm _open;
     private readonly Label _state = new() { AutoSize = false, Height = 44, Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter };
-    private readonly Button _check = new() { AutoSize = true, Padding = new Padding(10, 4, 10, 4) };
-    private readonly Button _install = new() { AutoSize = true, Padding = new Padding(10, 4, 10, 4), Enabled = false };
+    private readonly Button _check = new() { AutoSize = true, MinimumSize = new Size(140, 38), Padding = new Padding(12, 5, 12, 5), FlatStyle = FlatStyle.Flat };
+    private readonly Button _install = new() { AutoSize = true, MinimumSize = new Size(140, 38), Padding = new Padding(12, 5, 12, 5), Enabled = false, FlatStyle = FlatStyle.Flat };
 
     public static void Open()
     {
-        if (_open is { IsDisposed: false }) { _open.Activate(); return; }
-        _open = new AboutForm();
-        _open.Show();
+        Hub.Show("about", () => _open = new AboutForm());
     }
 
     private AboutForm()
@@ -181,19 +217,23 @@ internal sealed class AboutForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         Font = new Font("Segoe UI", 10f);
         BackColor = Color.White;
-        ClientSize = new Size(480, 445);
+        ClientSize = new Size(480, 532);
         Padding = new Padding(20);
+        AutoScroll = true;                      // בטאב של החלון הראשי השטח קטן מ-532 — גוללים במקום לחתוך
+        AutoScrollMinSize = new Size(0, 520);
 
         var logo = new PictureBox { Image = new Icon(Overlay.AppIcon(), 64, 64).ToBitmap(), SizeMode = PictureBoxSizeMode.CenterImage, Height = 76, Dock = DockStyle.Top };
         var title = new Label { Text = Lang.T(Program.AppName, Program.AppNameEn), Font = new Font("Segoe UI Semibold", 16f), Height = 38, Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter };
-        var ver = new Label { Text = Lang.T("גרסה ", "Version ") + Program.Version + " · " + Lang.T("חד בדרא, יאיר דניאל", "Chad Bedera, Yair Daniel"), Height = 26, Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.DimGray };
+        var ver = new Label { Text = Lang.T("גרסה ", "Version ") + Program.Version + " · " + Lang.T(Program.GemachName, Program.GemachNameEn), Height = 26, Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.DimGray };
+        var ded = new Label { Text = "לעילוי נשמת הנערה הצדקנית\nאסתר גיטה דינר בת רבי מיכאל שלום הלוי שיבדלט\"א\nתהא נשמתה צרורה בצרור החיים. תנצב\"ה", Height = 84, Font = new Font("Segoe UI", 10.5f), Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.FromArgb(90, 70, 40) };
         // קרדיט נפרד מההקדשה: ספריית חישוב הזמנים של הגיבוי (לא קשור להקדשה למעלה)
         var zmanimCredit = new Label { Text = Lang.T(
                 "חישוב זמני היום (גיבוי): פרויקט Zmanim/KosherJava מאת Eliyahu Hershfeld (kosherjava.com), ברישיון LGPL",
                 "Fallback daily zmanim: the Zmanim/KosherJava project by Eliyahu Hershfeld (kosherjava.com), LGPL license"),
-            Height = 36, Font = new Font("Segoe UI", 8.5f), Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray };
+            Height = 44, Font = new Font("Segoe UI", 8.5f), Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray };
         var zmanimLink = new LinkLabel { Text = "kosherjava.com/zmanim-project", Height = 22, Font = new Font("Segoe UI", 8.5f), Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter };
         zmanimLink.LinkClicked += (_, _) => OpenUrl("http://www.kosherjava.com/zmanim-project/");
+        var lic = new Label { Text = Lang.T("רישיון: PolyForm Noncommercial 1.0.0 — לשימוש אישי ולא-מסחרי", "License: PolyForm Noncommercial 1.0.0 — personal, non-commercial use"), Height = 22, Font = new Font("Segoe UI", 8.5f), Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray };
         var link = new LinkLabel { Text = Lang.T("עמוד ההוצאות ויומן השינויים", "Releases page and changelog"), Height = 28, Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter };
         link.LinkClicked += (_, _) => OpenUrl(UpdateApi.AllReleasesUrl);
 
@@ -201,14 +241,29 @@ internal sealed class AboutForm : Form
         _install.Text = Lang.T("עדכון עכשיו", "Update now");
         _check.Click += async (_, _) => await DoCheck(true);
         _install.Click += async (_, _) => await DoInstall();
-        var row = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 48, FlowDirection = Lang.En ? FlowDirection.LeftToRight : FlowDirection.RightToLeft, Padding = new Padding(80, 6, 0, 0) };
+        foreach (var btn in new[] { _check, _install })
+        {
+            btn.FlatAppearance.BorderSize = 1;
+            btn.Cursor = Cursors.Hand;
+            void Paint()
+            {
+                bool on = btn.Enabled;
+                btn.BackColor = on ? Color.White : Color.FromArgb(232, 232, 232);
+                btn.ForeColor = on ? Color.FromArgb(122, 84, 14) : Color.FromArgb(150, 150, 150);
+                btn.FlatAppearance.BorderColor = on ? Color.FromArgb(184, 134, 11) : Color.FromArgb(214, 214, 214);
+                btn.Cursor = on ? Cursors.Hand : Cursors.Default;
+            }
+            btn.EnabledChanged += (_, _) => Paint();
+            Paint();
+        }
+        var row = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 64, FlowDirection = Lang.En ? FlowDirection.LeftToRight : FlowDirection.RightToLeft, Padding = new Padding(80, 8, 0, 8) };
         row.Controls.AddRange(new Control[] { _check, _install });
 
         if (OfflineMode.IsOn()) // #9: אוצריא במצב מנותק — מסתירים את אזור העדכונים
-            Controls.AddRange(new Control[] { zmanimLink, zmanimCredit, ver, title, logo });
+            Controls.AddRange(new Control[] { lic, zmanimLink, zmanimCredit, ded, ver, title, logo });
         else
         {
-            Controls.AddRange(new Control[] { row, _state, link, zmanimLink, zmanimCredit, ver, title, logo });
+            Controls.AddRange(new Control[] { row, _state, link, lic, zmanimLink, zmanimCredit, ded, ver, title, logo });
             Shown += async (_, _) => await DoCheck(false);
         }
     }

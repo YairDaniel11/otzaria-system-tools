@@ -59,9 +59,9 @@ jobs:
         env:
           BASE_SHA: a349071dff9759f51cbe3193313f130d0e80a340
         run: |
-          $count = (git log --oneline "$env:BASE_SHA..HEAD" -- file-explorer system-settings | Measure-Object -Line).Lines
-          $minor = 1 + $count
-          "version=0.$minor.0" >> $env:GITHUB_OUTPUT
+          # גרסת התוספים = גרסת הגשר (csproj). מספור 0.x הקודם היה נמוך מ-3.6.0 המותקן ואוצריא סירבה להתקין (שנמוך).
+          $ver = ([xml](Get-Content bridge/OtzariaBridge.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+          "version=$ver" >> $env:GITHUB_OUTPUT
 
       # מספור ה-Release: שני המקטעים הראשונים (major.minor) נשלטים ע"י RELEASE_VERSION.txt (לעדכן:
       # לערוך ולדחוף); המקטע השלישי (patch) הוא github.run_number - מתקדם אוטומטית בכל push. מחושב

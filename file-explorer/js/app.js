@@ -5,9 +5,9 @@
   var ui = window.SS.ui;
   FX.ui = ui;
   FX.t = window.I18N ? window.I18N.t : function (x) { return x; };
-  FX.VERSION = '3.4.0';
-  FX.CHANGELOG_URL = 'https://github.com/YairDaniel11/otzaria-system-tools/blob/main/CHANGELOG.md';
-  FX.BRIDGE_URL = 'https://github.com/YairDaniel11/otzaria-system-tools/releases/latest';
+  FX.VERSION = '1.0.5';
+  FX.CHANGELOG_URL = 'https://github.com/Hadabadra/achat-shaalti/blob/main/CHANGELOG.md';
+  FX.BRIDGE_URL = 'https://github.com/Hadabadra/achat-shaalti/releases/latest';
 
   var LS = 'fx.view';
   var S = {
@@ -124,7 +124,7 @@
     var bridge = S.prov && S.prov.kind === 'bridge';
     c.className = 'topbar-chip ' + (bridge ? 'ok' : 'warn');
     c.innerHTML = '<i class="dot"></i>' + (bridge ? 'מחובר לגשר' : 'מצב מוגבל');
-    c.title = bridge ? 'קיוסק אוצריא פועל' : 'קיוסק אוצריא לא נמצא — עובדים על תיקיות שאושרו בלבד';
+    c.title = bridge ? 'אחת שאלתי פועלת' : 'אחת שאלתי לא נמצאה — עובדים על תיקיות שאושרו בלבד';
   }
 
   function showBanner(on) {
@@ -134,7 +134,7 @@
     b.dataset.built = '1';
     b.innerHTML =
       '<span class="fx-banner-ic">' + ic('plug') + '</span>' +
-      '<div class="fx-banner-text"><b>קיוסק אוצריא לא נמצא.</b> ' +
+      '<div class="fx-banner-text"><b>אחת שאלתי לא נמצאה.</b> ' +
       '<span>בלעדיו אפשר לעבוד רק על תיקיות שאישרתם, בלי העתקה ויצירת קבצים. מורידים את <b>OtzariaBridge.exe</b>, מפעילים פעם אחת, והחיבור יזוהה מעצמו.</span></div>' +
       '<div class="fx-banner-actions">' +
       '<button class="btn btn-primary" id="fx-dl">' + ic('open') + 'פתח בדפדפן</button>' +
@@ -203,7 +203,7 @@
       if (!S.prov || S.prov.kind !== 'bridge') {
         var switching = !!S.prov;
         await setProvider(FX.BridgeProvider);
-        if (switching) ui.toast('קיוסק אוצריא חובר — כל הפעולות זמינות', 'success');
+        if (switching) ui.toast('אחת שאלתי חוברה — כל הפעולות זמינות', 'success');
       }
       return true;
     }
@@ -230,6 +230,14 @@
     if (S.prov && S.prov.kind === 'bridge' && isLinkError(e)) connect(false);
   }
 
+  /* 4ג (לפי בחירה): תיקיות הגישה המהירה כספרים בספריית אוצריא; כבוי = רשימה ריקה */
+  function publishLibFolders() {
+    if (!window.SdkX || !SdkX.setLibraryBooks) return;
+    var on = !!opts().libFolders;
+    SdkX.setLibraryBooks(on ? (S.known || []).filter(function (k) { return k.path && k.path.indexOf('::') !== 0; })
+      .map(function (k) { return { id: k.path, title: k.name, categoryPath: '/סייר קבצים' }; }) : []);
+  }
+
   /* ---------- סרגל צד: מיקומים ---------- */
   async function renderSide() {
     var side = $('fx-side');
@@ -237,6 +245,7 @@
     try {
       var r = await S.prov.roots();
       S.known = r.known || [];
+      publishLibFolders();
       html += '<button class="nav-item" data-path="">' + ic(S.prov.kind === 'bridge' ? 'pc' : 'star') + '<span>' + FX.esc(S.prov.rootLabel) + '</span></button>';
       if (S.known.length) {
         html += '<div class="fx-side-label">' + (S.prov.kind === 'bridge' ? 'גישה מהירה' : 'תיקיות שאושרו') + '</div>';
@@ -269,6 +278,20 @@
     });
   }
 
+  /* ---------- 4ב: ספריית אוצריא כתיקייה וירטואלית (library.getTree; ספר נפתח בעיון) ---------- */
+  var OTZ = '::otzaria';
+  function isOtz(p) { return typeof p === 'string' && p.indexOf(OTZ) === 0; }
+  async function otzList(path) {
+    var cat = path.slice(OTZ.length) || '';
+    var t = await window.Otzaria.call('library.getTree', { path: cat || '/', includeBooks: !!cat });
+    t = t && (t.data !== undefined ? t.data : t);
+    if (!t) throw new Error('הקטגוריה לא נמצאה');
+    var ents = (t.categories || []).map(function (c) { return { name: c.title, path: OTZ + c.path, type: 'dir' }; })
+      .concat((t.books || []).map(function (b) { return { name: b.title, path: OTZ + '#' + (b.id || b.title), type: 'file', otzBook: b }; }));
+    var up = cat.replace(/\/[^\/]*$/, '');
+    return { path: path, entries: ents, isRoot: false, parent: cat ? (up ? OTZ + up : OTZ) : '' };
+  }
+
   /* ---------- טעינת תיקייה ---------- */
   async function load(path, push) {
     cancelSearch();
@@ -277,7 +300,7 @@
     $('fx-list').innerHTML = '<div class="fx-empty">' + ui.loading('טוען…') + '</div>';
     var r;
     try {
-      r = await S.prov.list(path, { showHidden: S.showHidden });
+      r = isOtz(path) ? await otzList(path) : await S.prov.list(path, { showHidden: S.showHidden });
     } catch (e) {
       if (id !== S.loadId) return;
       opError(e, 'פתיחת התיקייה נכשלה');
@@ -290,12 +313,14 @@
     S.path = r.path;
     S.isRoot = !!r.isRoot;
     S.recycle = !!r.recycle;
+    S.otz = isOtz(r.path);
     S.parent = r.parent;
     S.truncated = !!r.truncated;
     var ents = r.entries || [];
     if (r.isRoot && r.known && r.known.length && S.prov.kind === 'bridge') {
       ents = r.known.map(function (k) { return { name: k.name, path: k.path, type: 'dir', icon: k.icon }; }).concat(ents);
     }
+    if (r.isRoot && window.Otzaria) ents = [{ name: 'ספריית אוצריא', path: OTZ, type: 'dir' }].concat(ents); /* 4ב */
     S.entries = ents;
     S.sel = {}; S.anchor = -1; S.focus = -1;
     $('fx-search').value = '';
@@ -316,6 +341,7 @@
     if (S.search) { exitSearch(); return; }
     if (S.isRoot) return;
     if (S.recycle) { go(''); return; }
+    if (S.otz) { go(S.parent || ''); return; }
     var par = S.prov.parentOf(S.path);
     go(par == null ? '' : par);
   }
@@ -335,6 +361,14 @@
     var c = $('fx-crumbs');
     if (S.search) {
       c.innerHTML = '<span class="fx-crumb-static">' + ic('search') + 'תוצאות חיפוש: <b>' + FX.esc(S.search.query) + '</b> ב-' + FX.esc(S.prov.displayPath(S.search.root)) + '</span>';
+      updateNavBtns();
+      return;
+    }
+    if (S.otz) {
+      var segs = S.path.slice(OTZ.length).split('/').filter(Boolean), acc = '';
+      c.innerHTML = '<button class="fx-crumb" data-path="">' + FX.esc(S.prov.rootLabel) + '</button><span class="fx-crumb-sep">' + ic('chevron') + '</span>' +
+        '<button class="fx-crumb" data-path="' + OTZ + '">ספריית אוצריא</button>' +
+        segs.map(function (g) { acc += '/' + g; return '<span class="fx-crumb-sep">' + ic('chevron') + '</span><button class="fx-crumb" data-path="' + FX.esc(OTZ + acc) + '">' + FX.esc(g) + '</button>'; }).join('');
       updateNavBtns();
       return;
     }
@@ -663,7 +697,7 @@
   /* ---------- סרגל פעולות ---------- */
   var CMDS = [
     { id: 'newFolder', icon: 'newFolder', label: 'תיקייה חדשה', cap: 'mkdir' },
-    { id: 'newFile', icon: 'newFile', label: 'קובץ טקסט חדש', cap: 'newFile' },
+    { id: 'newFile', icon: 'newFile', label: 'קובץ חדש', cap: 'newFile' },
     { sep: true },
     { id: 'cut', icon: 'cut', label: 'גזירה', cap: 'move', key: 'Ctrl+X' },
     { id: 'copy', icon: 'copy', label: 'העתקה', cap: 'copy', key: 'Ctrl+C' },
@@ -678,6 +712,7 @@
     { id: 'open', icon: 'open', label: 'פתיחה', key: 'Enter' },
     { id: 'reveal', icon: 'reveal', label: 'הצגה בסייר של Windows', cap: 'reveal' },
     { id: 'openNewTab', icon: 'open', label: 'פתיחה בכרטיסייה חדשה', menuOnly: true },
+    { id: 'openInReader', icon: 'open', label: 'פתיחה בעיון של אוצריא', menuOnly: true }, /* 4א */
     { id: 'openLocation', icon: 'folderOpen', label: 'פתיחת מיקום הקובץ', menuOnly: true },
     { id: 'copyPath', icon: 'copy', label: 'העתקה כנתיב', key: 'Ctrl+Shift+C', menuOnly: true },
     { id: 'eject', icon: 'usb', label: 'הוצאה בבטחה (USB)', menuOnly: true }, /* #20 */
@@ -687,6 +722,16 @@
     { id: 'sendTo', icon: 'usb', label: 'שליחה לכונן נייד', menuOnly: true },
     { id: 'eject', icon: 'usb', label: 'הוצאה בטוחה', menuOnly: true }
   ];
+  /* 4א: קובץ שהוא ספר אישי בספריית אוצריא — פותחים אותו בעיון של אוצריא (התאמה לפי שם הספר) */
+  async function openInReader(e) {
+    var stem = String(e.name || '').replace(/\.[^.]+$/, '');
+    var list = null;
+    try { list = await window.Otzaria.call('library.findBooks', { query: stem, limit: 20 }); } catch (err) { list = null; }
+    list = list && (list.data !== undefined ? list.data : list);
+    var hit = Array.isArray(list) && (list.find(function (b) { return b && b.title === stem; }) || (list.length === 1 ? list[0] : null));
+    if (!hit) { ui.toast('הקובץ לא נמצא כספר בספריית אוצריא', 'info'); return; }
+    try { await window.Otzaria.call('reader.openBook', hit); } catch (err) { ui.toast('הפתיחה בעיון נכשלה', 'error'); }
+  }
   function inFolder() { return !S.isRoot && !S.search && !S.recycle; }
   function recycleCmdState(id) {
     var n = selected().length;
@@ -714,6 +759,7 @@
       case 'reveal': return { on: n >= 1 && p.caps.reveal && sel[0].type !== 'drive' };
       case 'props': return { on: (n === 1 || inFolder()) && p.caps.properties };
       case 'openNewTab': return { on: n === 1 && (sel[0].type === 'dir' || sel[0].type === 'drive') };
+      case 'openInReader': return { on: n === 1 && sel[0].type !== 'dir' && sel[0].type !== 'drive' && /\.(txt|docx?|pdf|html?)$/i.test(sel[0].name || '') && !!window.Otzaria };
       case 'openLocation': return { on: n === 1 && !S.recycle && !!S.search };
       case 'copyPath': return { on: n >= 1 };
       case 'eject': return { on: n === 1 && p.kind === 'bridge' && (sel[0].type === 'drive' || FX.win.isDriveRoot(sel[0].path)) && sel[0].driveType === 'removable' };
@@ -761,6 +807,7 @@
       case 'reveal': return S.prov.reveal(selected()[0].path).catch(function (e) { opError(e, 'ההצגה נכשלה'); });
       case 'props': return props();
       case 'openNewTab': return newTab(selected()[0].path);
+      case 'openInReader': return openInReader(selected()[0]);
       case 'openLocation': return openLocation(selected()[0]);
       case 'zip': case 'unzip': case 'sendTo': case 'eject': return FX.packb[id](selected(), S.path);
       case 'copyPath': return copyText(selected().map(function (x) { return S.prov.displayPath(x.path); }).join('\n')).then(function () { ui.toast('הנתיב הועתק', 'success'); });
@@ -788,6 +835,12 @@
     if (/^\.+$/.test(s)) return 'שם לא תקין';
     return '';
   }
+  /* A5: סוגי קבצים חדשים (קובץ ריק; Word/RTF/HTML פותחים קובץ ריק כמסמך חדש) */
+  var NEW_TYPES = [
+    { value: 'txt', label: 'מסמך טקסט (.txt)' }, { value: 'docx', label: 'מסמך Word (.docx)' },
+    { value: 'rtf', label: 'מסמך RTF (.rtf)' }, { value: 'md', label: 'Markdown (.md)' },
+    { value: 'csv', label: 'טבלה CSV (.csv)' }, { value: 'html', label: 'דף HTML (.html)' }, { value: 'json', label: 'JSON (.json)' }
+  ];
   async function newItem(isDir) {
     var base = FX.t(isDir ? 'תיקייה חדשה' : 'מסמך חדש.txt');
     var names = {}; S.entries.forEach(function (e) { names[e.name.toLowerCase()] = 1; });
@@ -795,11 +848,13 @@
     while (names[name.toLowerCase()]) name = isDir ? base + ' (' + (n++) + ')' : base.replace(/\.txt$/, '') + ' (' + (n++) + ').txt';
     var made = null;
     var r = await ui.dialog({
-      title: isDir ? 'תיקייה חדשה' : 'קובץ טקסט חדש', icon: 'info',
-      fields: [{ name: 'name', label: 'שם', value: name }],
+      title: isDir ? 'תיקייה חדשה' : 'קובץ חדש', icon: 'info',
+      fields: isDir ? [{ name: 'name', label: 'שם', value: name }] : [{ name: 'name', label: 'שם', value: name.replace(/\.txt$/, '') },
+        { name: 'ext', type: 'select', label: 'סוג', value: 'txt', options: NEW_TYPES }],
       validate: function (v) { return validName(v.name); },
       onSubmit: async function (v) {
         var nm = v.name.trim();
+        if (!isDir && v.ext && !/\.[^.]+$/.test(nm)) nm += '.' + v.ext; // A5: כל הסוגים
         if (!isDir && !/\.[^.]+$/.test(nm)) nm += '.txt';
         made = isDir ? await S.prov.mkdir(S.path, nm) : await S.prov.newTextFile(S.path, nm);
         return nm;
@@ -817,7 +872,7 @@
     // להקליד לתוכה. כאן פותחים ישר ביישום חיצוני (Notepad וכו') כדי שאפשר יהיה לכתוב משהו בפועל
     if (!isDir) {
       if (S.prov.caps.open) S.prov.open(newPath).catch(function (err) { opError(err, 'הפתיחה נכשלה'); });
-      else ui.toast('הקובץ נוצר ריק. לעריכה יש לפתוח אותו ביישום חיצוני (דורש קיוסק אוצריא)', 'info');
+      else ui.toast('הקובץ נוצר ריק. לעריכה יש לפתוח אותו ביישום חיצוני (דורש אחת שאלתי)', 'info');
     }
   }
   async function reloadSelect(paths) {
@@ -996,7 +1051,7 @@
 
   /* ---------- הגדרות פתיחה (לכל צופה, נשמרות בדפדפן) ---------- */
   var OPT_KEY = 'fx.options';
-  var OPT_DEF = { pdf: 'internal', word: 'two', text: 'internal', image: 'internal', singleClickOpen: false };
+  var OPT_DEF = { pdf: 'internal', word: 'two', text: 'internal', image: 'internal', singleClickOpen: false, askApp: true, libFolders: false };
   function opts() {
     var o = {};
     try { o = JSON.parse(localStorage.getItem(OPT_KEY) || '{}') || {}; } catch (e) { o = {}; }
@@ -1042,7 +1097,9 @@
       setRow('מסמכי Word', 'שני טורים נוחים לקריאה, טור אחד, או תוסף וורד לאוצריא', seg('word', o.word, [['two', 'שני טורים'], ['one', 'טור אחד'], ['wordplugin', 'וורד לאוצריא']].concat(ext))) +
       setRow('קובצי טקסט', '', seg('text', o.text, [['internal', 'צופה פנימי']].concat(ext))) +
       setRow('תמונות', '', seg('image', o.image, [['internal', 'תצוגה מקדימה']].concat(ext))) +
-      '<p class="muted small">פתיחה ביישום חיצוני דורשת את קיוסק אוצריא; בלעדיו הקובץ נפתח בצופה הפנימי.</p></div>';
+      setRow('לשאול באיזו תוכנה לפתוח', 'בכל פתיחה ביישום חיצוני מוצג חלון הבחירה של Windows, במקום לפתוח תמיד באותה תוכנה. בנעילה — תמיד תוכנת ברירת המחדל.', setSwitch('askApp', o.askApp !== false)) +
+      setRow('תיקיות הגישה המהירה בספריית אוצריא', 'תיקיות הגישה המהירה מוצגות בספרייה תחת "סייר קבצים", ולחיצה פותחת אותן בסייר. רק התיקיות — לא הקבצים.', setSwitch('libFolders', !!o.libFolders)) +
+      '<p class="muted small">פתיחה ביישום חיצוני דורשת את אחת שאלתי; בלעדיו הקובץ נפתח בצופה הפנימי.</p></div>';
     if (id === 'view') return '<div class="fx-set-card"><div class="fx-set-title">' + ic('grid') + 'תצוגת הקבצים</div>' +
       setRow('פריסה', 'כמו בתפריט "תצוגה" של סייר הקבצים של Windows', seg('mode', FX.layout.mode(), [
         ['xlicons', 'סמלים גדולים מאוד'], ['licons', 'סמלים גדולים'], ['micons', 'סמלים בינוניים'], ['sicons', 'סמלים קטנים'],
@@ -1051,7 +1108,7 @@
       setRow('חלונית תצוגה מקדימה', 'פאנל בצד שמראה תצוגה מקדימה של הקובץ שנבחר (טקסט, תמונה, PDF ועוד)', setSwitch('preview', FX.layout.isPreview())) +
       setRow('חלונית פרטים', 'פאנל בצד שמראה מידע על הפריט שנבחר (סוג, גודל, תאריך) בלי לטעון תצוגה מקדימה. חולק את אותו אזור עם חלונית התצוגה המקדימה', setSwitch('details', FX.layout.isDetailsPane())) +
       setRow('גודל טקסט', 'גם ב-Ctrl+ / Ctrl- / Ctrl+0', seg('zoom', String(FX.layout.zoom()), [['0.8', 'קטן מאוד'], ['0.9', 'רגיל'], ['1', 'בינוני'], ['1.1', 'גדול'], ['1.2', 'גדול מאוד'], ['1.35', 'ענק']])) +
-      setRow('שורות מצוילות', 'צבע מתחלף בין השורות, כמו ב-Everything', setSwitch('stripes', S.stripes)) +
+      setRow('שורות מפוספסות', 'צבע מתחלף בין השורות', setSwitch('stripes', S.stripes)) +
       setRow('עמודות להצגה', 'רלוונטי לתצוגת "פרטים". אפשר גם בלחיצה ימנית על כותרת העמודות. הרחבת עמודה: גרירת הקצה שלה', seg('cols', '', [['date', 'תאריך ' + (S.cols.date !== false ? '✓' : '✗')], ['type', 'סוג ' + (S.cols.type !== false ? '✓' : '✗')], ['size', 'גודל ' + (S.cols.size !== false ? '✓' : '✗')]])) +
       setRow('הצגת קבצים מוסתרים', 'קבצים ותיקיות עם התכונה "מוסתר" יוצגו בצבע חלש', setSwitch('hidden', S.showHidden)) +
       '</div>';
@@ -1060,15 +1117,17 @@
       setRow('שליחת הערה או דיווח על תקלה', '', '<button type="button" class="btn btn-tonal" data-act="fb">שליחת הערה</button>') +
       setRow('איפוס הגדרות הסייר', 'מחזיר את כל ההגדרות שבמסך הזה לברירת המחדל', '<button type="button" class="btn btn-tonal" data-act="reset">איפוס</button>') +
       '</div>';
-    if (id === 'security') return '<div id="fx-pol-host">' + ui.loading('טוען…') + '</div>';
+    if (id === 'security') return '<div class="fx-set-card fx-set-lockcard"><button type="button" class="btn btn-primary fx-lock-btn" data-act="open-ss-lock">' + ic('lock') + 'הגדרות הנעילה המלאות בהגדרות מערכת</button></div>' +
+      '<div id="fx-pol-host">' + ui.loading('טוען…') + '</div>';
     var b = FX.Bridge && FX.Bridge.info;
     return '<div class="fx-set-card fx-set-hero"><div class="fx-set-logo">' + ic('folder') + '</div><div>' +
+      '<img src="icon/brand.svg" alt="אחת שאלתי" width="144" height="144" style="display:block;margin:0 auto 12px">' +
       '<h3>סייר קבצים</h3><p class="muted">גרסה ' + FX.esc(FX.VERSION) + ' · חד בדרא, יאיר דניאל</p>' +
-      '<p>עיון וניהול קבצים מתוך אוצריא: העתקה, העברה, מחיקה, שינוי שם, חיפוש, סל מיחזור, וצפייה ב-PDF, Word, טקסט ותמונות. עם קיוסק אוצריא — גישה לכל המחשב; בלעדיו — לתיקיות שאישרתם.</p></div></div>' +
-      '<div class="fx-set-card"><div class="fx-set-title">' + ic('info') + 'קיוסק אוצריא</div>' +
+      '<p>עיון וניהול קבצים מתוך אוצריא: העתקה, העברה, מחיקה, שינוי שם, חיפוש, סל מיחזור, וצפייה ב-PDF, Word, טקסט ותמונות. עם אחת שאלתי — גישה לכל המחשב; בלעדיו — לתיקיות שאישרתם.</p></div></div>' +
+      '<div class="fx-set-card fx-set-memorial"><p>לעילוי נשמת</p><b>אסתר גיטה דינר בת רבי מיכאל שלום הלוי שיבדלט"א</b><p>תנצב"ה</p></div>' +
+      '<div class="fx-set-card"><div class="fx-set-title">' + ic('info') + 'אחת שאלתי</div>' +
       setRow(b ? 'מחובר · גרסה ' + FX.esc(b.version || '?') : 'הגשר אינו מחובר', b ? '' : 'בלי הגשר הסייר עובד על תיקיות שאישרתם בלבד',
-        b ? '<button type="button" class="btn btn-tonal" data-act="upd">בדיקת עדכונים</button>' : '') +
-      '<div class="fx-upd muted small" data-slot="upd"></div>' +
+        '') + /* #59: בדיקת עדכונים רק בגשר */
       '</div>'; /* #19: יומן השינויים ועמוד ההוצאות נמצאים בגשר (אודות) */
   }
   function settingsDialog(cat) {
@@ -1081,6 +1140,7 @@
     page.setAttribute('aria-label', 'הגדרות');
     page.innerHTML = '<header class="fx-set-head"><button type="button" class="icon-btn" data-act="close" title="חזרה (Esc)" aria-label="חזרה">' + ic('back') + '</button>' +
       '<h2>הגדרות</h2></header><div class="fx-set-body"><nav class="fx-set-nav">' +
+      '<input type="search" class="fx-set-search" placeholder="חיפוש הגדרה…" aria-label="חיפוש הגדרה">' +
       SET_CATS.map(function (c) { return '<button type="button" class="fx-set-navbtn" data-cat="' + c[0] + '">' + ic(c[2]) + '<span>' + c[1] + '</span></button>'; }).join('') +
       '</nav><div class="fx-set-content"></div></div>';
     document.body.appendChild(page);
@@ -1090,6 +1150,10 @@
       content.innerHTML = setCat(id);
       content.scrollTop = 0;
       if (id === 'security') {
+        var ssb = content.querySelector('[data-act=open-ss-lock]');
+        if (ssb) ssb.addEventListener('click', function () {
+          openInPlugin(SS_PLUGIN, { section: 'fxpolicy' }).catch(function (er) { ui.toast((er && er.message) || 'תוסף הגדרות מערכת לא מותקן', 'error'); });
+        });
         var host = content.querySelector('#fx-pol-host');
         FX.Policy.refresh().then(function () {
           if (!host.isConnected) return;
@@ -1099,6 +1163,24 @@
       }
       try { localStorage.setItem('fx.setCat', id); } catch (e) { /* כלום */ }
     }
+    /* חיפוש הגדרה: עובר על כל הקטגוריות (חוץ מנעילה ואודות, שנטענות דינמית) ומציג את השורות שמתאימות, מקובצות לפי קטגוריה */
+    var search = page.querySelector('.fx-set-search');
+    search.addEventListener('input', function () {
+      var q = search.value.trim().toLowerCase();
+      if (!q) { showCat(localStorageGet('fx.setCat') || SET_CATS[0][0]); return; }
+      var html = '';
+      SET_CATS.forEach(function (c) {
+        if (c[0] === 'security' || c[0] === 'about') return;
+        var tmp = document.createElement('div');
+        tmp.innerHTML = setCat(c[0]);
+        var rows = Array.prototype.filter.call(tmp.querySelectorAll('.fx-set-row'), function (r) { return r.textContent.toLowerCase().indexOf(q) >= 0; });
+        if (rows.length) html += '<div class="fx-set-card"><div class="fx-set-title">' + ic(c[2]) + c[1] + '</div>' + rows.map(function (r) { return r.outerHTML; }).join('') + '</div>';
+      });
+      page.querySelectorAll('.fx-set-navbtn').forEach(function (x) { x.classList.remove('on'); });
+      content.innerHTML = html || '<p class="muted">לא נמצאו הגדרות</p>';
+      content.scrollTop = 0;
+    });
+    function localStorageGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
     function close() { page.remove(); document.removeEventListener('keydown', onKey, true); $('fx-main').focus(); }
     function onKey(e) { if (e.key === 'Escape') { e.stopPropagation(); close(); } }
     document.addEventListener('keydown', onKey, true);
@@ -1110,22 +1192,20 @@
       if (act === 'close') { close(); return; }
       if (act === 'fb') { sendFeedback(); return; }
       if (act === 'changelog') { openUrl(FX.CHANGELOG_URL); return; }
-      if (act === 'releases') { openUrl('https://github.com/YairDaniel11/otzaria-system-tools/releases/latest'); return; }
+      if (act === 'releases') { openUrl('https://github.com/Hadabadra/achat-shaalti/releases/latest'); return; }
       if (act === 'reset') {
         if (!(await ui.confirm('איפוס הגדרות', '<p>להחזיר את הגדרות הסייר לברירת המחדל?</p>', 'איפוס'))) return;
         saveOpts(Object.assign({}, OPT_DEF)); FX.layout.setZoom(0.9); FX.layout.setMode('details'); FX.layout.setPanes(false, false);
         S.showHidden = false; savePrefs(); refresh(); if (window.I18N) window.I18N.set('auto');
         showCat('general'); ui.toast('ההגדרות אופסו', 'success'); return;
       }
-      if (act === 'upd') {
-        var slot = content.querySelector('[data-slot=upd]');
-        slot.textContent = 'בודק…';
-        try {
-          var r = await FX.Bridge.call('/sys/update-check', { force: true }, { timeoutMs: 30000 });
-          slot.textContent = r.newer ? 'גרסה ' + r.latest + ' זמינה. עדכון בלחיצה: הגדרות מערכת ← אודות, או תפריט הגשר ליד השעון ← אודות ועדכונים.'
-            : 'הכול מעודכן (גרסה ' + r.current + ').';
-        } catch (err) { slot.textContent = 'בדיקת העדכון נכשלה: ' + ((err && err.message) || err); }
-        return;
+      if (t.dataset.sw === 'libFolders') {
+        var ol = Object.assign({}, opts()); ol.libFolders = !ol.libFolders;
+        saveOpts(ol); t.classList.toggle('on', ol.libFolders); t.setAttribute('aria-checked', ol.libFolders ? 'true' : 'false'); publishLibFolders(); return;
+      }
+      if (t.dataset.sw === 'askApp') {
+        var oa = Object.assign({}, opts()); oa.askApp = oa.askApp === false;
+        saveOpts(oa); t.classList.toggle('on', oa.askApp); t.setAttribute('aria-checked', oa.askApp ? 'true' : 'false'); return;
       }
       if (t.dataset.sw === 'stripes') {
         S.stripes = !S.stripes; t.classList.toggle('on', S.stripes); t.setAttribute('aria-checked', S.stripes ? 'true' : 'false');
@@ -1164,7 +1244,7 @@
 
   function sendFeedback() {
     window.Feedback.open({
-      ui: ui, plugin: 'סייר קבצים', version: FX.VERSION,
+      ui: ui, plugin: 'סייר קבצים', version: FX.VERSION, bridge: FX.Bridge,
       extra: function () {
         var b = FX.Bridge && FX.Bridge.info;
         return ['מצב: ' + (S.prov ? S.prov.kind : '?'), 'גשר: ' + (b ? (b.version || '?') : 'לא מחובר')];
@@ -1174,6 +1254,7 @@
 
   /* פתיחה בתוסף אחר (plugin.openOther, אוצריא 0.9.97) */
   var PDF_PLUGIN = 'com.chadbedera.pdfviewer';
+  var SS_PLUGIN = 'com.chadbedera.systemsettings'; /* #56: מעבר ישיר להגדרות הנעילה ולהפך */
   var WORD_PLUGIN = 'com.otzaria_word_editor.superdoc';
   async function openInPlugin(pluginId, param) {
     var r = await window.Otzaria.call('plugin.openOther', { pluginId: pluginId, param: param || null });
@@ -1219,7 +1300,8 @@
   function openInWordPlugin(e) { return sendToPlugin(e, WORD_PLUGIN, 'וורד לאוצריא'); }
 
   function openExternal(e) {
-    S.prov.open(e.path).catch(function (err) { opError(err, 'הפתיחה נכשלה'); });
+    /* #59: בכל פתיחה ביישום חיצוני — חלון "פתח באמצעות" של Windows (אם לא כובה בהגדרות), במקום לזכור תוכנה */
+    S.prov.open(e.path, { openWith: opts().askApp !== false }).catch(function (err) { opError(err, 'הפתיחה נכשלה'); });
   }
   /* מדיניות מסמכי Office שנקבעת על ידי המנהל (kiosk.allowExcelDocs בגשר): מסמכי Word מותרים תמיד,
      גיליונות Excel מותרים רק כשהמנהל אישר, ומצגות PowerPoint חסומות תמיד בלי אפשרות הפעלה */
@@ -1238,6 +1320,7 @@
   async function openEntry(e, find) {
     if (!e) return;
     if (S.recycle) { ui.toast('כדי לפתוח פריט יש לשחזר אותו קודם', 'info'); return; }
+    if (e.otzBook) { try { await window.Otzaria.call('reader.openBook', e.otzBook); } catch (err) { ui.toast('הפתיחה בעיון נכשלה', 'error'); } return; }
     if (e.type === 'dir' || e.type === 'drive') { go(e.path); return; }
     var ext = FX.extOf(e.name);
     var o = opts();
@@ -1377,12 +1460,64 @@
   }
 
   /* ---------- חיפוש זורם ---------- */
+  /* #56: חיפוש גם בספרייה של אוצריא עצמה (library.findBooks) — שורת ספרים מעל תוצאות הקבצים */
+  var libSeq = 0;
+  function libSearch(q) {
+    var host = $('fx-libhits'); if (!host) return;
+    var my = ++libSeq;
+    if (!q || !window.Otzaria || !window.Otzaria.call) { host.hidden = true; host.innerHTML = ''; return; }
+    window.Otzaria.call('library.findBooks', { query: q, limit: 12 }).then(function (r) {
+      if (my !== libSeq) return;
+      var list = (r && (r.data || r.result)) || (Array.isArray(r) ? r : []);
+      if (!list.length) { host.hidden = true; host.innerHTML = ''; return; }
+      host.innerHTML = '<span class="fx-libhits-title">' + ic('book') + 'בספריית אוצריא:</span>' + list.map(function (b, i) {
+        return '<button type="button" class="fx-libhit" data-i="' + i + '" title="פתיחה בקורא של אוצריא · לחיצה ימנית: הקובץ המקורי (PDF/Word)">' + ui.esc(b.title || b.bookId || '') + '</button>';
+      }).join('');
+      host.hidden = false;
+      /* #69 (library.content.read): לחיצה ימנית — הקובץ המקורי שמאחורי ספר PDF/Word בספרייה, בצופה PDF+OCR או בוורד לאוצריא */
+      host.oncontextmenu = function (e) {
+        var btn = e.target.closest('.fx-libhit'); if (!btn) return;
+        e.preventDefault();
+        openLibraryFile(list[+btn.dataset.i] || {});
+      };
+      host.onclick = function (e) {
+        var btn = e.target.closest('.fx-libhit'); if (!btn) return;
+        var b = list[+btn.dataset.i] || {};
+        var a = b.bookUid ? { bookUid: b.bookUid } : { bookId: b.bookId || b.title };
+        window.Otzaria.call('reader.openBook', a).then(function (x) {
+          if (x && x.success === false) ui.toast('לא ניתן לפתוח את הספר', 'error');
+        }, function () { ui.toast('לא ניתן לפתוח את הספר', 'error'); });
+      };
+    }, function () { if (my === libSeq) { host.hidden = true; host.innerHTML = ''; } });
+  }
+
+  async function openLibraryFile(b) {
+    var id = b.bookUid ? { bookUid: b.bookUid } : { bookId: b.bookId || b.title };
+    busy(true, 'מכין את הקובץ…');
+    try {
+      var r = await FX.callHost('library.openBookFile', Object.assign({ access: 'read' }, id));
+      var ext = String((r && r.name) || '').split('.').pop().toLowerCase();
+      var target = ext === 'pdf' ? [PDF_PLUGIN, 'צופה PDF+OCR'] : ext === 'docx' ? [WORD_PLUGIN, 'וורד לאוצריא'] : null;
+      if (!target) { busy(false); ui.toast('לספר הזה אין קובץ PDF או Word מקורי — נפתח בקורא של אוצריא', 'info'); window.Otzaria.call('reader.openBook', id); return; }
+      if (r.size > PLUGIN_MAX) throw FX.OpError('too_large', 'קובץ גדול מ-15MB — פתחו אותו בקורא של אוצריא');
+      var blob = await (await fetch(r.url)).blob();
+      var dataUrl = await new Promise(function (res, rej) { var fr = new FileReader(); fr.onload = function () { res(String(fr.result).replace(/^data:[^;]*/, 'data:' + MIME[ext])); }; fr.onerror = rej; fr.readAsDataURL(blob); });
+      await openInPlugin(target[0], { name: r.name, dataUrl: dataUrl });
+      busy(false);
+    } catch (err) {
+      busy(false);
+      if (String(err && err.code).indexOf('not_found') >= 0) ui.toast('לא ניתן לפתוח את הספר', 'error');
+      else opError(err, 'לא ניתן לפתוח את הספר');
+    }
+  }
+
   function cancelSearch() {
     if (S.search && !S.search.done) S.search.cancelled = true;
   }
   function exitSearch() {
     cancelSearch();
     S.search = null;
+    libSearch('');
     $('fx-search').value = '';
     $('fx-search-clear').hidden = true;
     renderCrumbs(); renderList(); markSide(); renderCmds();
@@ -1392,6 +1527,7 @@
     if (!q) { if (S.search) exitSearch(); return; }
     if (S.recycle) { ui.toast('אין חיפוש בסל המיחזור', 'info'); return; }
     cancelSearch();
+    libSearch(q);
     var root = S.search ? S.search.root : S.path;
     var content = S.prov.caps.contentSearch && $('fx-content').checked;
     var query = content ? '*' : (/[*?]/.test(q) ? q : '*' + q + '*');
@@ -1487,7 +1623,9 @@
       savePrefs(); refresh();
     });
     $('fx-add-folder').addEventListener('click', addFolder);
-    $('fx-settings').addEventListener('click', settingsDialog);
+    $('fx-settings').addEventListener('click', function () { settingsDialog(); });
+    $('fx-about').innerHTML = ic('info');
+    $('fx-about').addEventListener('click', function () { settingsDialog('about'); });
     $('fx-feedback').innerHTML = window.Feedback.ICON;
     $('fx-feedback').addEventListener('click', sendFeedback);
 
@@ -1682,7 +1820,7 @@
   var NEW_DOC_ID = 'chadbedera-fx-new-doc';
   async function newDocFromReader() {
     if (!S.prov || S.prov.kind !== 'bridge') {
-      ui.toast('יצירת מסמך חדש דורשת את קיוסק אוצריא', 'info');
+      ui.toast('יצירת מסמך חדש דורשת את אחת שאלתי', 'info');
       return;
     }
     var dir = '';
@@ -1746,10 +1884,8 @@
   /* הרשאות SDK (sdk-extras.js): קיצור Ctrl+Shift+E, הדבקת נתיב מהלוח, ספרים בחיפוש הספרייה */
   function sdkExtras() {
     var X = window.SdkX; if (!X) return;
-    X.call('storage.get', { key: 'shortcut.explorer' }).then(function (r) {
-      var keys = (r && (r.value || r.data)) || 'Ctrl+Shift+E';
-      X.registerShortcut('open-explorer', keys, function () { X.call('plugin.openOther', { pluginId: X.self, param: null }); });
-    });
+    /* #69: הקיצור מוצהר במניפסט (ctrl+shift+alt+e — ctrl+shift+e תפוס בלוח השנה של אוצריא; ניתן לשינוי בהגדרות אוצריא → קיצורי מקשים) */
+    X.onCommand('openExplorer', function () { X.openSelf(); });
     /* Ctrl+Shift+V: נתיב שהועתק מחוץ לאוצריא -> מעבר אליו */
     document.addEventListener('keydown', function (e) {
       if (!(e.ctrlKey && e.shiftKey && (e.key === 'V' || e.key === 'v'))) return;
@@ -1776,7 +1912,19 @@
     if (window.Otzaria) {
       window.Otzaria.on('plugin.boot', boot);
       window.Otzaria.on('theme.changed', ui.applyTheme);
+      window.Otzaria.on('plugin.page_opened', function (ev) { /* #56: נפתח מתוסף אחר — {view:'settings', cat} */
+        var pr = ev && (ev.param || (ev.data && ev.data.param));
+        if (pr && pr.view === 'settings') settingsDialog(pr.cat || 'security');
+        else if (pr && pr.path && S.prov) go(pr.path);
+      });
       window.Otzaria.on('reader.toolbar_item_clicked', onToolbarItem);
+      window.Otzaria.on('library.providerBook.openRequested', function (ev) { /* 4ג: תיקייה מהספרייה */
+        var p = ev && (ev.id || (ev.data && ev.data.id));
+        if (!p) return;
+        if (window.SdkX && SdkX.openSelf) SdkX.openSelf({ path: p });
+        var start = Date.now();
+        (function wait() { if (S.prov) { go(p); return; } if (Date.now() - start < 8000) setTimeout(wait, 150); })();
+      });
       sdkExtras();
       window.Otzaria.on('plugin.suspended', function () { S.suspended = true; clearTimeout(S.probeTimer); clearTimeout(TU.poll); cancelSearch(); });
       window.Otzaria.on('plugin.resumed', function () {

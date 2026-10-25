@@ -1,0 +1,41 @@
+# גשר מינימלי לצופה PDF+OCR (קוד: arye000001-boop/-PDF, רישיון MIT)
+# כל דחיפה ל-main שנוגעת ב-bridge-min/ בונה מחדש ומעדכנת את המהדורה הקבועה "bridge-min",
+# כך שקישורי ההורדה נשארים קבועים:
+#   https://github.com/Hadabadra/achat-shaalti/releases/download/bridge-min/OtzariaBridgeMin.exe
+#   https://github.com/Hadabadra/achat-shaalti/releases/download/bridge-min/OtzariaBridgeMin-light.exe
+name: bridge-min
+on:
+  push:
+    branches: [main]
+    paths: ["bridge-min/**", ".github/workflows/bridge-min.yml"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 10.0.x }
+      - name: בנייה מלאה (נייד, לא דורש .NET)
+        run: dotnet publish bridge-min/OtzariaBridge.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o dist
+      - name: בנייה קלה (דורש .NET 10 Desktop Runtime)
+        run: |
+          Remove-Item -Recurse -Force bridge-min/obj
+          dotnet publish bridge-min/OtzariaBridge.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o dist-light
+      - name: פרסום למהדורה הקבועה bridge-min
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Copy-Item dist/OtzariaBridge.exe OtzariaBridgeMin.exe
+          Copy-Item dist-light/OtzariaBridge.exe OtzariaBridgeMin-light.exe
+          $tag = "bridge-min"
+          gh release view $tag -R ${{ github.repository }} *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag -R ${{ github.repository }} --target ${{ github.sha }} --latest=false --title "גשר מינימלי לצופה PDF+OCR" --notes "גשר קטן לצופה PDF+OCR בלבד (OCR ישיר, קבצים, צימוד), בלי נעילה והגדרות מערכת. OtzariaBridgeMin.exe — נייד מלא; OtzariaBridgeMin-light.exe — קטן, דורש .NET 10 Desktop Runtime. קוד: arye000001-boop (MIT)."
+          }
+          gh release upload $tag -R ${{ github.repository }} --clobber OtzariaBridgeMin.exe OtzariaBridgeMin-light.exe

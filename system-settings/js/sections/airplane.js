@@ -25,10 +25,10 @@
     }
     slot.innerHTML =
       '<div class="setting-row big"><div class="setting-text"><b>מצב טיסה</b><span class="muted">מכבה את כל התקשורת האלחוטית: Wi-Fi, בלוטות׳ וסלולר. בכיבוי חוזרים המשדרים שהיו דולקים.</span></div>' +
-      ui.switchHtml('sw-ap', d.on, 'מצב טיסה') + '</div>' +
+      '<span class="chip state-chip ' + (d.on ? 'ok' : 'off') + '"><i class="dot"></i>' + (d.on ? 'פעיל' : 'כבוי') + '</span>' + ui.switchHtml('sw-ap', d.on, 'מצב טיסה') + '</div>' +
       '<ul class="list">' + (d.radios || []).map(function (r) {
         return '<li class="list-item"><span class="li-icon">' + ui.icon(r.kind === 'bluetooth' ? 'bluetooth' : r.kind === 'wifi' ? 'wifi' : 'device') + '</span>' +
-          '<span class="li-text"><b>' + ui.esc(r.name) + '</b><span class="muted">' + (r.on ? 'דולק' : 'כבוי') + '</span></span></li>';
+          '<span class="li-text"><b>' + ui.esc(r.name) + '</b></span><span class="chip state-chip ' + (r.on ? 'ok' : 'off') + '"><i class="dot"></i>' + (r.on ? 'דולק' : 'כבוי') + '</span></li>';
       }).join('') + '</ul>';
     slot.querySelector('#sw-ap').addEventListener('click', async function () {
       var b = this; b.disabled = true;

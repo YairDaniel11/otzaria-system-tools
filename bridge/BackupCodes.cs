@@ -1,0 +1,127 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+
+namespace OtzariaBridge;
+
+/// <summary>
+/// #69: קודי גיבוי חד-פעמיים לשחזור (כמו בגוגל) — בנוסף לקוד השחזור הראשי של המחשב, לא במקומו.
+/// 10 קודים, כל אחד נמחק אחרי שימוש. מתאימים רק ל"שכחתי": ביטול הנעילה (גם Ctrl+Alt+Shift+F12 ו---unlock),
+/// ואיפוס הסיסמה. לפעולות ניהול אחרות (מדיניות, ייבוא, BIOS) נדרשים הסיסמה או הקוד הראשי — כך קוד גיבוי
+/// שדלף מאפשר לכל היותר ביטול נעילה אחד, ונשרף.
+/// אין כאן "קוד-אב": כל קוד ייחודי למחשב, נוצר אקראית ונשמר רק כגיבוב (PBKDF2, Secret.cs).
+/// כשרכיב ההקשחה מותקן — הגיבובים נשמרים גם אצלו (מקור האמת, op=set-backup), והוא שורף קוד שנוצל.
+/// ר' docs/recovery-design.md.
+/// </summary>
+internal static class BackupCodes
+{
+    public const string Key = "kiosk.recoveryBackupHashes";   // "recovery" בשם — חסום בייצוא הגדרות ובדוחות
+    public const int Count = 10;
+
+    public static void Register()
+    {
+        Server.Route("/kiosk/recovery/backup", Generate);          // { password, mode?: "file"|"print"|"none" }
+        Server.Route("/kiosk/recovery/backup/status", _ => new { left = Left });
+    }
+
+    /// <summary>כמה קודי גיבוי שלא נוצלו נשארו</summary>
+    public static int Left => Config.GetList(Key).Length;
+
+    /// <summary>"salt|hash" לכל קוד</summary>
+    private static string Pack(string code)
+    {
+        byte[] salt = RandomNumberGenerator.GetBytes(16);
+        return Convert.ToBase64String(salt) + "|" + Secret.Hash(Secret.NormalizeRecovery(code), salt);
+    }
+
+    private static int IndexOf(string code)
+    {
+        string n = Secret.NormalizeRecovery(code);
+        if (n.Length != 12) return -1;           // לא נראה כמו קוד — לא מבזבזים 10 חישובי PBKDF2
+        var list = Config.GetList(Key);
+        for (int i = 0; i < list.Length; i++)
+        {
+            var parts = list[i].Split('|');
+            if (parts.Length == 2 && Secret.Matches(n, parts[1], parts[0])) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>האם זה קוד גיבוי בתוקף (בלי לשרוף). שימו לב — לא נבדק מול רכיב ההקשחה; הוא בודק בעצמו</summary>
+    public static bool Matches(string code) => IndexOf(code) >= 0;
+
+    /// <summary>שורף את הקוד (אחרי שימוש מוצלח). מחזיר false אם לא היה קוד כזה</summary>
+    public static bool Consume(string code)
+    {
+        int i = IndexOf(code);
+        if (i < 0) return false;
+        var list = Config.GetList(Key).ToList();
+        list.RemoveAt(i);
+        Config.Set(Key, new JsonArray(list.Select(s => (JsonNode)JsonValue.Create(s)).ToArray()));
+        Config.Save();
+        AdminLog.Add("נוצל קוד גיבוי לשחזור (נשארו " + list.Count + ")");
+        Config.Log("recovery: נוצל קוד גיבוי חד-פעמי, נשארו " + list.Count);
+        return true;
+    }
+
+    /// <summary>יוצר 10 קודים חדשים (מחליף את הקודמים), שומר לקובץ/מדפיס, ומחזיר אותם פעם אחת בלבד</summary>
+    private static object Generate(JsonElement b)
+    {
+        if (!Kiosk.PasswordConfigured) throw BridgeException.BadRequest(Lang.T("יש להגדיר סיסמת נעילה לפני יצירת קודי גיבוי", "Set a lock password before creating backup codes"));
+        string pw = b.Str("password");
+        Kiosk.RequirePasswordOrRecovery(pw);
+        if (!Kiosk.IsRecoveryCode(pw ?? "")) TwoFactor.Require(Lang.T("יצירת קודי גיבוי לשחזור", "Creating backup recovery codes"));
+
+        var codes = Enumerable.Range(0, Count).Select(_ => Secret.NewRecoveryCode()).ToArray();
+        var packed = codes.Select(Pack).ToArray();
+        // כשרכיב ההקשחה מותקן הוא מקור האמת — אם השמירה שם נכשלת, לא משנים כלום כאן
+        if (HardLock.Available) HardLock.SetBackupCodes(pw, packed);
+        Config.Set(Key, new JsonArray(packed.Select(s => (JsonNode)JsonValue.Create(s)).ToArray()));
+        Config.Save();
+        AdminLog.Add("נוצרו " + Count + " קודי גיבוי לשחזור (הקודמים בוטלו)");
+
+        string path = null;
+        string mode = b.Str("mode") ?? "file";
+        if (mode != "none")
+        {
+            path = WriteFile(codes);
+            try
+            {
+                if (mode == "print") Process.Start(new ProcessStartInfo("notepad.exe", "/p \"" + path + "\"") { UseShellExecute = false });
+                else Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = false });
+            }
+            catch (Exception ex) { Config.Log("backup codes open: " + ex.Message); }
+        }
+        return new { ok = true, codes = codes.Select(Pretty).ToArray(), path, left = codes.Length };
+    }
+
+    public static string Pretty(string code)
+    {
+        string c = Secret.NormalizeRecovery(code);
+        return string.Join("-", Enumerable.Range(0, (c.Length + 3) / 4).Select(i => c.Substring(i * 4, Math.Min(4, c.Length - i * 4))));
+    }
+
+    private static string WriteFile(string[] codes)
+    {
+        string docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        string path = Path.Combine(docs, Program.AppName + " - " + Lang.T("קודי גיבוי לשחזור", "backup recovery codes") + ".txt");
+        var sb = new StringBuilder();
+        sb.Append(Program.AppName).Append(" — ").Append(Lang.T("קודי גיבוי חד-פעמיים לשחזור", "One-time backup recovery codes")).Append("\r\n\r\n");
+        for (int i = 0; i < codes.Length; i++) sb.Append($"{i + 1,2}.  ").Append(Pretty(codes[i])).Append("\r\n");
+        sb.Append("\r\n").Append(Lang.T(
+            "כל קוד עובד פעם אחת בלבד, ונמחק אחרי השימוש. מתאים לביטול הנעילה (גם Ctrl+Alt+Shift+F12) ולאיפוס סיסמה שנשכחה.\r\n" +
+            "יצירת קודים חדשים מבטלת את כל הקודים שבדף הזה. קוד השחזור הראשי ממשיך לעבוד כרגיל.\r\n" +
+            "שמרו את הדף במקום בטוח, לא ליד המחשב.\r\n",
+            "Each code works once only and is deleted after use. Use it to turn off the lock (also Ctrl+Alt+Shift+F12) or to reset a forgotten password.\r\n" +
+            "Creating new codes cancels all the codes on this page. The main recovery code keeps working as usual.\r\n" +
+            "Keep this page in a safe place, not next to the computer.\r\n"));
+        sb.Append("\r\n").Append(Lang.T("נוצר: ", "Created: ")).Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm")).Append("\r\n");
+        File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
+        return path;
+    }
+}

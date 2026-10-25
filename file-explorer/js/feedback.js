@@ -15,7 +15,7 @@
     if (!window.Otzaria) { ui.toast('שליחת הערות זמינה רק בתוך אוצריא', 'info'); return; }
     var form = null;
     var body = '<div class="fb-form">' +
-      '<p class="muted small">ההערה נשלחת לצוות אוצריא ולמפתח התוסף דרך מערכת הדיווח של אוצריא. לפני השליחה תוצג בקשת אישור.</p>' +
+      '<p class="muted small">ההערה נשלחת לצוות אוצריא ולמפתח התוסף דרך מערכת הדיווח של אוצריא, וגם כ-issue ציבורי בגיטהאב של התוסף (פרטים אישיים מוסתרים). לפני השליחה תוצג בקשת אישור.</p>' +
       '<label class="field"><span class="field-label">סוג</span><select class="input fb-type" name="type">' +
       TYPES.map(function (x, i) { return '<option value="' + i + '">' + x[1] + '</option>'; }).join('') + '</select></label>' +
       '<label class="field"><span class="field-label">מה תרצו לספר?</span><textarea class="input fb-text" name="text" rows="6" maxlength="4000" dir="auto"></textarea></label>' +
@@ -36,6 +36,10 @@
     try { res = await window.Otzaria.call('feedback.report', { details: details, reportType: type[0] }); }
     catch (e) { res = { success: false }; }
     var val = res && (res.data !== undefined ? res.data : res);
+    /* #70: גם ל-GitHub (issue ציבורי) דרך הגשר והמתווך, בנוסף לאוצריא */
+    if (val !== 'cancelled' && opts.bridge) {
+      try { await opts.bridge.call('/sys/feedback', { text: details, plugin: opts.plugin, version: opts.version || '', repo: opts.repo || '' }, { timeoutMs: 8000 }); } catch (e) { /* גשר ישן */ }
+    }
     if (val === 'sent' || val === 'queued') ui.toast(val === 'sent' ? 'ההערה נשלחה. תודה!' : 'ההערה תישלח כשיהיה חיבור. תודה!', 'success');
     else if (val === 'cancelled') ui.toast('השליחה בוטלה', 'info');
     else ui.toast('השליחה נכשלה. אפשר לנסות שוב מאוחר יותר.', 'error');

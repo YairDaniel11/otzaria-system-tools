@@ -6,10 +6,6 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  /* מיתוג עצמאי (לא של "אחת שאלתי"): Assistant + שפת צורות מרובעת יותר (--radius-*).
-     הצבעים נשארים ברירת המחדל המקורית בכוונה - אוצריא דורס אותם תמיד בזמן ריצה
-     (theme.changed) ואסור לשים כאן צבעים קשיחים משלנו; ההבדל האמיתי הוא בגופן
-     ובצורות, ששום theme.changed לא נוגע בהם */
   --color-primary: #3A5F94;
   --color-on-primary: #FFFFFF;
   --color-primary-container: #D6E3FF;
@@ -45,14 +41,14 @@
   --color-shadow-28: rgba(0, 0, 0, 0.28);
   --color-shadow-4: rgba(0, 0, 0, 0.4);
 
-  --font-ui: 'Assistant', 'Segoe UI', system-ui, sans-serif;
-  --font-main: 'Assistant', 'Segoe UI', system-ui, sans-serif;
+  --font-ui: 'Rubik', 'Segoe UI', system-ui, sans-serif;
+  --font-main: 'FrankRuhlCLM', 'David', serif;
   --font-mono: Consolas, 'Cascadia Mono', monospace;
   --font-size-base: 1rem;
   --line-height: 1.5;
-  --radius-sm: 0.375em;
-  --radius-md: 0.5em;
-  --radius-lg: 0.625em;
+  --radius-sm: 0.5em;
+  --radius-md: 0.75em;
+  --radius-lg: 1em;
   --radius-pill: 62.4375em;
   /* יעד מגע מינימלי: 2.75rem (44px ביחס לגופן השורש) גם כשאלמנט נמצא בתוך הקשר עם גופן מוקטן (לדוגמה הזום הפנימי 0.9 של סייר הקבצים) */
   --touch: max(3em, 2.75rem);
@@ -442,6 +438,13 @@ code { font-family: var(--font-mono); }
 .recovery-code [data-copy-code] {
   font-size: 0.5rem; flex: none; user-select: none;
 }
+/* #69: קודי גיבוי — שני טורים, ממוספרים */
+.backup-codes {
+  margin: 0.875em 0; padding: 0.875em 2.2em; border-radius: var(--radius-md);
+  border: 0.125em dashed var(--color-primary); background: var(--color-primary-subtle); color: var(--color-primary);
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.35em 2em; text-align: left; user-select: all;
+}
+.backup-codes code { font-family: var(--font-mono); font-size: 1.15em; font-weight: 700; letter-spacing: 0.06em; background: none; padding: 0; }
 .warn-text { display: flex; gap: 0.375em; align-items: flex-start; color: var(--color-error); }
 .warn-text .ic { width: 1.2em; height: 1.2em; margin-top: 0.0625em; }
 .bullets { padding-inline-start: 1.3em; margin: 0.5em 0 0.625em; display: flex; flex-direction: column; gap: 0.25em; }

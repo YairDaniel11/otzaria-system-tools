@@ -1,4 +1,7 @@
-# קיוסק אוצריא (Otzaria Kiosk) — חוזה API v1
+# תוכנת חסימת אוצריא (Otzaria Blocking Software) — חוזה API v1
+
+> #69 (next): `POST /kiosk/recovery/backup {password, mode:"file"|"print"|"none"}` — יוצר 10 קודי גיבוי חד-פעמיים (מחליף קודמים; סיסמה או קוד ראשי + 2FA), מחזיר `{codes[], path, left}` פעם אחת בלבד; `POST /kiosk/recovery/backup/status` → `{left}`. קוד גיבוי מתקבל ב-`/kiosk/disable`, ב-`/kiosk/set-password` (`oldPassword`), ב-`--unlock`, ב-F12 ובהסרה — ונשרף. שירות ההקשחה: `op=set-backup {password, codes:["salt|hash"]}`, ו-`status.backupLeft`; `disable`/`set-password` שורפים קוד גיבוי בעצמם.
+> 3.8.0: `POST /kiosk/recovery/keep {code, mode:"file"|"print"}` — שמירת קוד השחזור לקובץ במסמכים/הדפסה; `/kiosk/status` מחזיר `recoverySaved` ו-`schedule.days`; `/kiosk/settings` מקבל `schedule.days` (מערך 0–6, ריק=כל הימים). `/kiosk/enable` נדחה כל עוד `recoverySaved=false`.
 
 שירות Windows מקומי שהתוספים "סייר קבצים" ו"הגדרות מערכת" פונים אליו דרך
 `Otzaria.call('network.fetchStream', ...)` עם ההרשאה `network.localhost`.
@@ -36,7 +39,7 @@
 | `/fs/delete` | `{ paths: [path], permanent?: false }` | `{ deleted, failed }` — ברירת מחדל לסל המיחזור |
 | `/fs/read` | `{ path, maxBytes?: 5242880 }` | `{ name, size, mime, encoding: "utf8"\|"base64", content, truncated }` — טקסט (txt, md, json, csv, xml, html, js, css, log, ini) כ-utf8, תמונות ו-pdf כ-base64 |
 | `/fs/write-text` | `{ path, content, overwrite?: false }` | `{ path, size }` |
-| `/fs/open` | `{ path }` | `{ opened: true }` — פתיחה ביישום ברירת המחדל של Windows. **חסום (`locked`) במצב נעילה**, אלא אם הסיומת ב-`kiosk.allowOpenExtensions` |
+| `/fs/open` | `{ path, openWith? }` | `{ opened: true, chooser? }` — פתיחה ביישום ברירת המחדל של Windows; `openWith: true` מציג את חלון "פתח באמצעות" (לא בנעילה/מצב מוגבל). **חסום (`locked`) במצב נעילה**, אלא אם הסיומת ב-`kiosk.allowOpenExtensions` |
 | `/fs/reveal` | `{ path }` | פתיחת סייר Windows על הקובץ. חסום במצב נעילה |
 | `/fs/clipboard-get` | `{}` | `{ paths: [path], cut: bool }` — רשימת קבצים מלוח Windows (FileDropList) |
 | `/fs/clipboard-set` | `{ paths, cut }` | `{ ok: true }` — כדי שהעתקה בתוסף תהיה זמינה גם בסייר Windows ולהפך |
@@ -224,6 +227,14 @@ Win / Alt+Tab / Alt+Esc / Ctrl+Esc / Alt+F4 על חלון אוצריא, מעקב
 
 `/kiosk/status` כולל גם את השדה `hard`, באותו מבנה כמו `/kiosk/hard/status`.
 
+## דיווחים (Reports.cs — בסיס מינימלי, 13.10.2026)
+- `POST /diag/list` → `{enabled, items:[{id, sent, date, kind, text}]}` — ממתינים (outbox) ונשלחו (outbox/sent, 30 אחרונים).
+- `POST /diag/delete {ids}` — מחיקת ממתינים לפני שליחה.
+- `POST /diag/markSent {ids, details?}` — עם details: הארכיון שומר את הדיווח המאוחד כמו שנשלח (כולל היומן המקוצר) במקום הפריטים הבודדים.
+- `POST /diag/markSent {ids}` — העברה לארכיון "נשלחו" (במקום `/diag/ack` שמוחק; התוסף נופל ל-ack בגשר ישן).
+- `POST /diag/logTail` → `{text}` — 60 שורות אחרונות של bridge.log בלי שורות שנראות כסוד ובלי שם המשתמש.
+- `POST /diag/note {text}` — תיאור ידני לתור.
+- `POST /sys/offline {report?: bool}` → `{offline}` — התוסף מדווח את מצב המנותק של אוצריא (`app.getConnectivity`); נשמר ב-config (`otzariaOfflineMode`). בלי report: קריאה בלבד.
 ### הקשחת BIOS/UEFI מתוך תוכנה — /bios/*
 
 ניסיון להגדיר סיסמת BIOS ולחסום אתחול מהתקן USB/חיצוני דרך ממשקי WMI ספציפיים ליצרן (ר' `bridge/BiosHardening.cs`
@@ -238,10 +249,34 @@ Win / Alt+Tab / Alt+Esc / Ctrl+Esc / Alt+F4 על חלון אוצריא, מעקב
 כל שלב מדווח בכנות `success`/`message` גם כשהפעולה נכשלת (למשל הגדרה לא נמצאה בדגם הזה, או שכבר מוגדרת סיסמה אחרת) —
 אין החזרת "הצלחה" ללא אישור בפועל מה-WMI.
 
-## דיווחים (Reports.cs — בסיס מינימלי, 13.10.2026)
-- `POST /diag/list` → `{enabled, items:[{id, sent, date, kind, text}]}` — ממתינים (outbox) ונשלחו (outbox/sent, 30 אחרונים).
-- `POST /diag/delete {ids}` — מחיקת ממתינים לפני שליחה.
-- `POST /diag/markSent {ids, details?}` — עם details: הארכיון שומר את הדיווח המאוחד כמו שנשלח (כולל היומן המקוצר) במקום הפריטים הבודדים.
-- `POST /diag/markSent {ids}` — העברה לארכיון "נשלחו" (במקום `/diag/ack` שמוחק; התוסף נופל ל-ack בגשר ישן).
-- `POST /diag/logTail` → `{text}` — 60 שורות אחרונות של bridge.log בלי שורות שנראות כסוד ובלי שם המשתמש.
-- `POST /diag/note {text}` — תיאור ידני לתור.
+## מיקום, משוב ו-PDF (20.10.2026, לא ארוז עדיין)
+
+כל הנקודות POST עם `X-Otzaria-Bridge: 1` ו-`X-Otzaria-Token` (צימוד), כמו כל השאר.
+
+| נתיב | גוף | תשובה |
+|---|---|---|
+| `/sys/location` (וגם `/location`) | `{ maxAgeSec?: 600, timeoutSec?: 15 }` | `{ lat, lon, accuracy, source: "gnss"\|"wifi"\|"cellular"\|"ip"\|"default"\|"unknown", time, altitude?, heading?, speed? }` (שלושת האחרונים רק עם GPS, אחרת null — מהשחרור הבא). מיקום כבוי או חסום → `location_off` (403) עם הסבר איך להפעיל; לא התקבל בזמן → `location_timeout` (504) |
+| `/sys/location/address` | `{ lat, lon }` | #105, ניסיון בלבד (MapLocationFinder של Windows, לרוב דורש מפתח שירות): `{ found: true, source: "windows", town, district, region, country, street, number, postcode, display }` או `{ found: false, reason }` — אז ליפול ל-OpenStreetMap בתוסף. תמיד 200 |
+| `/sys/location/settings` | `{}` | פותח את הגדרות המיקום של Windows (`ms-settings:privacy-location`) |
+| `/feedback` | `{ text, plugin, version, repo?, title?, kind? }` | `{ queued: true }`. כינוי ל-`/sys/feedback`: נכנס לתור ונשלח למתווך `achat-relay` |
+| `/pdf/handlers` | `{ force? }` | `{ defaultId, handlers: [{ id, name, kind, exists, isDefault, capabilities }] }`. מזהים: `windows-default`, `windows-chooser`, `sumatra`, `acrobat`/`acrobat-reader`, `foxit` |
+| `/pdf/open` | `{ path, handlerId?, page? }` | `{ opened, handlerId, pageHonored }`. נתיב עובר `FxPolicy`; בנעילה רק אם `pdf` ב-`kiosk.allowOpenExtensions`, ותמיד בתוכנת ברירת המחדל |
+
+הערה: בתוכנית "כיוון תפילה" נכתב `GET /location`. בגשר כל הבקשות (חוץ מ-`/health`) הן POST עם צימוד, ולכן המימוש הוא `POST /location`.
+
+## 1.0.2 (20.10.2026)
+| נקודת קצה | גוף | תשובה |
+|---|---|---|
+| `/pdf/assoc/status` | `{}` | `{ registered, isDefault, command }` |
+| `/pdf/assoc/register` / `unregister` | `{}` | כמו status. נרשם אוטומטית בעלייה אלא אם `pdf.assoc=false` |
+| `/pdf/assoc/open-settings` | `{}` | פותח `ms-settings:defaultapps` |
+| `/pdf/inbox/list` | `{}` | `{ items: [{ id, path, name, size, at, source }] }` (תוקף 10 דק', אחרי FxPolicy) |
+| `/pdf/inbox/ack` | `{ ids }` | `{ removed }` |
+| `/pdf/engines` | `{}` | `{ engines: [{id,name,path,ops}], ops }` — ghostscript, qpdf, mutool, pdftk, poppler, libreoffice, word |
+| `/pdf/op/begin` → `chunk {id,data}` → `run {id,op,params}` → `read {id,offset}` → `end {id}` | | `run` מקבל `engine`. פעולות: compress {level}, grayscale, pdfa, repair, protect, unlock, linearize, pdf2png (ZIP), totext, office2pdf {ext} |
+| `/sys/compass` (וגם `/compass`) | `{}` | `{ available, headingTrue, headingMagnetic, accuracy, time }` — רק במכשיר עם חיישן מצפן |
+שורת פקודה: `OtzariaBridge.exe --open-pdf "<path>"` (שם הקובץ בתור, פותח את אוצריא בתוסף הצופה).
+
+
+## משימות רקע (#134–#135)
+כל משימת "שגר ושכח" בגשר עוברת דרך `SafeTask.Run(...)` או `.Observe(where)` (bridge/SafeTask.cs): חריגה נרשמת ליומן ונצפית, ולא מגיעה ל-`UnobservedTaskException` כדיווח task-error. קוד חדש: לא להשאיר `Task.Run`/`ReadToEndAsync` בלי await — להשתמש ב-SafeTask.

@@ -1,3 +1,5 @@
+using System.Linq;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Globalization;
@@ -12,6 +14,13 @@ namespace OtzariaBridge;
 /// </summary>
 public static class Overlay
 {
+    /// <summary>הפסוק בשומר המסך: פסוק מותאם אישית (kiosk.restVerseText) או ברירת המחדל</summary>
+    internal static string VerseText()
+    {
+        string v = Config.Get("kiosk.restVerseText", "").Trim();
+        return v.Length > 0 ? v : "שִׁבְתִּי בְּבֵית ה' כָּל יְמֵי חַיַּי";
+    }
+
     private static ClockBar _clock;
     // בעיה #14 סעיף 3: חלון "RestScreen-like" אחד לכל מסך (Screen.AllScreens), כולם מוצגים/מוסתרים יחד
     private static readonly List<RestScreen> _rest = new();
@@ -208,8 +217,8 @@ internal sealed class ClockBar : Form
         // [x2] WHY: Form.TopMost=true גורם ל-WinForms להפעיל/למקד את החלון בהצגה גם עם NOACTIVATE (גניבת פוקוס מהקלדה באוצריא).
         // TopMost נשאר רק דרך WS_EX_TOPMOST ב-CreateParams
         StartPosition = FormStartPosition.Manual;
-        BackColor = Color.FromArgb(28, 32, 38);
-        ForeColor = Color.White;
+        BackColor = Theme.Bar;
+        ForeColor = Theme.BarText;
         Opacity = 0.92;
         DoubleBuffered = true;
         Size = new Size(ScaleX(250), ScaleX(64));
@@ -217,15 +226,15 @@ internal sealed class ClockBar : Form
         RightToLeft = RightToLeft.Yes;
         _tick.Tick += (_, _) => Refresh_();
         // 7 לחיצות מהירות (עד 3 שניות בין לחיצה ללחיצה) פותחות את חלון קוד השחזור - דרך מילוט שלא תלויה
-        // במקלדת/ב-hook (בחלק מהמחשבים F12 לא מגיע כמות שהוא). לחיצה בודדת ממשיכה להחזיר לאוצריא
+        // במקלדת/ב-hook (בחלק מהמחשבים F12 לא מגיע כמות שהוא). לחיצה בודדת ממשיכה כרגיל
         int clicks = 0; var lastClick = DateTime.MinValue;
-        Click += (_, _) =>
+        MouseClick += (_, e) =>
         {
             var now = DateTime.UtcNow;
             clicks = (now - lastClick).TotalSeconds <= 3 ? clicks + 1 : 1;
             lastClick = now;
             if (clicks >= 7) { clicks = 0; EmergencyForm.Open(); return; }
-            Overlay.BringOtzaria(IntPtr.Zero);
+            if (!BarProgramClick(e.Location)) Overlay.BringOtzaria(IntPtr.Zero); // D4
         };
         Refresh_();
         _tick.Start();
@@ -250,6 +259,15 @@ internal sealed class ClockBar : Form
         var wa = Screen.PrimaryScreen!.Bounds;
         int m = ScaleX(12);
         string pos = Config.Get("kiosk.clockPosition", "bottom-left");
+        if (IsBar)
+        {
+            // #60: שורת משימות מלאה ברוחב המסך (לוגו, סלוגן, הנצחה, שעון ותאריך)
+            Size = new Size(wa.Width, ScaleX(40));
+            Location = new Point(wa.Left, pos == "bar-top" ? wa.Top : wa.Bottom - Height);
+            Region = null;
+            return;
+        }
+        Size = new Size(ScaleX(250), ScaleX(64));
         int x = pos.EndsWith("right") ? wa.Right - Width - m : wa.Left + m;
         int y = pos.StartsWith("top") ? wa.Top + m : wa.Bottom - Height - m;
         Location = new Point(x, y);
@@ -259,7 +277,7 @@ internal sealed class ClockBar : Form
     private void Refresh_()
     {
         var now = DateTime.Now;
-        _time = now.ToString("HH:mm");
+        _time = now.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
         _date = now.ToString("d/M/yyyy");
         _heb = Overlay.HebrewDate(now);
         _bat = "";
@@ -275,26 +293,122 @@ internal sealed class ClockBar : Form
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        // #56: מעבר בהיר/כהה באוצריא — הצבעים נקבעו רק בבנאי, ולכן השורה נשארה בערכת הנושא הישנה
+        if (BackColor != Theme.Bar || ForeColor != Theme.BarText) { BackColor = Theme.Bar; ForeColor = Theme.BarText; }
         var g = e.Graphics;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         using var big = new Font("Segoe UI Semibold", 20f, GraphicsUnit.Point);
         using var small = new Font("Segoe UI", 9f, GraphicsUnit.Point);
-        using var dim = new SolidBrush(Color.FromArgb(200, 220, 225, 232));
+        using var dim = new SolidBrush(Color.FromArgb(200, ForeColor));
+        using var fore = new SolidBrush(ForeColor);
         var r = ClientRectangle;
         int pad = ScaleX(12);
+        if (IsBar) { PaintBar(g, r, pad, big, small, fore, dim); return; }
         var timeSize = g.MeasureString(_time, big);
-        g.DrawString(_time, big, Brushes.White, r.Right - pad - timeSize.Width, (r.Height - timeSize.Height) / 2f);
+        g.DrawString(_time, big, fore, r.Right - pad - timeSize.Width, (r.Height - timeSize.Height) / 2f);
         var sf = new StringFormat(StringFormatFlags.DirectionRightToLeft) { Alignment = StringAlignment.Near };
         var textRect = new RectangleF(pad, ScaleX(8), r.Width - pad * 2 - timeSize.Width - ScaleX(6), ScaleX(22));
-        g.DrawString(_heb, small, Brushes.White, textRect, sf);
+        g.DrawString(_heb, small, fore, textRect, sf);
         textRect.Y += ScaleX(24);
         g.DrawString(_date + (_bat.Length > 0 ? "   " + _bat : ""), small, dim, textRect, sf);
     }
 
+    private static bool IsBar => Config.Get("kiosk.clockPosition", "bottom-left").StartsWith("bar-");
+    private Bitmap _logo;
+
+    /// #60: שורת המשימות של הנעילה. מימין: לוגו וסלוגן; במרכז: נוסח ההנצחה; משמאל: שעה, תאריך עברי ולועזי, סוללה.
+    /// התאריך העברי מהחישוב הפנימי (Overlay.HebrewDate) — רכיב "תאריכון" רק אחרי תשובה ב-#61.
+    private void PaintBar(Graphics g, Rectangle r, int pad, Font big, Font small, Brush fore, Brush dim)
+    {
+        var rtl = new StringFormat(StringFormatFlags.DirectionRightToLeft) { LineAlignment = StringAlignment.Center, Alignment = StringAlignment.Near };
+        var mid = new StringFormat { LineAlignment = StringAlignment.Center, Alignment = StringAlignment.Center };
+        using var accent = new SolidBrush(Theme.Accent(Color.FromArgb(232, 200, 140)));
+        using var mf = new Font("Segoe UI Semibold", 12f, GraphicsUnit.Point);
+        int h = r.Height, logo = h - ScaleX(10);
+        try { _logo ??= new Icon(AppIcon(), 64, 64).ToBitmap(); g.DrawImage(_logo, r.Right - pad - logo, (h - logo) / 2, logo, logo); } catch { }
+        float right = r.Right - pad - logo - ScaleX(8);
+        var brand = new RectangleF(right - ScaleX(480), 0, ScaleX(480), h);
+        g.DrawString(Lang.T(Program.AppFullName, Program.AppFullNameEn), mf, fore, brand, rtl);
+        // D4: תוכנות מותרות בשורה (כשהסרגל הצדדי כבוי, או לפי kiosk.barPrograms)
+        var bsz = g.MeasureString(Lang.T(Program.AppFullName, Program.AppFullNameEn), mf);
+        PaintBarPrograms(g, (int)(right - bsz.Width - ScaleX(24)), h);
+        string left = _time + "   " + _heb + "   " + _date + (_bat.Length > 0 ? "   " + _bat : "");
+        var sz = g.MeasureString(left, mf);
+        g.DrawString(left, mf, fore, new RectangleF(pad, 0, sz.Width + ScaleX(8), h), new StringFormat { LineAlignment = StringAlignment.Center });
+    }
+    private static Icon AppIcon() => Overlay.AppIcon();
+
+    // ===== D4: התוכנות המותרות בתוך שורת המשימות של הנעילה =====
+    private List<(Programs.Entry entry, Bitmap icon, string name)> _progs;
+    private DateTime _progsAt;
+    private readonly List<(Rectangle rect, Programs.Entry entry)> _hits = new();
+
+    private static bool ShowBarPrograms => Config.Get("kiosk.barPrograms", !Config.Get("kiosk.sideBar", true));
+
+    private void PaintBarPrograms(Graphics g, int startRight, int h)
+    {
+        _hits.Clear();
+        if (!ShowBarPrograms) return;
+        try
+        {
+            if (_progs == null || (DateTime.Now - _progsAt).TotalSeconds > 30)
+            {
+                if (_progs != null) foreach (var p in _progs) p.icon?.Dispose();
+                _progs = Programs.Load().Select(e => (e, SideBar.IconOf(e.Path), SideBarNames.Fix(e.Name, e.Path))).ToList();
+                _progsAt = DateTime.Now;
+            }
+            int sz = h - ScaleX(12), gap = ScaleX(6), x = startRight;
+            using var f = new Font("Segoe UI", 9f, GraphicsUnit.Point);
+            using var b = new SolidBrush(ForeColor);
+            _more.Clear(); _moreRect = Rectangle.Empty;
+            for (int i = 0; i < _progs.Count; i++)
+            {
+                var (entry, icon, name) = _progs[i];
+                x -= sz;
+                if (x - sz - gap < ScaleX(420) && i < _progs.Count - 1)
+                {   // אין מקום לכולן: כפתור "עוד" שפותח תפריט עם שאר התוכנות
+                    _moreRect = new Rectangle(x, (h - sz) / 2, sz, sz);
+                    using var mf = new Font("Segoe UI", 14f, FontStyle.Bold, GraphicsUnit.Point);
+                    g.DrawString("⋯", mf, b, _moreRect, new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
+                    for (int j = i; j < _progs.Count; j++) _more.Add((_progs[j].Item1, _progs[j].Item3));
+                    break;
+                }
+                if (x < ScaleX(420)) break; // לא לדרוס את השעה והתאריך משמאל
+                var rc = new Rectangle(x, (h - sz) / 2, sz, sz);
+                if (icon != null) g.DrawImage(icon, rc);
+                else g.DrawString(name.Length > 0 ? name[..1] : "?", f, b, rc, new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
+                _hits.Add((rc, entry));
+                x -= gap;
+            }
+        }
+        catch (Exception ex) { Config.Log("bar programs: " + ex.Message); }
+    }
+
+    private readonly List<(Programs.Entry entry, string name)> _more = new();
+    private Rectangle _moreRect = Rectangle.Empty;
+
+    private bool BarProgramClick(Point p)
+    {
+        if (!_moreRect.IsEmpty && _moreRect.Contains(p) && _more.Count > 0)
+        {
+            var m = new ContextMenuStrip { RightToLeft = RightToLeft.Yes };
+            foreach (var (entry, name) in _more.ToList())
+            {
+                var e = entry;
+                m.Items.Add(name, SideBar.IconOf(e.Path), (_, _) => { try { Programs.Activate(e); } catch (Exception ex) { Config.Log("bar more: " + ex.Message); } });
+            }
+            m.Show(this, new Point(_moreRect.Left, _moreRect.Top), ToolStripDropDownDirection.AboveLeft);
+            return true;
+        }
+        foreach (var (rect, entry) in _hits)
+            if (rect.Contains(p)) { try { Programs.Activate(entry); } catch (Exception ex) { Config.Log("bar program: " + ex.Message); } return true; }
+        return false;
+    }
+
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _tick.Dispose();
+        if (disposing) { _tick.Dispose(); _logo?.Dispose(); }
         base.Dispose(disposing);
     }
 }
@@ -329,7 +443,7 @@ internal sealed class RestScreen : Form
         KeyPreview = true;
         BackColor = Color.FromArgb(14, 20, 30);
         Cursor = Cursors.Hand;
-        try { _logo = new Icon(_icon, 256, 256).ToBitmap(); } catch { _logo = SystemIcons.Application.ToBitmap(); }
+        try { using var big = new Icon(_icon, 256, 256); _logo = big.ToBitmap(); } catch { _logo = SystemIcons.Application.ToBitmap(); }
         for (int i = 0; i < _parts.Length; i++) _parts[i] = NewParticle(true);
         _tick.Tick += (_, _) => Invalidate();
         MouseClick += (_, _) => Back();
@@ -367,12 +481,21 @@ internal sealed class RestScreen : Form
         Overlay.BringOtzaria(Target);
     }
 
-    protected override void OnPaint(PaintEventArgs e)
+    protected override void OnPaint(PaintEventArgs e) =>
+        Render(e.Graphics, ClientRectangle, (float)_clock.Elapsed.TotalSeconds, DeviceDpi / 96f);
+
+    /// <summary>ציור מסך המנוחה — גם לתמונת מסך הנעילה של Windows (LockScreenImage)</summary>
+    // משוב 15.10: חלק שנכשל (חריגה בציור/בחישוב) לא מוחק את כל שאר המסך — נרשם ביומן פעם אחת לכל חלק
+    private static readonly HashSet<string> _partErrLogged = new();
+    private static void SafePart(string name, Action a)
     {
-        var g = e.Graphics;
-        var r = ClientRectangle;
-        float t = (float)_clock.Elapsed.TotalSeconds;
-        float s = DeviceDpi / 96f;
+        try { a(); }
+        catch (Exception ex) { lock (_partErrLogged) if (_partErrLogged.Add(name)) Config.Log("rest screen [" + name + "]: " + ex); }
+    }
+
+    internal bool StillImage; // תמונת מסך נעילה: בלי שורת "לחיצה חוזרת"
+    internal void Render(Graphics g, Rectangle r, float t, float s)
+    {
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.InterpolationMode = InterpolationMode.HighQualityBicubic;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
@@ -387,7 +510,7 @@ internal sealed class RestScreen : Form
         for (int i = 0; i < _parts.Length; i++)
         {
             ref var p = ref _parts[i];
-            p.Y -= p.Speed * 0.012f;
+            // משוב 15.10: בלי תזוזה — רק נצנוץ במקום
             if (p.Y < -0.05f) { p = NewParticle(false); p.Ch = '\0'; }
             float px = p.X * r.Width, py = p.Y * r.Height;
             int a = (int)(25 + 55 * (Math.Sin(t * 0.6f + p.Phase) * 0.5 + 0.5));
@@ -397,28 +520,47 @@ internal sealed class RestScreen : Form
         }
 
         // כל התוכן נע לאט מאוד (מניעת צריבה)
-        float dx = (float)Math.Sin(t * 0.04) * r.Width * 0.04f;
-        float dy = (float)Math.Sin(t * 0.07) * r.Height * 0.025f;
+        // משוב 15.10: התוכן לא זז כלל (רק החותמת מרחפת) — dx/dy נשארים 0
+        float dx = 0f, dy = 0f;
         float cx = r.Width / 2f + dx;
         var rtl = new StringFormat(StringFormatFlags.DirectionRightToLeft) { Alignment = StringAlignment.Center };
         var center = new StringFormat { Alignment = StringAlignment.Center };
-        Color gold = Color.FromArgb(232, 200, 140);
+        Color gold = ReadableColor.OnDark(Theme.Accent(Color.FromArgb(232, 200, 140)));
         using var goldB = new SolidBrush(gold);
         using var dim = new SolidBrush(Color.FromArgb(170, 220, 214, 200));
         using var headF = new Font("David", 40f, FontStyle.Bold, GraphicsUnit.Point);
-        using var verseF = new Font("David", 22f, GraphicsUnit.Point);
+        using var verseF = new Font("David", 34f, FontStyle.Bold, GraphicsUnit.Point);
         using var timeF = new Font("Segoe UI Light", 64f, GraphicsUnit.Point);
         using var dateF = new Font("David", 20f, GraphicsUnit.Point);
+        using var dedF = new Font("David", 17f, GraphicsUnit.Point);
+        using var dedNameF = new Font("David", 21f, FontStyle.Bold, GraphicsUnit.Point);
         using var hintF = new Font("Segoe UI", 11f, GraphicsUnit.Point);
-        // זמני היום בעמודה בצד (kiosk.restZmanimSide: right/left), והקדשה אישית אופציונלית (kiosk.dedicationText)
-        // בעמודה בצד הנגדי - כדי ששתיהן לא יתנגשו בשעה במרכז. העמודות לא זזות עם dx (רק dy), והתוכן
-        // במרכז מוגבל לרוחב שנשאר בין שתי השוליים.
-        var zmItems = CachedZmanim();
+        // זמני היום בעמודה בצד (kiosk.restZmanimSide: right/left), כדי שלא יתנגשו בהקדשה ובשעה במרכז.
+        // העמודה לא זזה עם dx (רק dy), והתוכן במרכז מוגבל לרוחב שנשאר בין שתי השוליים.
+        // #57: בחירת תוכן — full (הכל), zmanim (בלי פסוק), clock (שעה ותאריך בלבד), verse (פסוק בלי זמנים)
+        string rc = Config.Get("kiosk.restContent", "full");
+        // משוב 15.10: מתג נפרד לכל פריט; בלי הגדרה חדשה — לפי restContent הישן
+        bool shVerse = Config.Get("kiosk.restShowVerse", rc is "full" or "verse");
+        bool shClock = Config.Get("kiosk.restShowClock", true);
+        bool shZm = Config.Get("kiosk.restShowZmanim", rc is "full" or "zmanim");
+        bool shLogo = Config.Get("kiosk.restShowLogo", true);
+        bool shDed = Config.Get("kiosk.restShowDedication", true);
+        List<string> zmItems = new();
+        // CachedZmanim: מחושב פעם ב-30 שניות ולא בכל פריים (OnPaint ~25 פעמים בשנייה)
+        if (shZm) SafePart("zmanim-calc", () => zmItems = CachedZmanim());
         bool zmLeft = Config.Get("kiosk.restZmanimSide", "right") == "left";
-        string dedication = Config.Get("kiosk.dedicationText", "");
-        bool hasDedication = !string.IsNullOrWhiteSpace(dedication);
+        // d992415 (יאיר) + משוב 15.10 — "גם וגם": סגנון ההקדשה הוא בחירת המשתמש (kiosk.restDedicationStyle):
+        // "fixed" (ברירת מחדל) — ההקדשה בגבולות קבועים בתחתית הצד שמול הזמנים; "column" — עמודת הקדשה של יאיר עם נר.
+        // הנר מרצד רק אם kiosk.restCandleFlicker (ברירת מחדל: כבוי — שומר מסך בלי תזוזה חוץ מהחותמת).
+        bool dedColumn = Config.Get("kiosk.restDedicationStyle", "fixed") == "column";
+        bool candleFlicker = Config.Get("kiosk.restCandleFlicker", true);
+        // טקסט אחד לשני הסגנונות: הנוסח המותאם (kiosk.restDedicationText); אם ריק — ההקדשה האישית של יאיר (kiosk.dedicationText); אחרת הקבועה
+        string dedication = Config.Get("kiosk.restDedicationText", "").Trim();
+        if (dedication.Length == 0) dedication = Config.Get("kiosk.dedicationText", "").Trim();
+        if (dedication.Length == 0) dedication = "לעילוי נשמת הנערה הצדקנית\nאסתר גיטה דינר ע\"ה\nבת רבי מיכאל שלום הלוי שיבדלט\"א\nתנצב\"ה";
+        bool hasDedication = dedColumn && shDed;
         bool hasSideColumn = zmItems.Count > 0 || hasDedication;
-        float colW = hasSideColumn ? Math.Min(340 * s, r.Width * 0.24f) : 0;
+        float colW = hasSideColumn ? Math.Min(380 * s, r.Width * 0.26f) : 0;
         float colMargin = 28 * s;
         float W = hasSideColumn ? Math.Max(r.Width * 0.4f, r.Width - 2 * (colW + colMargin * 2) - 2 * Math.Abs(dx)) : r.Width;
         RectangleF Line(float y, float h) => new(cx - W / 2f, y, W, h);
@@ -434,12 +576,47 @@ internal sealed class RestScreen : Form
             g.FillEllipse(goldB, cx - 4 * s, y - 4 * s, 8 * s, 8 * s);
         }
         y += 14 * s;
-        g.DrawString("וְהָגִיתָ בּוֹ יוֹמָם וָלַיְלָה", verseF, dim, Line(y, 40 * s), rtl);
-        y += 58 * s;
+        SafePart("verse", () =>
+        {
+        // סבב B: הפסוק של "אחת שאלתי" (תהלים כז, ד)
+        if (shVerse)
+        {
+            /* משוב 3.9: השורה הייתה רחבה מהמלבן ו"אבקש" נחתך — מקטינים את הגופן עד שהשורה נכנסת */
+            const string v1 = "אַחַת שָׁאַלְתִּי מֵאֵת ה' אוֹתָהּ אֲבַקֵּשׁ";
+            var vf = verseF;
+            for (int k = 0; k < 12 && g.MeasureString(v1, vf).Width > W * 0.96f; k++) vf = new Font(vf.FontFamily, vf.Size * 0.92f, vf.Style, vf.Unit);
+            var noWrap = (StringFormat)rtl.Clone(); noWrap.FormatFlags |= StringFormatFlags.NoWrap;
+            g.DrawString(v1, vf, goldB, Line(y, 56 * s), noWrap);
+            g.DrawString(Overlay.VerseText(), verseF, goldB, Line(y + 54 * s, 56 * s), rtl);
+            y += 54 * s;
+        }
+        y += 72 * s;
 
+        });
+        SafePart("logo", () =>
+        {
+        // B2 (סבב B, 3.7.1): סמל "אחת שאלתי" גדול במרכז, מרחף ומסתובב לאט (חסכוני — ציור מטמון אחד, בלי אנימציה כבדה)
+        float icoSize = Math.Min(r.Height * 0.26f, 260 * s);
+        float bob = (float)Math.Sin(t * 0.5) * 8 * s;
+        float tilt = (float)Math.Sin(t * 0.25) * 6f;
+        if (shLogo)
+        {
+            /* משוב 3.9: בלי סיבוב ובלי שינוי גודל בזמן ציור (שניהם טשטשו) — תמונה מוכנה בגודל המדויק, במיקום שלם בפיקסלים */
+            int px = (int)Math.Round(icoSize);
+            g.DrawImageUnscaled(BrandArt.Sized(px), (int)Math.Round(cx - px / 2f), (int)Math.Round(y + bob));
+            _ = tilt;
+            y += icoSize + 20 * s;
+        }
+
+        });
+        SafePart("clock", () =>
+        {
         var now = DateTime.Now;
-        g.DrawString(now.ToString("HH:mm"), timeF, Brushes.White, Line(y, 110 * s), center);
-        y += 108 * s;
+        if (shClock)
+        {
+            g.DrawString(now.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture), timeF, Brushes.White, Line(y, 110 * s), center);
+            y += 108 * s;
+        }
         // שם מחשב/בית כנסת (קיוסק.venueName) - אופציונלי, ישירות מתחת לשעון. ריק = לא תופס מקום בכלל
         string venue = Config.Get("kiosk.venueName", "");
         if (!string.IsNullOrWhiteSpace(venue))
@@ -449,22 +626,102 @@ internal sealed class RestScreen : Form
             y += 36 * s;
         }
         // #2: התאריך הלועזי באותה שורה עם העברי (לא בשורה נפרדת שנופלת מתחת להקדשה)
-        g.DrawString(Overlay.HebrewDate(now) + "   ·   " + now.ToString("d/M/yyyy"), dateF, Brushes.White, Line(y, 40 * s), rtl);
+        if (shClock) g.DrawString(Overlay.HebrewDate(now) + "   ·   " + now.ToString("d/M/yyyy"), dateF, Brushes.White, Line(y, 40 * s), rtl);
         if (Target == IntPtr.Zero && Idle)
         {
             y += 34 * s;
             g.DrawString(Lang.T("אוצריא לא נמצאה במחשב. לביטול הנעילה: Ctrl+Alt+Shift+F12", "Otzaria was not found. To unlock: Ctrl+Alt+Shift+F12"), hintF, dim, Line(y, 30 * s), rtl);
         }
+        });
+        SafePart("zmanim", () =>
+        {
         if (zmItems.Count > 0)
             DrawZmanimColumn(g, zmItems, zmLeft ? colMargin : r.Width - colMargin - colW,
-                r.Height * 0.08f + dy, colW, r.Height - 70 * s - (r.Height * 0.08f + dy), s, gold);
-        if (hasDedication)
-            DrawDedicationColumn(g, dedication, zmLeft ? r.Width - colMargin - colW : colMargin,
-                r.Height * 0.08f + dy, colW, r.Height - 70 * s - (r.Height * 0.08f + dy), s, gold, t);
+                r.Height * 0.08f, colW, r.Height - 70 * s - r.Height * 0.08f, s, gold);
 
+        });
+        SafePart("dedication", () =>
+        {
+        // B2: ההקדשה בפינה השמאלית-התחתונה (לא במרכז)
+        // משוב 15.10: ההקדשה בצד שמול עמודת הזמנים, בגבולות קבועים (רוחב העמודה הצדדית בלבד) — אין חפיפה
+        float dedW = zmItems.Count > 0 ? Math.Max(colW + colMargin, Math.Min(420 * s, (r.Width - W) / 2f - 12 * s)) : Math.Min(520 * s, r.Width * 0.4f);
+        float dedX = zmItems.Count > 0 && !zmLeft ? 24 * s : (zmItems.Count > 0 ? r.Width - 24 * s - dedW : 24 * s);
+        var ded = new RectangleF(dedX, r.Height - 215 * s, dedW, 175 * s);
+        var dedFmt = new StringFormat(StringFormatFlags.DirectionRightToLeft) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        // משוב 15.10: כיתוב אישי (kiosk.restNoteText) בריבוע ממוסגר, בצד שמול הזמנים, מעל ההקדשה
+        string note = Config.Get("kiosk.restNoteText", "").Trim();
+        float noteBottom = r.Height * 0.08f;
+        if (note.Length > 0)
+        {
+            using var noteF = new Font("David", 18f, GraphicsUnit.Point);
+            float pad = 16 * s, top = r.Height * 0.08f, maxBottom = ded.Y - 16 * s;
+            var fmtN = new StringFormat(StringFormatFlags.DirectionRightToLeft) { Alignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisWord };
+            float inner = ded.Width - 2 * pad;
+            float th = Math.Min(g.MeasureString(note, noteF, (int)inner, fmtN).Height, maxBottom - top - 2 * pad);
+            if (th > 10 * s)
+            {
+                var box = new Rectangle((int)ded.X, (int)top, (int)ded.Width, (int)(th + 2 * pad));
+                using var path = Overlay.Round(box, (int)(14 * s));
+                using var bgN = new SolidBrush(Color.FromArgb(70, 10, 12, 22));
+                using var pen = new Pen(Color.FromArgb(150, gold), 1.4f * s);
+                g.FillPath(bgN, path); g.DrawPath(pen, path);
+                g.SetClip(path);
+                g.DrawString(note, noteF, Brushes.White, new RectangleF(box.X + pad, box.Y + pad, inner, th), fmtN);
+                g.ResetClip();
+                noteBottom = box.Bottom + 16 * s;
+            }
+        }
+        if (hasDedication)
+        {
+            // עמודת ההקדשה של יאיר, באותו צד ובאותם גבולות קבועים של ההקדשה (מתחת לכיתוב האישי), עם חיתוך
+            float colBottom = r.Height - 70 * s;
+            if (colBottom - noteBottom > 120 * s)
+            {
+                var colR = new RectangleF(ded.X, noteBottom, ded.Width, colBottom - noteBottom);
+                g.SetClip(colR);
+                DrawDedicationColumn(g, dedication, colR.X, colR.Y, colR.Width, colR.Height, s, gold, candleFlicker ? t : 0f);
+                g.ResetClip();
+            }
+        }
+        else if (shDed)
+        {
+            // נוסח מותאם (kiosk.restDedicationText): שורה 1 קטנה, שורה 2 מודגשת, השאר קטן. ריק = הקבוע
+            string custom = Config.Get("kiosk.restDedicationText", "").Trim();
+            string[] dl = custom.Length > 0
+                ? custom.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Take(4).ToArray()
+                : new[] { "לעילוי נשמת הנערה הצדקנית", "אסתר גיטה דינר ע\"ה", "בת רבי מיכאל שלום הלוי שיבדלט\"א", "תנצב\"ה" };
+            // שורת "· תנצב"ה" / "· ת.נ.צ.ב.ה" שבסוף שורה — יורדת לשורה משלה; כל שורה ממורכזת ומוקטנת אם רחבה מהמסגרת (לא נחתכת)
+            var split = new List<string>();
+            foreach (var line in dl)
+            {
+                int dot = line.LastIndexOf(" · ", StringComparison.Ordinal);
+                string tail = dot > 0 ? line[(dot + 3)..].Trim() : "";
+                if (dot > 0 && (tail.Replace(".", "").Replace("\"", "").Replace("'", "") is "תנצבה" or "תנצבה" || tail.StartsWith("ת.נ.צ.ב", StringComparison.Ordinal) || tail.StartsWith("תנצב", StringComparison.Ordinal)))
+                { split.Add(line[..dot].Trim()); split.Add(tail); }
+                else split.Add(line);
+            }
+            dl = split.Take(5).ToArray();
+            float totalH = 0; foreach (var _ in dl) totalH += 34 * s;
+            float dyy = ded.Bottom - Math.Max(totalH, 0) + 4 * s;
+            g.SetClip(new RectangleF(ded.X - 4 * s, dyy - 6 * s, ded.Width + 8 * s, totalH + 8 * s));
+            for (int i = 0; i < dl.Length; i++)
+            {
+                bool bold = dl.Length > 1 ? i == 1 : true;
+                float h = 34 * s;
+                var baseFont = bold ? dedNameF : dedF;
+                float wText = g.MeasureString(dl[i], baseFont).Width;
+                float k = wText > ded.Width ? ded.Width / wText : 1f;
+                using var fit = k < 1f ? new Font(baseFont.FontFamily, Math.Max(9f, baseFont.Size * k * 0.97f), baseFont.Style, GraphicsUnit.Point) : null;
+                g.DrawString(dl[i], fit ?? baseFont, bold ? goldB : dim, new RectangleF(ded.X, dyy, ded.Width, h), dedFmt);
+                dyy += h;
+            }
+            g.ResetClip();
+        }
+
+        });
         // רמז קטן בתחתית; אין צורך בכפתור — כל לחיצה חוזרת
         _btn = Rectangle.Empty;
-        g.DrawString(Lang.T("לחיצה או מקש כלשהו — חזרה לאוצריא", "Click or press any key to return to Otzaria"), hintF, dim,
+        if (!StillImage) g.DrawString(Lang.T("לחיצה או מקש כלשהו — חזרה לאוצריא", "Click or press any key to return to Otzaria"), hintF, dim,
             Line(r.Height - 40 * s, 30 * s), rtl);
     }
 
@@ -513,37 +770,67 @@ internal sealed class RestScreen : Form
         catch { return "Segoe UI"; }
     }
 
-    /// <summary>עמודת זמנים עם רקע עדין; הגופן קטן עד שהכול נכנס בגובה הזמין (לעולם לא גולש למטה)</summary>
+    /// <summary>עמודת זמנים עם רקע עדין. הגופן קטן עד שכל השורות נכנסות בגובה וברוחב; אם גם בגופן
+    /// המינימלי לא נכנס — מתחלקים לשתי תת-עמודות. כך לא נחתך אף זמן (באג #59: "לא רואים את כל הזמנים").</summary>
     private static void DrawZmanimColumn(Graphics g, List<string> items, float x, float y, float w, float maxH, float s, Color gold)
     {
-        float size = 18f; float lineH; int blank = items.Count(i => i.Length == 0); // #1: גופן ברור יותר
-        Font f;
-        while (true)
+        float pad = 14 * s, gap = 10 * s, lineH = 0; int cols = 1;
+        Font f = null;
+        float Need(int c, float lh)
         {
-            // גופן ברירת המחדל של Windows (ר' UiFamily) - לא שמות family שאינם מובטחים בכל התקנה
-            f = new Font(UiFamily, size, FontStyle.Bold, GraphicsUnit.Point);
-            lineH = f.GetHeight(g) * 1.25f;
-            float need = 24 * s + lineH * (items.Count - blank) + lineH * 0.5f * blank;
-            if (need <= maxH || size <= 11f) { maxH = Math.Min(maxH, need); break; }
-            f.Dispose(); size -= 1f;
+            // גובה העמודה הגבוהה מבין c תת-עמודות (שורה ריקה = חצי שורה)
+            float best = 0; int per = (int)Math.Ceiling(items.Count / (double)c);
+            for (int k = 0; k < c; k++)
+            {
+                float h = 0;
+                foreach (var it in items.Skip(k * per).Take(per)) h += it.Length == 0 ? lh * 0.5f : lh;
+                best = Math.Max(best, h);
+            }
+            return 24 * s + best;
         }
+        // כל זמן בשורה משלו: קודם עמודה אחת בגופן הגדול ביותר שנכנס (עד 22pt, לא פחות מ-13pt); רק אם לא נכנס — שתי תת-עמודות
+        bool chosen = false;
+        for (int pass = 1; pass <= 2 && !chosen; pass++)
+        {
+            cols = pass;
+            for (float size = 22f; size >= (pass == 1 ? 13f : 9f); size -= 1f)
+            {
+                f?.Dispose();
+                f = new Font(UiFamily, size, FontStyle.Bold, GraphicsUnit.Point); // גופן ברירת המחדל של Windows — קיים ומכסה עברית (כולל גרש/גרשיים) אצל כולם
+                lineH = f.GetHeight(g) * 1.2f;
+                float widest = 0;
+                foreach (var it in items) if (it.Length > 0) widest = Math.Max(widest, g.MeasureString(it, f).Width);
+                float colInner = (w - 2 * pad - gap * (cols - 1)) / cols;
+                if (widest <= colInner && Need(cols, lineH) <= maxH) { chosen = true; break; }
+            }
+        }
+        if (!chosen) cols = 2;
+        maxH = Math.Min(maxH, Need(cols, lineH));
         using (f)
         using (var bg = new SolidBrush(Color.FromArgb(70, 10, 12, 22)))
-        using (var border = new Pen(Color.FromArgb(70, gold), 1f * s))
+        using (var border = new Pen(Color.FromArgb(150, gold), 1.4f * s)) // משוב 15.10: מסגרת דקה ברורה
         using (var path = Overlay.Round(new Rectangle((int)x, (int)y, (int)w, (int)maxH), (int)(14 * s)))
         using (var goldB = new SolidBrush(gold))
         {
             g.FillPath(bg, path);
             g.DrawPath(border, path);
+            g.SetClip(path); // שום טקסט לא זולג מחוץ למסגרת
             var fmt = new StringFormat(StringFormatFlags.DirectionRightToLeft) { Alignment = StringAlignment.Near, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.DirectionRightToLeft | StringFormatFlags.NoWrap };
-            float yy = y + 12 * s, bottom = y + maxH - 10 * s;
-            foreach (var it in items)
+            int per = (int)Math.Ceiling(items.Count / (double)cols);
+            float colW = (w - 2 * pad - gap * (cols - 1)) / cols;
+            for (int k = 0; k < cols; k++)
             {
-                if (it.Length == 0) { yy += lineH * 0.5f; continue; }
-                if (yy + lineH > bottom + 1) break;
-                g.DrawString(it, f, goldB, new RectangleF(x + 14 * s, yy, w - 28 * s, lineH), fmt);
-                yy += lineH;
+                // RTL: תת-העמודה הראשונה בצד ימין
+                float cx0 = x + w - pad - (k + 1) * colW - k * gap;
+                float yy = y + 12 * s;
+                foreach (var it in items.Skip(k * per).Take(per))
+                {
+                    if (it.Length == 0) { yy += lineH * 0.5f; continue; }
+                    g.DrawString(it, f, goldB, new RectangleF(cx0, yy, colW, lineH), fmt);
+                    yy += lineH;
+                }
             }
+            g.ResetClip();
         }
     }
 
@@ -568,15 +855,15 @@ internal sealed class RestScreen : Form
 
         // נר מרצד בחצי התחתון של העמודה - נדנוד איטי (כל הלהבה) + ריצוד מהיר (גודל/שקיפות), בנפרד
         float cx = x + w / 2f;
-        float candleW = Math.Min(24f, w * 0.16f) * s;
-        float candleH = Math.Min(90f * s, maxH * 0.32f);
+        float candleW = Math.Min(48f, w * 0.30f) * s;   // הנר גדול פי 2
+        float candleH = Math.Max(40f * s, Math.Min(180f * s, maxH * 0.5f - 80f * s));
         float baseY = y + maxH - 14 * s;
         float bodyTop = baseY - candleH;
 
         float flick = (float)(Math.Sin(t * 9.1) * 0.5 + Math.Sin(t * 13.7 + 1.3) * 0.3 + Math.Sin(t * 5.3 + 2.1) * 0.2);
-        float sway = (float)Math.Sin(t * 0.8) * 2.5f * s;
-        float flameH = (28f + flick * 6f) * s;
-        float flameW = (13f + flick * 2.5f) * s;
+        float sway = (float)(Math.Sin(t * 0.8) * 2.5 + Math.Sin(t * 6.3) * 1.5) * s;
+        float flameH = (28f + flick * 8f) * 1.5f * s;   // הלהבה גדולה פי 1.5, וריצוד בולט יותר
+        float flameW = (13f + flick * 3.5f) * 1.5f * s;
         float flameX = cx + sway;
         float flameY = bodyTop - flameH + 4 * s;
 
@@ -792,7 +1079,7 @@ internal sealed class LockCountdown : Form
         _confirm.Enabled = _back.Enabled = false;
         _err.Text = Lang.T("מאמת…", "Verifying…");
         CenterRows();
-        Task.Run(() =>
+        SafeTask.Run(() =>
         {
             Exception error = null;
             try { Kiosk.ScheduleSkipCurrent(pw); } catch (Exception ex) { error = ex; }

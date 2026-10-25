@@ -15,7 +15,7 @@ internal sealed class SideBar : Form
 {
     private sealed class Item
     {
-        public string Name; public bool Running; public Programs.Entry Entry; public Bitmap Icon;
+        public string Name; public bool Running; public Programs.Entry Entry; public Bitmap Icon; public Action UiAction; // #60: טאב של הגשר
         public List<(IntPtr Handle, string Title)> Windows = new();
     }
     private readonly System.Windows.Forms.Timer _tick = new() { Interval = 150 };
@@ -27,6 +27,7 @@ internal sealed class SideBar : Form
     private bool _horizontal;
     private string _edge = "right";
     private Flyout _flyout;
+    private int _scroll, _maxScroll;   // גלילה כשיש יותר תוכנות מאורך המסך
 
     public SideBar()
     {
@@ -41,6 +42,7 @@ internal sealed class SideBar : Form
         MouseMove += (_, e) => { _hover = HitTest(e.Location); Invalidate(); };
         MouseLeave += (_, _) => { _hover = -1; Invalidate(); };
         MouseClick += (_, e) => Click_(HitTest(e.Location));
+        MouseWheel += (_, e) => ScrollBy(-e.Delta / 120 * (_horizontal ? ColW : RowH));
     }
 
     protected override bool ShowWithoutActivation => true;
@@ -67,7 +69,7 @@ internal sealed class SideBar : Form
     // שגם מריץ את hook המקלדת: חסימה שם מאטה/מנתקת את ה-hook ותוקעת את המקלדת והעכבר (נראה כמו "נתקע בנעילה")
     public void Rebuild()
     {
-        Task.Run(() =>
+        SafeTask.Run(() =>
         {
             List<Programs.Entry> progs = null;
             try { progs = Programs.Load(); } catch { }
@@ -78,7 +80,14 @@ internal sealed class SideBar : Form
     private void RebuildWith(List<Programs.Entry> progs)
     {
         var list = new List<Item> { new Item { Name = Lang.T("אוצריא", "Otzaria"), Running = true, Icon = IconOf(Kiosk.OtzariaPath()) } };
-        try { foreach (var e in progs ?? new List<Programs.Entry>()) list.Add(new Item { Name = e.Name, Entry = e, Icon = IconOf(e.Path) }); } catch { }
+        try { foreach (var e in progs ?? new List<Programs.Entry>()) list.Add(new Item { Name = SideBarNames.Fix(e.Name, e.Path), Entry = e, Icon = IconOf(e.Path) }); } catch { }
+        // #60 (גרסה מינימלית): גישה לחלונות הגשר בנעילה, מתוך הסרגל הקיים
+        Bitmap bi = null; try { bi = Icon.ExtractAssociatedIcon(Environment.ProcessPath!)?.ToBitmap(); } catch { }
+        // משוב 15.10: בסרגל הנעילה פריט אחד — החלון הראשי עם כל הטאבים (אודות, מה חדש, דיווחים, צימוד, כלים וצילום מסך)
+        // מסך מגע בלי מקלדת: פריט שפותח את המקלדת הווירטואלית של Windows (אופציונלי, כבוי כברירת מחדל)
+        if (Config.Get("kiosk.sideBarKeyboard", false))
+            list.Add(new Item { Name = Lang.T("מקלדת וירטואלית", "On-screen keyboard"), Icon = IconOf(System.IO.Path.Combine(Environment.SystemDirectory, "osk.exe")), UiAction = OpenScreenKeyboard });
+        list.Add(new Item { Name = Lang.T(Program.AppName, Program.AppNameEn), Icon = bi, UiAction = () => AboutForm.Open() });
         foreach (var old in _items) old.Icon?.Dispose();
         _items = list;
         if (_items.Count <= 1) { Hide(); return; }   // אין תוכנות מותרות — אין מה להציג
@@ -88,8 +97,14 @@ internal sealed class SideBar : Form
         Scan();
     }
 
+    private static void OpenScreenKeyboard()
+    {
+        try { Process.Start(new ProcessStartInfo(System.IO.Path.Combine(Environment.SystemDirectory, "osk.exe")) { UseShellExecute = true }); }
+        catch (Exception ex) { Config.Log("screen keyboard: " + ex.Message); }
+    }
+
     /// <summary>האייקון המקורי של קובץ ההפעלה (מה-exe עצמו); null אם אין קובץ או שהשליפה נכשלה</summary>
-    private static Bitmap IconOf(string path)
+    internal static Bitmap IconOf(string path)
     {
         try
         {
@@ -108,18 +123,21 @@ internal sealed class SideBar : Form
         int x, y, w, h;
         if (_horizontal)
         {
-            w = _items.Count * ColW + (int)(16 * S);
+            int full = _items.Count * ColW + (int)(16 * S);
+            w = Math.Min(full, b.Width - (int)(40 * S)); _maxScroll = full - w;
             h = _expanded ? FullH : StripW;
             x = b.Left + (b.Width - w) / 2;
             y = _edge == "top" ? b.Top : b.Bottom - h;
         }
         else
         {
-            h = _items.Count * RowH + (int)(16 * S);
+            int full = _items.Count * RowH + (int)(16 * S);
+            h = Math.Min(full, b.Height - (int)(40 * S)); _maxScroll = full - h;
             w = _expanded ? FullW : StripW;
             x = _edge == "left" ? b.Left : b.Right - w;
             y = b.Top + (b.Height - h) / 2;
         }
+        _scroll = Math.Clamp(_scroll, 0, Math.Max(0, _maxScroll));
         SetBounds(x, y, w, h);
         Region = new Region(Overlay.Round(new Rectangle(0, 0, Width, Height), (int)(10 * S)));
         Invalidate();
@@ -132,6 +150,11 @@ internal sealed class SideBar : Form
         bool overFlyout = _flyout is { Visible: true } && _flyout.Bounds.Contains(Cursor.Position);
         bool want = overBar || overFlyout;
         if (want != _expanded) { _expanded = want; Place(); }
+        if (overBar && _maxScroll > 0)
+        {   // גלילה אוטומטית כשהעכבר בקצה הסרגל
+            var c = PointToClient(Cursor.Position); int pos = _horizontal ? c.X : c.Y, len = _horizontal ? Width : Height, edge = (int)(28 * S);
+            if (pos < edge) ScrollBy(-(int)(12 * S)); else if (pos > len - edge) ScrollBy((int)(12 * S));
+        }
         if (!want) _flyout?.Hide();
         else if (overBar) UpdateFlyout(HitTest(PointToClient(Cursor.Position)));
         if ((DateTime.UtcNow - _lastScan).TotalSeconds >= 2) Scan();
@@ -145,7 +168,7 @@ internal sealed class SideBar : Form
         _flyout ??= new Flyout(h =>
         {
             _flyout.Hide();
-            Task.Run(() => { try { Kiosk.BringToFront(h); } catch (Exception ex) { Config.Log("sidebar flyout: " + ex.Message); } });
+            SafeTask.Run(() => { try { Kiosk.BringToFront(h); } catch (Exception ex) { Config.Log("sidebar flyout: " + ex.Message); } });
         });
         _flyout.ShowFor(it.Windows, RectangleToScreen(RowRect(i)), _horizontal, _edge, S);
     }
@@ -155,7 +178,7 @@ internal sealed class SideBar : Form
         _lastScan = DateTime.UtcNow;
         if (Interlocked.Exchange(ref _scanBusy, 1) == 1) return;
         var snapshot = _items.ToList();
-        Task.Run(() =>
+        SafeTask.Run(() =>
         {
             try
             {
@@ -177,14 +200,20 @@ internal sealed class SideBar : Form
     {
         var r = ClientRectangle;
         return _horizontal
-            ? new Rectangle((int)(8 * S) + i * ColW, (int)(6 * S), ColW - (int)(4 * S), r.Height - (int)(12 * S))
-            : new Rectangle((int)(6 * S), (int)(8 * S) + i * RowH, r.Width - (int)(12 * S), RowH - (int)(4 * S));
+            ? new Rectangle((int)(8 * S) + i * ColW - _scroll, (int)(6 * S), ColW - (int)(4 * S), r.Height - (int)(12 * S))
+            : new Rectangle((int)(6 * S), (int)(8 * S) + i * RowH - _scroll, r.Width - (int)(12 * S), RowH - (int)(4 * S));
+    }
+
+    private void ScrollBy(int d)
+    {
+        int n = Math.Clamp(_scroll + d, 0, Math.Max(0, _maxScroll));
+        if (n != _scroll) { _scroll = n; _flyout?.Hide(); Invalidate(); }
     }
 
     private int HitTest(Point p)
     {
         if (!_expanded) return -1;
-        int i = _horizontal ? (p.X - (int)(8 * S)) / ColW : (p.Y - (int)(8 * S)) / RowH;
+        int i = _horizontal ? (p.X + _scroll - (int)(8 * S)) / ColW : (p.Y + _scroll - (int)(8 * S)) / RowH;
         return i >= 0 && i < _items.Count ? i : -1;
     }
 
@@ -192,7 +221,8 @@ internal sealed class SideBar : Form
     {
         if (i < 0 || i >= _items.Count) return;
         var it = _items[i];
-        Task.Run(() =>
+        if (it.UiAction != null) { Tray.Invoke(it.UiAction); return; }
+        SafeTask.Run(() =>
         {
             try
             {
@@ -397,9 +427,7 @@ internal sealed class ChangelogForm : Form
 
     public static void Open()
     {
-        if (_open is { IsDisposed: false }) { _open.Activate(); return; }
-        _open = new ChangelogForm();
-        _open.Show();
+        Hub.Show("changelog", () => _open = new ChangelogForm());
     }
 
     public static string LoadText()
@@ -432,7 +460,7 @@ internal sealed class ChangelogForm : Form
         pick.Items.Add(Lang.T("קפיצה לגרסה…", "Jump to version…"));
         foreach (var v in versions) pick.Items.Add(v);
         pick.SelectedIndex = 0;
-        Controls.Add(box);
+        var boxPad = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Padding = new Padding(18, 14, 18, 14) }; boxPad.Controls.Add(box); Controls.Add(boxPad); // A9: ריווח מהמסגרת
         Controls.Add(pick);
 
         foreach (string raw in text.Replace("\r", "").Split('\n'))
@@ -499,16 +527,23 @@ internal sealed class EmergencyForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         Font = new Font("Segoe UI", 10.5f);
         ClientSize = new Size(420, 190);
-        var info = new Label { Text = Lang.T("הזינו את קוד השחזור (12 תווים) כדי לבטל את הנעילה כולה.", "Enter the 12-character recovery code to turn off lock mode completely."), Dock = DockStyle.Top, Height = 56, Padding = new Padding(12, 12, 12, 0) };
+        var info = new Label { Text = Lang.T("הזינו את קוד השחזור (12 תווים) או קוד גיבוי חד-פעמי כדי לבטל את הנעילה כולה.", "Enter the 12-character recovery code or a one-time backup code to turn off lock mode completely."), Dock = DockStyle.Top, Height = 56, Padding = new Padding(12, 12, 12, 0) };
         var code = new TextBox { Dock = DockStyle.Top, Font = new Font("Consolas", 14f), TextAlign = HorizontalAlignment.Center, CharacterCasing = CharacterCasing.Upper, RightToLeft = RightToLeft.No };
         var msg = new Label { Dock = DockStyle.Top, Height = 28, ForeColor = Color.Firebrick, TextAlign = ContentAlignment.MiddleCenter };
         var ok = new Button { Text = Lang.T("בטל נעילה", "Unlock"), Dock = DockStyle.Bottom, Height = 40 };
         Controls.AddRange(new Control[] { ok, msg, code, info });
+        UiStyle.Button(ok, primary: true); ok.AutoSize = false; ok.Height = 44; ok.Margin = Padding.Empty;
+        UiStyle.Theme(this);
+        info.ForeColor = UiStyle.GoldText;
         AcceptButton = ok;
         ok.Click += (_, _) =>
         {
-            if (Kiosk.EmergencyRelease(code.Text)) { Close(); return; }
-            msg.Text = Lang.T("הקוד שגוי", "Wrong code");
+            try
+            {
+                if (Kiosk.EmergencyRelease(code.Text)) { Close(); return; }
+                msg.Text = Lang.T("הקוד שגוי", "Wrong code");
+            }
+            catch (Exception ex) { msg.Text = ex.Message; } // למשל נעילה זמנית אחרי כמה ניסיונות כושלים - בלי זה אין שום הודעה
             code.SelectAll();
         };
         Shown += (_, _) => code.Focus();
@@ -521,7 +556,7 @@ internal sealed class EmergencyForm : Form
 /// </summary>
 internal static class Diagnostics_
 {
-    public const string IssuesUrl = "https://github.com/YairDaniel11/otzaria-system-tools/issues/new";
+    public const string IssuesUrl = "https://github.com/Hadabadra/achat-shaalti/issues/new";
     private static readonly Regex Secret = new("(hash|salt|key|secret|password|token|recovery|client|auth)", RegexOptions.IgnoreCase);
 
     public static void Report()
@@ -540,7 +575,8 @@ internal static class Diagnostics_
         try
         {
             string zip = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
-                "otzaria-bridge-report-" + DateTime.Now.ToString("yyyyMMdd-HHmm") + ".zip");
+                "otzaria-bridge-report-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".zip");
+            if (File.Exists(zip)) File.Delete(zip); // ZipArchiveMode.Create נכשל על קובץ קיים
             using (var z = ZipFile.Open(zip, ZipArchiveMode.Create))
             {
                 string log = Path.Combine(Config.Dir, "bridge.log");
@@ -553,6 +589,11 @@ internal static class Diagnostics_
                 }
                 AddText(z, "config.sanitized.json", Sanitize(File.Exists(Config.FilePath) ? File.ReadAllText(Config.FilePath) : "{}"));
                 AddText(z, "info.txt", Info());
+                // #60: צילומי מסך שצורפו מחלון "דיווחים"
+                string shots = Path.Combine(Config.Dir, "report-shots");
+                if (Directory.Exists(shots))
+                    foreach (var f in Directory.GetFiles(shots, "*.png").OrderByDescending(x => x).Take(5))
+                        try { z.CreateEntryFromFile(f, "screenshots/" + Path.GetFileName(f)); } catch { } // קובץ נעול לא מפיל את כל האיסוף
             }
             Process.Start(new ProcessStartInfo(IssuesUrl + "?title=" + Uri.EscapeDataString("דיווח מהגשר " + Program.Version) +
                 "&body=" + Uri.EscapeDataString("**מה קרה?**\n\n\n**מה ציפיתי שיקרה?**\n\n\n(צרפו כאן את קובץ ה-zip מהשולחן העבודה בגרירה)\n\n" + Info())) { UseShellExecute = true });

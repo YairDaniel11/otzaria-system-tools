@@ -195,12 +195,12 @@ public class U3Tests
 
     // ---- 7: html_url ----
     [Theory]
-    [InlineData("https://github.com/YairDaniel11/otzaria-system-tools/releases/tag/v1", true)]
-    [InlineData("https://evil.example/YairDaniel11/otzaria-system-tools/releases", false)]
-    [InlineData("http://github.com/YairDaniel11/otzaria-system-tools/releases", false)]
+    [InlineData("https://github.com/Hadabadra/achat-shaalti/releases/tag/v1", true)]
+    [InlineData("https://evil.example/Hadabadra/achat-shaalti/releases", false)]
+    [InlineData("http://github.com/Hadabadra/achat-shaalti/releases", false)]
     [InlineData("https://github.com/other/repo/releases/tag/v1", false)]
     [InlineData("javascript:alert(1)", false)]
-    [InlineData("https://github.com.evil.com/YairDaniel11/otzaria-system-tools/releases", false)]
+    [InlineData("https://github.com.evil.com/Hadabadra/achat-shaalti/releases", false)]
     public void Release_page_url_allowlist(string u, bool ok) => Assert.Equal(ok, UpdateApi.IsAllowedReleasePage(u));
 
     [Fact]

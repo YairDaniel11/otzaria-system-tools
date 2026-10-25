@@ -25,6 +25,25 @@ public static class Pairing
     {
         Server.Route("/pair/list", _ => new { clients = List() });
         Server.Route("/pair/revoke", Revoke);
+        PruneDuplicates();
+    }
+
+    /// <summary>חיבורים ישנים כפולים של אותו תוסף (client) — נשאר רק זה שנעשה בו שימוש לאחרונה</summary>
+    private static void PruneDuplicates()
+    {
+        try
+        {
+            lock (Gate)
+            {
+                var all = Clients().OfType<JsonObject>().ToList();
+                string Stamp(JsonObject c) => (c["lastUsed"]?.ToString() ?? "") + "|" + (c["created"]?.ToString() ?? "");
+                var keep = all.GroupBy(c => c["client"]?.ToString() ?? "").Select(g => g.OrderByDescending(Stamp).First()).ToList();
+                if (keep.Count == all.Count) return;
+                SaveClients(new JsonArray(keep.Select(c => (JsonNode)c.DeepClone()).ToArray()));
+                Config.Log("pair: נוקו " + (all.Count - keep.Count) + " חיבורים כפולים");
+            }
+        }
+        catch (Exception ex) { Config.Log("pair prune: " + ex.Message); }
     }
 
     /// <summary>
@@ -167,13 +186,47 @@ public static class Pairing
     /// בקשת צימוד: מציגה למשתמש חלון אישור (עם סיסמת נעילה כשהנעילה פעילה).
     /// רק חלון אחד בכל פעם; אחרי 3 דחיות — המתנה של דקה.
     /// </summary>
-    public static async Task<object> Request(JsonElement b)
+    // #32 ממצא 6: זיהוי התהליך הפונה לפי הפורט המקומי של החיבור (טבלת TCP של Windows)
+    [System.Runtime.InteropServices.DllImport("iphlpapi.dll")]
+    private static extern uint GetExtendedTcpTable(IntPtr tbl, ref int size, bool sort, int af, int cls, uint reserved);
+
+    public static string CallerProcess(int remotePort)
+    {
+        foreach (int af in new[] { 2, 23 })
+        {
+            int size = 0; GetExtendedTcpTable(IntPtr.Zero, ref size, false, af, 5, 0);
+            if (size <= 0) continue;
+            IntPtr buf = System.Runtime.InteropServices.Marshal.AllocHGlobal(size);
+            try
+            {
+                if (GetExtendedTcpTable(buf, ref size, false, af, 5, 0) != 0) continue;
+                int n = System.Runtime.InteropServices.Marshal.ReadInt32(buf);
+                int rowSize = af == 2 ? 24 : 56, portOff = af == 2 ? 8 : 20, pidOff = af == 2 ? 20 : 52;
+                for (int i = 0; i < n; i++)
+                {
+                    IntPtr row = buf + 4 + i * rowSize;
+                    int lp = System.Runtime.InteropServices.Marshal.ReadInt32(row + portOff);
+                    int port = ((lp & 0xFF) << 8) | ((lp >> 8) & 0xFF);
+                    if (port != remotePort) continue;
+                    int pid = System.Runtime.InteropServices.Marshal.ReadInt32(row + pidOff);
+                    try { using var pr = System.Diagnostics.Process.GetProcessById(pid); return pr.ProcessName; } catch { return "pid " + pid; }
+                }
+            }
+            finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(buf); }
+        }
+        return null;
+    }
+
+    public static async Task<object> Request(JsonElement b, int remotePort = 0)
     {
         string client = (b.Str("client") ?? "").Trim();
         string name = (b.Str("name") ?? client).Trim();
+        string caller = null; try { if (remotePort > 0) caller = CallerProcess(remotePort); } catch { }
+        Config.Log("pair/request מ-" + (caller ?? "לא ידוע") + ": " + client);
         if (client.Length == 0 || client.Length > 60) throw BridgeException.BadRequest("שדה client חסר או ארוך מדי");
         name = new string(name.Where(ch => !char.IsControl(ch)).ToArray()); // בלי שורות חדשות/תווי בקרה בחלון האישור
         if (name.Length > 60) name = name[..60];
+        if (caller != null) name += " (" + caller + ")";
 
         if (DateTime.UtcNow < _cooldownUntil)
             throw new BridgeException("too_many", "יותר מדי בקשות צימוד שנדחו. נסו שוב בעוד דקה", 429);
@@ -191,7 +244,9 @@ public static class Pairing
             string token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
             lock (Gate)
             {
-                var a = Clients();
+                // צימוד חדש של אותו תוסף מחליף את הקודמים (התקנה מחדש / מזהה תוסף שהשתנה) — לא נשארים חיבורים כפולים
+                var a = new JsonArray(Clients().OfType<JsonObject>().Where(c => c["client"]?.ToString() != client)
+                    .Select(c => (JsonNode)c.DeepClone()).ToArray());
                 var entry = new JsonObject
                 {
                     ["id"] = Convert.ToHexString(RandomNumberGenerator.GetBytes(6)).ToLowerInvariant(),
@@ -244,10 +299,21 @@ public static class PairDialog
             AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Padding = new Padding(16), Font = new Font("Segoe UI", 10f),
         };
-        var panel = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Dock = DockStyle.Fill };
+        f.BackColor = UiStyle.Page;
+        f.Padding = new Padding(20);
+        var panel = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
+        // כותרת עם פס זהב (כמו כותרות הכרטיסים בתוספים)
+        var head = new Label
+        {
+            AutoSize = true, Font = new Font("Segoe UI Semibold", 14f), ForeColor = UiStyle.GoldText,
+            Text = Lang.T("בקשת חיבור לגשר", "Bridge connection request"),
+            Padding = new Padding(0, 0, 0, 10),
+        };
+        panel.Controls.Add(head);
         panel.Controls.Add(new Label
         {
-            AutoSize = true, MaximumSize = new Size(440, 0),
+            AutoSize = true, MaximumSize = new Size(440, 0), ForeColor = Color.FromArgb(60, 44, 20),
+            Margin = new Padding(0, 0, 0, 10),
             Text = Lang.T(
                 $"התוסף \"{name}\" באוצריא מבקש להתחבר לגשר.\nהחיבור נותן גישה לקבצים במחשב ולהגדרות המחשב.\n\nאם לא פתחת עכשיו תוסף של אוצריא — לחצו \"דחה\".",
                 $"The Otzaria plugin \"{name}\" asks to connect to the bridge.\nThis gives it access to files and computer settings.\n\nIf you did not just open an Otzaria plugin, click \"Deny\"."),
@@ -255,15 +321,16 @@ public static class PairDialog
         TextBox pw = null;
         if (needPassword)
         {
-            panel.Controls.Add(new Label { AutoSize = true, Text = Lang.T("מצב נעילה פעיל — נדרשת סיסמת הנעילה:", "Lock mode is on — lock password required:") });
-            pw = new TextBox { UseSystemPasswordChar = true, Width = 260 };
+            panel.Controls.Add(new Label { AutoSize = true, ForeColor = UiStyle.GoldText, Text = Lang.T("מצב נעילה פעיל — נדרשת סיסמת הנעילה:", "Lock mode is on — lock password required:") });
+            pw = new TextBox { UseSystemPasswordChar = true, Width = 280, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Segoe UI", 11f) };
             panel.Controls.Add(pw);
         }
         var err = new Label { AutoSize = true, ForeColor = Color.Firebrick };
         panel.Controls.Add(err);
-        var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = Lang.En ? FlowDirection.LeftToRight : FlowDirection.RightToLeft };
+        var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = Lang.En ? FlowDirection.LeftToRight : FlowDirection.RightToLeft, Margin = new Padding(0, 6, 0, 0) };
         var ok = new Button { Text = Lang.T("אשר", "Allow"), AutoSize = true };
         var no = new Button { Text = Lang.T("דחה", "Deny"), AutoSize = true, DialogResult = DialogResult.Cancel };
+        UiStyle.Button(ok, primary: true); UiStyle.Button(no);
         buttons.Controls.Add(ok);
         buttons.Controls.Add(no);
         panel.Controls.Add(buttons);
@@ -278,7 +345,11 @@ public static class PairDialog
             }
             f.DialogResult = DialogResult.OK;
         };
-        f.Shown += (_, _) => { f.Activate(); (pw as Control ?? no).Focus(); };
+        // ביקורת #30 ממצא 6: חלון שנשכח פתוח לא חוסם צימוד לתמיד — נסגר כדחייה אחרי 2 דקות
+        var expire = new System.Windows.Forms.Timer { Interval = 120_000 };
+        expire.Tick += (_, _) => { expire.Stop(); f.DialogResult = DialogResult.Cancel; };
+        f.FormClosed += (_, _) => expire.Dispose();
+        f.Shown += (_, _) => { f.Activate(); (pw as Control ?? no).Focus(); expire.Start(); };
         return f.ShowDialog() == DialogResult.OK;
     }
 }

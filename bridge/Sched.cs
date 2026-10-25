@@ -35,7 +35,7 @@ public static class Sched
         return s < e ? (t >= s && t < e) : (t >= s || t < e);
     }
 
-    /// <summary>הרגע שבו נגמר החלון הנוכחי (אם 'now' בתוכו), אחרת null</summary>
+    /// <summary>הרגע שבו נגמר החלון הנוכחי (אם 'now' בתוכו), אחרת null. חלון שחוצה חצות: אם הסוף כבר עבר היום - מחר</summary>
     public static DateTime? CurrentWindowEnd(string start, string end, DateTime now)
     {
         if (!InWindow(start, end, now)) return null;
@@ -80,5 +80,35 @@ public static class Sched
         endLocal = DateTime.SpecifyKind(endLocal, DateTimeKind.Unspecified);
         if (tz.IsInvalidTime(endLocal)) endLocal = endLocal.AddHours(1); // "חור" של מעבר לשעון קיץ
         return new DateTimeOffset(endLocal, tz.GetUtcOffset(endLocal));
+    }
+
+    /// <summary>סוף החלון המאוחר ביותר מבין כמה חלונות שבהם 'now' נמצא (הראשי + נוספים); null אם באף אחד</summary>
+    public static DateTime? CurrentWindowEnd(IEnumerable<(string start, string end)> windows, DateTime now)
+    {
+        DateTime? best = null;
+        foreach (var (s, e) in windows)
+            if (CurrentWindowEnd(s, e, now) is DateTime x && (best == null || x > best)) best = x;
+        return best;
+    }
+
+    /// <summary>כמה חלונות לפי אזור הזמן של התזמון: סוף החלון המאוחר ביותר מבין אלה ש-'now' בהם (כרגע מוחלט), או null</summary>
+    public static DateTimeOffset? CurrentWindowEnd(IEnumerable<(string start, string end)> windows, DateTimeOffset now, TimeZoneInfo tz)
+    {
+        DateTimeOffset? best = null;
+        foreach (var (s, e) in windows)
+            if (CurrentWindowEnd(s, e, now, tz) is DateTimeOffset x && (best == null || x > best)) best = x;
+        return best;
+    }
+
+    /// <summary>"HH:mm-HH:mm,HH:mm-HH:mm" → חלונות. פריט לא תקין מדולג</summary>
+    public static List<(string start, string end)> ParseWindows(string csv)
+    {
+        var list = new List<(string, string)>();
+        foreach (var part in (csv ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var p = part.Trim().Split('-');
+            if (p.Length == 2 && IsValid(p[0]) && IsValid(p[1])) list.Add((p[0], p[1]));
+        }
+        return list;
     }
 }

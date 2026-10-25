@@ -250,7 +250,7 @@ public static class Printers
     public static object TestPage(string name)
     {
         using (Find(name)) { } // זורק NotFound אם המדפסת לא קיימת
-        using var pd = new PrintDocument { DocumentName = "דף ניסיון - " + Program.AppName, PrinterSettings = { PrinterName = name } };
+        using var pd = new PrintDocument { DocumentName = "דף ניסיון - תוכנת חסימת אוצריא", PrinterSettings = { PrinterName = name } };
         if (!pd.PrinterSettings.IsValid) throw BridgeException.NotFound("המדפסת לא נמצאה: " + name);
         pd.PrintPage += (_, e) =>
         {
@@ -259,7 +259,7 @@ public static class Printers
             var x = e.MarginBounds.Left; var y = e.MarginBounds.Top;
             e.Graphics.DrawString("דף ניסיון", title, Brushes.Black, x, y); y += 50;
             e.Graphics.DrawString("מדפסת: " + name, body, Brushes.Black, x, y); y += 26;
-            e.Graphics.DrawString("נשלח מתוך " + Program.AppName + " ב-" + DateTime.Now.ToString("dd/MM/yyyy HH:mm"), body, Brushes.Black, x, y);
+            e.Graphics.DrawString("נשלח מתוך תוכנת חסימת אוצריא ב-" + DateTime.Now.ToString("dd/MM/yyyy HH:mm"), body, Brushes.Black, x, y);
         };
         try { pd.Print(); }
         catch (Exception ex) { throw new BridgeException("failed", "שליחת דף הניסיון נכשלה: " + ex.Message, 500); }
@@ -368,7 +368,7 @@ public static class InputDefault
     public static object Get()
     {
         var list = new List<object>();
-        string raw = Ps("Get-WinUserLanguageList | ForEach-Object { $l=$_; $l.InputMethodTips | ForEach-Object { $l.LanguageTag + '|' + $l.LocalizedName + '|' + $_ } }; '---'; (Get-WinDefaultInputMethodOverride).InputMethodTip");
+        string raw = Ps("$lst = Get-WinUserLanguageList; for ($i = 0; $i -lt $lst.Count; $i++) { $l = $lst[$i]; foreach ($t in @($l.InputMethodTips)) { $l.LanguageTag + '|' + $l.LocalizedName + '|' + $t } }; '---'; (Get-WinDefaultInputMethodOverride).InputMethodTip");
         var parts = (raw ?? "").Replace("\r", "").Split("---");
         foreach (var line in parts[0].Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {

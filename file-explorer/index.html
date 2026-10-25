@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html data-plugin-id="com.otzariakiosk.fileexplorer" lang="he" dir="rtl">
+<html data-plugin-id="com.chadbedera.fileexplorer" lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -32,6 +32,7 @@
       </div>
       <button class="topbar-btn fx-lang" id="fx-lang" data-noi18n title="Language / שפה" aria-label="Language / שפה">English</button>
       <button class="topbar-btn" id="fx-feedback" title="שליחת הערה" aria-label="שליחת הערה"></button>
+      <button class="topbar-btn" id="fx-about" title="אודות" aria-label="אודות"></button>
       <button class="topbar-btn" id="fx-settings" title="הגדרות" aria-label="הגדרות"></button>
       <button class="topbar-btn" id="fx-add-folder" title="הוספת תיקייה" aria-label="הוספת תיקייה" hidden></button>
       <button class="topbar-btn" id="fx-hidden" title="הצגת קבצים מוסתרים" aria-label="הצגת קבצים מוסתרים" aria-pressed="false" hidden></button>
@@ -43,7 +44,6 @@
 
     <div class="fx-tabs" id="fx-tabs" role="tablist" aria-label="כרטיסיות"></div>
 
-
     <div class="fx-cmds" role="toolbar" aria-label="פעולות" id="fx-cmds"></div>
 
     <div class="fx-body" id="fx-body">
@@ -51,6 +51,7 @@
       <div class="fx-split" id="fx-split-side" role="separator" aria-orientation="vertical" tabindex="0" title="גררו לשינוי הרוחב (לחיצה כפולה: ברירת מחדל)"></div>
       <main class="fx-main" id="fx-main" tabindex="0" aria-label="רשימת קבצים">
         <div class="fx-head" id="fx-head"></div>
+        <div class="fx-libhits" id="fx-libhits" hidden aria-label="ספרים בספריית אוצריא"></div>
         <div class="fx-list" id="fx-list" role="listbox" aria-multiselectable="true"></div>
       </main>
       <div class="fx-split" id="fx-split-prev" role="separator" aria-orientation="vertical" tabindex="0" title="גררו לשינוי הרוחב (לחיצה כפולה: ברירת מחדל)" hidden></div>

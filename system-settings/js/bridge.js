@@ -77,7 +77,7 @@
         var p = PORTS[i];
         try {
           await loadToken();
-          var r = await rawRequest("http://127.0.0.1:" + p + "/health", "GET", null, 1500);
+          var r = await rawRequest("http://127.0.0.1:" + p + "/health", "GET", null, 5000);
           if (r.json && r.json.ok && r.json.data && r.json.data.name === 'otzaria-bridge') {
             real.port = p;
             return r.json.data;
@@ -103,8 +103,12 @@
       await loadToken();
       var res = await real.callOnce(path, body, opts);
       if (res.unpaired) {
-        SS.bridge.onPairing && SS.bridge.onPairing(true);
-        try { await real.pair(); } finally { SS.bridge.onPairing && SS.bridge.onPairing(false); }
+        /* #69: מופע הרקע לא פותח חלון צימוד בגשר בלי שהמשתמש ביקש */
+        if (SS.bridge.noPair) throw BridgeError('forbidden', 'not paired');
+        /* קריאות מקבילות חולקות בקשת צימוד אחת — ההודעה "יש לאשר" מוצגת רק פעם אחת */
+        var first = !pairing;
+        if (first) SS.bridge.onPairing && SS.bridge.onPairing(true);
+        try { await real.pair(); } finally { if (first) SS.bridge.onPairing && SS.bridge.onPairing(false); }
         res = await real.callOnce(path, body, opts);
       }
       if (res.error) throw res.error;
@@ -165,9 +169,8 @@
       otzariaPath: 'C:\\Program Files\\Otzaria\\otzaria.exe', blockTaskManager: true,
       allowOpenExtensions: ['pdf', 'txt'], warnings: [], readOnly: false, allowExcelDocs: false, twoFactor: false, twoFactorAvailable: true, clock: true, clockPosition: 'bottom-left', venueName: '', dedicationText: '',
       restScreen: true, restIdleMinutes: 0, zmanimLocation: '', zmanimCity: '', zmanimShow: [], zmanimDiaspora: false,
-      zmanimElevation: 0, zmanimFallbackEngine: 'noaa',
-      candleLightingMinutes: 18, showParsha: false, showDafYomi: false, yahrzeitMonth: '', yahrzeitDay: 0, yahrzeitLabel: '', fullscreenOtzaria: true,
-      sideBar: true, sideBarIconsOnly: false, sideBarPosition: 'right', restZmanimSide: 'right', resetOnShutdown: false,
+      candleLightingMinutes: 18, zmanimElevation: 0, zmanimFallbackEngine: 'noaa', showParsha: true, showDafYomi: true, yahrzeitMonth: '', yahrzeitDay: 0, yahrzeitLabel: '', fullscreenOtzaria: true,
+      sideBar: true, sideBarIconsOnly: false, sideBarKeyboard: false, sideBarPosition: 'right', restZmanimSide: 'right', resetOnShutdown: false,
       activatedBy: 'manual',
       /* פתיחה זמנית (תואם ל-Kiosk.TempUnlockStatus בגשר); active/secondsLeft/until מחושבים ב-/kiosk/status */
       tempUnlock: { enabled: false, configured: false, minutes: 30, maxMinutes: 60, twoFactorOn: false, usable: false,
@@ -315,6 +318,15 @@
       M.recovery = code;
       return { ok: true, recoveryCode: code };
     },
+    '/kiosk/recovery/backup/status': function () { return { left: M.backup ? M.backup.length : 0 }; },
+    '/kiosk/recovery/backup': function (b) {
+      checkPw(b.password, true);
+      var A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      M.backup = [];
+      for (var i = 0; i < 10; i++) { var c = ''; for (var j = 0; j < 12; j++) c += A.charAt(Math.floor(Math.random() * A.length)); M.backup.push(c.replace(/(.{4})(?=.)/g, '$1-')); }
+      return { ok: true, codes: M.backup.slice(), path: 'Documents\\אחת שאלתי - קודי גיבוי לשחזור.txt', left: 10 };
+    },
+    '/kiosk/recovery/keep': function () { return { ok: true, path: 'Documents\\אחת שאלתי - קוד שחזור.txt' }; },
     '/kiosk/enable': function (b) {
       if (!M.kiosk.hasPassword) throw mockErr('bad_request', 'יש להגדיר סיסמה תחילה');
       checkPw(b.password, false);
@@ -335,7 +347,7 @@
       if (typeof b.otzariaPath === 'string') M.kiosk.otzariaPath = b.otzariaPath;
       if (typeof b.venueName === 'string') M.kiosk.venueName = b.venueName.slice(0, 60);
       if (typeof b.dedicationText === 'string') M.kiosk.dedicationText = b.dedicationText.slice(0, 120);
-      ['readOnly', 'allowExcelDocs', 'twoFactor', 'clock', 'restScreen', 'fullscreenOtzaria', 'sideBar', 'sideBarIconsOnly', 'resetOnShutdown', 'showParsha', 'showDafYomi'].forEach(function (k) { if (typeof b[k] === 'boolean') M.kiosk[k] = b[k]; });
+      ['readOnly', 'allowExcelDocs', 'twoFactor', 'clock', 'restScreen', 'fullscreenOtzaria', 'sideBar', 'sideBarIconsOnly', 'sideBarKeyboard', 'resetOnShutdown', 'showParsha', 'showDafYomi'].forEach(function (k) { if (typeof b[k] === 'boolean') M.kiosk[k] = b[k]; });
       /* פתיחה זמנית: אותם כללים כמו בגשר (Kiosk.ApplyTempUnlockSettings) */
       var tu = M.kiosk.tempUnlock;
       if (typeof b.tempUnlockPassword === 'string' && b.tempUnlockPassword) {
@@ -351,6 +363,7 @@
       if (typeof b.tempUnlockEnabled === 'boolean') tu.enabled = b.tempUnlockEnabled;
       if (typeof b.tempUnlockMinutes === 'number') tu.minutes = Math.max(1, Math.min(60, b.tempUnlockMinutes | 0));
       if (typeof b.restIdleMinutes === 'number') M.kiosk.restIdleMinutes = Math.max(0, Math.min(240, b.restIdleMinutes | 0));
+      if (b.restZmanimSide === 'left' || b.restZmanimSide === 'right') M.kiosk.restZmanimSide = b.restZmanimSide;
       if (typeof b.zmanimLocation === 'string') M.kiosk.zmanimLocation = b.zmanimLocation;
       if (typeof b.zmanimCity === 'string') M.kiosk.zmanimCity = b.zmanimCity;
       if (typeof b.zmanimDiaspora === 'boolean') M.kiosk.zmanimDiaspora = b.zmanimDiaspora;
@@ -520,7 +533,7 @@
   mockRoutes['/kiosk/hard/status'] = function () { return clone(M.hard); };
   mockRoutes['/kiosk/hard/install'] = function (b) {
     checkPw(b.password, false);
-    M.hard = { installed: true, running: true, configured: true, active: M.kiosk.active, blockUsbStorage: false, version: '3.0.0', needsUpdate: false, sessions: 1 };
+    M.hard = { installed: true, running: true, configured: true, active: M.kiosk.active, blockUsbStorage: false, version: '1.0.5', needsUpdate: false, sessions: 1 };
     return clone(M.hard);
   };
   mockRoutes['/kiosk/hard/settings'] = function (b) { checkPw(b.password, false); M.hard.blockUsbStorage = !!b.blockUsbStorage; return clone(M.hard); };
@@ -567,16 +580,16 @@
     return { vendor: M.bios.vendor, manufacturer: M.bios.manufacturer, model: M.bios.model, steps: steps };
   };
   mockRoutes['/sys/update-check'] = function () {
-    return { current: '3.0.0', latest: '3.0.0', newer: false, canInstall: false, url: 'https://github.com/YairDaniel11/otzaria-system-tools/releases/latest' };
+    return { current: '1.0.5', latest: '1.0.5', newer: false, canInstall: false, url: 'https://github.com/Hadabadra/achat-shaalti/releases/latest' };
   };
-  mockRoutes['/sys/update-install'] = function () { return { started: false, message: 'הגשר מעודכן (3.0.0)' }; };
+  mockRoutes['/sys/update-install'] = function () { return { started: false, message: 'הגשר מעודכן (1.0.3)' }; };
 
   var mock = {
     port: 47917,
     async probe() {
       await delay(250);
       if (/[?&]offline=1/.test(location.search)) return null;
-      return { name: 'otzaria-bridge', version: '3.4.0', port: 47917, auth: 'token', paired: true, kioskActive: M.kiosk.active, platform: 'windows' };
+      return { name: 'otzaria-bridge', version: '1.0.5', port: 47917, auth: 'token', paired: true, kioskActive: M.kiosk.active, platform: 'windows' };
     },
     async call(path, body) {
       await delay(180);

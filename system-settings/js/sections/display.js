@@ -24,7 +24,7 @@
         return;
       }
       slot.innerHTML = '<div class="slider-row">' +
-        '<span class="icon-btn big static">' + ui.icon('sun') + '</span>' +
+        '<span class="icon-btn big static" aria-hidden="true">' + ui.icon('sun') + '</span>' +
         '<input type="range" class="range" min="0" max="100" step="1" value="' + d.brightness + '" aria-label="בהירות">' +
         '<output class="range-val">' + d.brightness + '%</output></div>' +
         '<div class="preset-row">' + [25, 50, 75, 100].map(function (v) {

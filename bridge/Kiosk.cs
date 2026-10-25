@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -310,6 +310,13 @@ public static partial class Kiosk
         throw new BridgeException("wrong_password", message, 401);
     }
 
+    /// <summary>#69: האם קוד גיבוי חד-פעמי תקף — תחת אותה השהיה אחרי 5 ניסיונות שגויים (לא עוקף את מגבלת הניסיונות)</summary>
+    private static bool IsBackupCode(string s)
+    {
+        lock (Gate) { ThrowIfLockedOut(); }
+        return BackupCodes.Matches(s);
+    }
+
     /// <summary>אימות סיסמה לשימוש מודולים אחרים (בלי קוד שחזור)</summary>
     internal static void RequirePassword(string password) => Verify(password, allowRecovery: false);
 
@@ -321,7 +328,7 @@ public static partial class Kiosk
 
     [StructLayout(LayoutKind.Sequential)] private struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
     [DllImport("user32.dll")] private static extern bool GetLastInputInfo(ref LASTINPUTINFO lii);
-    private static long IdleMs()
+    internal static long IdleMs()
     {
         var lii = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf<LASTINPUTINFO>() };
         return GetLastInputInfo(ref lii) ? unchecked((uint)Environment.TickCount - lii.dwTime) : 0;
@@ -386,17 +393,34 @@ public static partial class Kiosk
         clock = Config.Get("kiosk.clock", true),
         clockPosition = Config.Get("kiosk.clockPosition", "bottom-left"),
         restScreen = Config.Get("kiosk.restScreen", true),
-        restIdleMinutes = Config.Get("kiosk.restIdleMinutes", 0),
+        restIdleMinutes = Config.Get("kiosk.restIdleMinutes", 1),
+        saverEnabled = Config.Get("kiosk.saverEnabled", true), // מתג ראשי לשומר המסך
+        saverWhenUnlocked = Config.Get("kiosk.saverWhenUnlocked", true), // D2
+        bootCover = Config.Get("kiosk.bootCover", true), // D3
         restZmanimSide = Config.Get("kiosk.restZmanimSide", "right"),
         zmanimLocation = Config.Get("kiosk.zmanimLocation", ""),
         zmanimCity = Config.Get("kiosk.zmanimCity", ""),
         zmanimElevation = Config.Get("kiosk.zmanimElevation", 0.0),
+        zmanimAlert = Config.Get("kiosk.zmanimAlert", ""),
+        zmanimAlertMinutes = Config.Get("kiosk.zmanimAlertMinutes", 10),
         zmanimFallbackEngine = Config.Get("kiosk.zmanimFallbackEngine", "noaa"),
         zmanimShow = Config.HasList("kiosk.zmanimShow") ? Config.GetList("kiosk.zmanimShow") : null,
         zmanimDiaspora = Config.Get("kiosk.zmanimDiaspora", false),
         candleLightingMinutes = Config.Get("kiosk.candleLightingMinutes", 18),
-        showParsha = Config.Get("kiosk.showParsha", false),
-        showDafYomi = Config.Get("kiosk.showDafYomi", false),
+        showParsha = Config.Get("kiosk.showParsha", true),
+        restContent = Config.Get("kiosk.restContent", "full"),
+        restShowVerse = Config.Has("kiosk.restShowVerse") ? Config.Get("kiosk.restShowVerse", true) : (bool?)null,
+        restShowClock = Config.Has("kiosk.restShowClock") ? Config.Get("kiosk.restShowClock", true) : (bool?)null,
+        restShowZmanim = Config.Has("kiosk.restShowZmanim") ? Config.Get("kiosk.restShowZmanim", true) : (bool?)null,
+        restShowLogo = Config.Has("kiosk.restShowLogo") ? Config.Get("kiosk.restShowLogo", true) : (bool?)null,
+        restShowDedication = Config.Has("kiosk.restShowDedication") ? Config.Get("kiosk.restShowDedication", true) : (bool?)null,
+        restDedicationText = Config.Get("kiosk.restDedicationText", ""),
+        restDedicationStyle = Config.Get("kiosk.restDedicationStyle", "fixed"),
+        restCandleFlicker = Config.Get("kiosk.restCandleFlicker", true),
+        lockScreenImage = Config.Get("kiosk.lockScreenImage", false),
+        restNoteText = Config.Get("kiosk.restNoteText", ""),
+        restVerseText = Config.Get("kiosk.restVerseText", ""),
+        showDafYomi = Config.Get("kiosk.showDafYomi", true),
         yahrzeitMonth = Config.Get("kiosk.yahrzeitMonth", ""),
         yahrzeitDay = Config.Get("kiosk.yahrzeitDay", 0),
         yahrzeitLabel = Config.Get("kiosk.yahrzeitLabel", ""),
@@ -404,13 +428,15 @@ public static partial class Kiosk
         dedicationText = Config.Get("kiosk.dedicationText", ""),
         fullscreenOtzaria = Config.Get("kiosk.fullscreenOtzaria", true),
         sideBar = Config.Get("kiosk.sideBar", true),
+        barPrograms = Config.Get("kiosk.barPrograms", !Config.Get("kiosk.sideBar", true)), // D4
         sideBarIconsOnly = Config.Get("kiosk.sideBarIconsOnly", false),
+        sideBarKeyboard = Config.Get("kiosk.sideBarKeyboard", false),
         sideBarPosition = Config.Get("kiosk.sideBarPosition", "right"),
         resetOnShutdown = Config.Get("kiosk.resetOnShutdown", false),
         openSections = OpenSections,
         allSections = AllSections,
         warnings = Warnings(),
-        schedule = new { enabled = ScheduleEnabled, start = ScheduleStart, end = ScheduleEnd, warn = ScheduleWarn },
+        schedule = new { enabled = ScheduleEnabled, start = ScheduleStart, end = ScheduleEnd, warn = ScheduleWarn, extra = SchedMulti.Extra, days = PackG.Days, showInCalendar = Config.Get("kiosk.schedule.showInCalendar", false) }, recoverySaved = PackG.RecoverySaved,
         activatedBy = Config.Get<string>("kiosk.activatedBy", "manual"),
         twoFactor = TwoFactor.Enabled,
         twoFactorAvailable = TwoFactor.Available(),
@@ -452,7 +478,9 @@ public static partial class Kiosk
         var t = Sched.ParseTime(ScheduleStart) ?? TimeSpan.FromHours(20);
         var now = DateTime.Now;
         var today = now.Date + t;
-        return today > now ? today : today.AddDays(1);
+        var next = today > now ? today : today.AddDays(1);
+        for (int i = 0; i < 7 && !PackG.DayAllowed(next.Date); i++) next = next.AddDays(1);   // סבב G (6): ימי שבוע
+        return next;
     }
 
     /// <summary>עד מתי לדלג על נעילה מתוזמנת (אחרי "ביטול הנעילה" באזהרה)</summary>
@@ -500,7 +528,7 @@ public static partial class Kiosk
     {
         if (HardLock.Available) return; // כשיש שירות — הוא המתזמן
         // תזמון כבוי, או דילוג ידני, נחשבים כמו "מחוץ לחלון"
-        bool inWindow = ScheduleEnabled && !Skipping && Sched.InWindow(ScheduleStart, ScheduleEnd, DateTime.Now);
+        bool inWindow = ScheduleEnabled && !Skipping && SchedMulti.InAnyWindow(DateTime.Now);
         // פתיחה זמנית ממתינה: הנעילה שוחררה רק עד סוף הפתיחה, ו-TempTick הוא שמחזיר אותה (או לא, אם החלון הסתיים)
         if (TempUnlockPendingLocal) return;
         if (inWindow && !IsActive)
@@ -644,7 +672,7 @@ public static partial class Kiosk
         Config.Set(KTuUntil, "");
         Overlay.HideTempUnlock();
         bool bySchedule = Config.Get<string>("kiosk.activatedBy", "manual") == "schedule";
-        bool inWindow = ScheduleEnabled && !Skipping && Sched.InWindow(ScheduleStart, ScheduleEnd, DateTime.Now);
+        bool inWindow = ScheduleEnabled && !Skipping && SchedMulti.InAnyWindow(DateTime.Now);
         if (relock && !IsActive && (!bySchedule || inWindow))
         {
             Config.Log("temp unlock: " + reason + " — הנעילה חוזרת");
@@ -829,17 +857,31 @@ public static partial class Kiosk
         if (HasPassword)
         {
             // שינוי סיסמה קיימת: אימות הישנה, וסנכרון לרכיב ההקשחה אם מותקן. קוד השחזור הקיים נשמר
-            Verify(b.Str("oldPassword"), allowRecovery: true);
+            // #69: גם קוד גיבוי חד-פעמי מתקבל (שכחתי סיסמה) — רכיב ההקשחה בודק ושורף אותו בעצמו
+            bool viaBackup = IsBackupCode(b.Str("oldPassword") ?? "");
+            if (!viaBackup) Verify(b.Str("oldPassword"), allowRecovery: true);
             if (svc) HardLock.SetPassword(b.Str("oldPassword"), newPassword);
+            if (viaBackup) BackupCodes.Consume(b.Str("oldPassword"));
+            // #56: שחזור סיסמה שנשכחה בקוד השחזור — הנעילה נשארת פעילה, והקוד שנוצל מוחלף בחדש (חד-פעמי).
+            // WHY: כשהשירות מחזיק את קוד השחזור אין פקודה שמחליפה אותו שם; קוד חדש שנשמר רק מקומית לא היה עובד, והישן היה נשאר תקף. לכן רק בלי שירות
+            if (!svc && (IsRecoveryCode(b.Str("oldPassword") ?? "") || !PackG.RecoverySaved))   // סבב G: קוד שלא נשמר — מקבלים קוד חדש
+            {
+                recovery = Secret.NewRecoveryCode();
+                StoreSecret(recovery, "kiosk.recoveryHash", "kiosk.recoverySalt");
+                PackG.MarkNewCode();
+                AdminLog.Add("שחזור סיסמת מנהל בקוד שחזור");
+            }
         }
         else
         {
             // הגדרה ראשונה: יוצרים קוד שחזור חד-פעמי
             recovery = Secret.NewRecoveryCode();
             StoreSecret(recovery, "kiosk.recoveryHash", "kiosk.recoverySalt");
+            PackG.MarkNewCode();
         }
         if (svc) PurgeLocalPassword(); // השירות מחזיק את ה-hash; לא שומרים עותק מקומי
         else StoreSecret(newPassword, "kiosk.passwordHash", "kiosk.salt");
+        AdminLog.Add("עדכון סיסמת מנהל");
         Config.Save();
         return recovery == null ? new { ok = true } : new { ok = true, recoveryCode = recovery };
     }
@@ -847,7 +889,10 @@ public static partial class Kiosk
     private static object Enable(JsonElement b)
     {
         if (!HasPassword) throw BridgeException.BadRequest("יש להגדיר סיסמה לפני הפעלת הנעילה");
+        // סבב G (9): קוד השחזור חייב להישמר לקובץ או להדפסה לפני ההפעלה הראשונה
+        if (!PackG.RecoverySaved) throw BridgeException.BadRequest(Lang.T("יש לשמור את קוד השחזור לקובץ או להדפיס אותו לפני הפעלת הנעילה (הגדרות ← נעילה ← שמירת קוד השחזור)", "Save the recovery code to a file or print it before turning on the lock (Settings → Lock → save recovery code)"));
         Verify(b.Str("password"), allowRecovery: false);
+        AdminLog.Add("הפעלת נעילה");
 
         bool strict = b.Bool("strict", false); // כבוי כברירת מחדל
         // נעילה קשיחה (קפדנית או מוקשחת בשירות) בחשבון מנהל ניתנת לעקיפה מלאה: מסרבים, אלא אם המפעיל אישר במפורש
@@ -897,11 +942,24 @@ public static partial class Kiosk
     private static object Disable(JsonElement b)
     {
         string pw = b.Str("password");
-        bool viaRecovery = IsRecoveryCode(pw);
-        Verify(pw, allowRecovery: true);
+        // #69: קוד גיבוי חד-פעמי — כמו קוד השחזור (ביטול חירום, פטור מ-2FA), ונשרף אחרי השימוש
+        bool viaBackup = IsBackupCode(pw);
+        bool viaRecovery = viaBackup || IsRecoveryCode(pw);
+        if (!viaBackup) Verify(pw, allowRecovery: true);
+        AdminLog.Add("ביטול נעילה");
         // קוד שחזור פטור מ-2FA (ביטול חירום); סיסמה רגילה דורשת גם Windows Hello אם מופעל
         if (!viaRecovery) TwoFactor.Require("ביטול נעילת המחשב");
         if (HardLock.Available) HardLock.Disable(pw);
+        if (viaBackup) BackupCodes.Consume(pw);
+        // ביטול ידני בתוך חלון מתוזמן: בלי זה התזמון ינעל מחדש תוך שניות וה"ביטול" לא יתפוס עד סוף החלון (שעות).
+        // מדלגים על יתרת החלון הנוכחי — החלון הבא (מחר) יחול כרגיל.
+        if (ScheduleEnabled && Config.Get<string>("kiosk.activatedBy", "manual") == "schedule" && SchedMulti.InAnyWindow(DateTime.Now))
+        {
+            var end = SchedMulti.CurrentWindowEnd(DateTime.Now);
+            Config.Set("kiosk.schedule.skipUntil", end.ToString("o"));
+            Config.Save(); // השירות מדלג בעצמו על שארית החלון ב-disable (HardLockService) - בלי קריאת Skip נוספת שדורשת Hello שוב
+            Config.Log("schedule: ביטול ידני בתוך חלון מתוזמן — דילוג עד " + end);
+        }
         EndTempUnlockLocal("הנעילה בוטלה ידנית", relock: false); // ביטול מלא: הנעילה לא תחזור בתום הפתיחה הזמנית
         Release();
         return new { active = false };
@@ -915,6 +973,7 @@ public static partial class Kiosk
         if (PasswordConfigured)
         {
             Verify(b.Str("password"), allowRecovery: false);
+            AdminLog.Add("שינוי הגדרות נעילה");
             // שינוי הגדרות דורש Windows Hello כשהאימות הדו-שלבי כבר פעיל (הפעלה ראשונה מטופלת למטה)
             TwoFactor.Require("שינוי הגדרות הנעילה");
         }
@@ -937,9 +996,23 @@ public static partial class Kiosk
         // אחרי האימות הדו-שלבי: הפתיחה הזמנית תלויה במצבו החדש
         ApplyTempUnlockSettings(b);
         if (b.Has("readOnly")) Config.Set("kiosk.readOnly", b.Bool("readOnly"));
-        foreach (string k in new[] { "clock", "restScreen", "fullscreenOtzaria", "sideBar", "sideBarIconsOnly", "resetOnShutdown", "allowExcelDocs", "showParsha", "showDafYomi" })
+        { string rcv = b.Str("restContent"); if (rcv is "full" or "zmanim" or "clock" or "verse") Config.Set("kiosk.restContent", rcv); }
+        foreach (string k in new[] { "clock", "restScreen", "fullscreenOtzaria", "sideBar", "barPrograms", "sideBarIconsOnly", "sideBarKeyboard", "resetOnShutdown", "allowExcelDocs", "showParsha", "showDafYomi",
+            "lockScreenImage", "restShowVerse", "restShowClock", "restShowZmanim", "restShowLogo", "restShowDedication", "saverEnabled" })
             if (b.Has(k)) Config.Set("kiosk." + k, b.Bool(k));
+        if (b.Has("restDedicationText")) { string dt = (b.Str("restDedicationText") ?? "").Replace("\r", ""); Config.Set("kiosk.restDedicationText", dt.Length > 400 ? dt[..400] : dt); }
+        if (b.Has("restDedicationStyle")) Config.Set("kiosk.restDedicationStyle", b.Str("restDedicationStyle") == "column" ? "column" : "fixed");
+        if (b.Has("restCandleFlicker")) Config.Set("kiosk.restCandleFlicker", b.Bool("restCandleFlicker"));
+        if (b.Has("restVerseText")) { string vt = (b.Str("restVerseText") ?? "").Replace("\r", "").Replace("\n", " ").Trim(); Config.Set("kiosk.restVerseText", vt.Length > 160 ? vt[..160] : vt); }
+        if (b.Has("restNoteText")) { string nt = (b.Str("restNoteText") ?? "").Replace("\r", ""); Config.Set("kiosk.restNoteText", nt.Length > 600 ? nt[..600] : nt); }
+        if (b.Has("lockScreenImage")) Tray.Invoke(() => { if (Config.Get("kiosk.lockScreenImage", false)) LockScreenImage.Update(); else LockScreenImage.Restore(); });
+        if (b.Has("saverWhenUnlocked")) Config.Set("kiosk.saverWhenUnlocked", b.Bool("saverWhenUnlocked", true)); // D2
+        if (b.Has("bootCover")) Config.Set("kiosk.bootCover", b.Bool("bootCover", true)); // D3
         if (b.Has("restIdleMinutes")) Config.Set("kiosk.restIdleMinutes", (int)Math.Clamp(b.Long("restIdleMinutes", 0), 0, 240));
+        if ((b.Has("zmanimCity") && b.Str("zmanimCity", "") != Config.Get("kiosk.zmanimCity", ""))
+            || (b.Has("zmanimLocation") && (b.Str("zmanimLocation") ?? "").Trim() != Config.Get("kiosk.zmanimLocation", ""))
+            || (b.Has("zmanimDiaspora") && b.Bool("zmanimDiaspora") != Config.Get("kiosk.zmanimDiaspora", false)))
+            Zmanim.InvalidateCache();
         if (b.Has("zmanimLocation"))
         {
             string loc = (b.Str("zmanimLocation") ?? "").Trim();
@@ -950,6 +1023,8 @@ public static partial class Kiosk
         // למעלה נשארות כאפשרות מתקדמת, וגם משמשות גיבוי כש-kiosk.zmanimCity ריק
         if (b.Has("zmanimCity")) Config.Set("kiosk.zmanimCity", (b.Str("zmanimCity") ?? "").Trim());
         // תיקון גובה לגיבוי (issue #33): מטרים מעל פני הים, רק למנוע kosherjava (הספרייה דורשת ≥ 0)
+        if (b.Has("zmanimAlert")) Config.Set("kiosk.zmanimAlert", b.Str("zmanimAlert") ?? "");
+        if (b.Has("zmanimAlertMinutes")) Config.Set("kiosk.zmanimAlertMinutes", (int)Math.Clamp(b.Num("zmanimAlertMinutes") ?? 10, 1, 180));
         if (b.Has("zmanimElevation")) Config.Set("kiosk.zmanimElevation", Math.Clamp(b.Num("zmanimElevation") ?? 0, 0, 5000));
         // מנוע חישוב הגיבוי: "noaa" (ברירת מחדל, ללא שינוי למתקינים קיימים) או "kosherjava" (חדש)
         if (b.Has("zmanimFallbackEngine"))
@@ -995,7 +1070,7 @@ public static partial class Kiosk
             Config.Set("kiosk.dedicationText", ded);
         }
         string cp = b.Str("clockPosition");
-        if (cp is "bottom-left" or "bottom-right" or "top-left" or "top-right") Config.Set("kiosk.clockPosition", cp);
+        if (cp is "bottom-left" or "bottom-right" or "top-left" or "top-right" or "bar-bottom" or "bar-top") Config.Set("kiosk.clockPosition", cp);
         string rzs = b.Str("restZmanimSide");
         if (rzs is "left" or "right") Config.Set("kiosk.restZmanimSide", rzs);
         string sbp = b.Str("sideBarPosition");
@@ -1025,6 +1100,9 @@ public static partial class Kiosk
         {
             if (sch.Has("enabled")) Config.Set("kiosk.schedule.enabled", sch.Bool("enabled"));
             if (sch.Has("warn")) Config.Set("kiosk.schedule.warn", sch.Bool("warn"));
+            if (sch.Has("showInCalendar")) Config.Set("kiosk.schedule.showInCalendar", sch.Bool("showInCalendar"));
+            SchedMulti.Apply(sch);
+            PackG.ApplyDays(sch);
             string ss = sch.Str("start");
             if (ss != null)
             {
@@ -1058,7 +1136,15 @@ public static partial class Kiosk
 
     // ---------- איתור אוצריא ----------
 
+    private static string _opCache; private static DateTime _opAt;
+    /// <summary>משוב 3.9: נשמר לדקה - סריקת תהליכים חזרה על עצמה בכל /kiosk/status והאטה אותו</summary>
     public static string OtzariaPath()
+    {
+        if (_opCache != null && (DateTime.UtcNow - _opAt).TotalSeconds < 60 && File.Exists(_opCache)) return _opCache;
+        _opCache = OtzariaPathUncached(); _opAt = DateTime.UtcNow; return _opCache;
+    }
+
+    private static string OtzariaPathUncached()
     {
         // כשרכיב ההקשחה מותקן ויש לו נתיב — הוא מקור האמת, ו-config.json (כתיב למשתמש המחובר) לא נקרא.
         // נתיב ריק אצלו = זיהוי אוטומטי; נתיב שלא קיים בחשבון הזה = זיהוי אוטומטי (ולא ערך מ-config.json)
@@ -1246,6 +1332,39 @@ public static partial class Kiosk
         catch (Exception ex) { Config.Log("boot guard: " + ex.Message); StartExplorer(); }
     }
 
+    /// <summary>
+    /// #8: רשת ביטחון למעטפת. במקום להפנות ישירות לגשר, המעטפת היא סקריפט קטן (wscript, בלי חלון)
+    /// שמפעיל explorer אם קובץ הגשר חסר, אם ההפעלה נכשלה, או אם הגשר יצא עם שגיאה (קריסה).
+    /// כך גם גשר שנמחק/נשבר לא משאיר מסך שחור. אם wscript לא קיים — חזרה להפניה ישירה (המצב הקודם).
+    /// </summary>
+    private static string ShellCommand()
+    {
+        string exe = Installer.InstalledExe;
+        string direct = "\"" + exe + "\" --background";
+        try
+        {
+            string ws = Path.Combine(Environment.SystemDirectory, "wscript.exe");
+            if (!File.Exists(ws)) return direct;
+            Directory.CreateDirectory(Config.Dir);
+            string vbs = Path.Combine(Config.Dir, "shell-guard.vbs");
+            File.WriteAllText(vbs,
+                "On Error Resume Next\r\n" +
+                "Set sh = CreateObject(\"WScript.Shell\")\r\n" +
+                "Set fs = CreateObject(\"Scripting.FileSystemObject\")\r\n" +
+                "exe = \"" + exe.Replace("\"", "") + "\"\r\n" +
+                "rc = 1\r\n" +
+                "If fs.FileExists(exe) Then\r\n" +
+                "  Err.Clear\r\n" +
+                "  rc = sh.Run(Chr(34) & exe & Chr(34) & \" --background\", 1, True)\r\n" +
+                "  If Err.Number <> 0 Then rc = 1\r\n" +
+                "End If\r\n" +
+                "If rc <> 0 Then sh.Run \"explorer.exe\", 1, False\r\n",
+                new System.Text.UTF8Encoding(false));
+            return "\"" + ws + "\" //B //NoLogo \"" + vbs + "\"";
+        }
+        catch (Exception ex) { Config.Log("kiosk: shell-guard לא נוצר: " + ex.Message); return direct; }
+    }
+
     private static bool ShellPointsToBridge()
     {
         try
@@ -1322,6 +1441,9 @@ public static partial class Kiosk
             try
             {
                 using var k = Registry.CurrentUser.CreateSubKey(PoliciesKey);
+                // Ctrl+Alt+Del ← "נעילה" ו-Win+L מובילים למסך הנעילה של Windows, ושם כפתור "נגישות" שמאפשר לצאת מהנעילה
+                // (דיווח בפורום: ילדים פותחים דרכו את המחשב). בזמן הנעילה פעולת הנעילה של Windows מבוטלת; משתחררת עם ביטול הנעילה
+                k.SetValue("DisableLockWorkstation", 1, RegistryValueKind.DWord);
                 if (SecBool("kiosk.blockTaskManager", true, true)) { k.SetValue("DisableTaskMgr", 1, RegistryValueKind.DWord); _taskMgrByPolicy = true; }
                 else k.DeleteValue("DisableTaskMgr", false);
             }
@@ -1335,7 +1457,7 @@ public static partial class Kiosk
                 using var k = Registry.CurrentUser.CreateSubKey(WinlogonKey);
                 // נעילה קפדנית: המעטפת היא הגשר, שמפעיל את אוצריא. ללא strict המעטפת לא משתנה
                 if (SecBool("kiosk.strict", false, true))
-                    k.SetValue("Shell", "\"" + Installer.InstalledExe + "\" --background", RegistryValueKind.String);
+                    k.SetValue("Shell", ShellCommand(), RegistryValueKind.String);
                 else k.DeleteValue("Shell", false);
             }
             catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
@@ -1394,7 +1516,7 @@ public static partial class Kiosk
         // כל מפתח בנפרד: כישלון במדיניות (מפתח נעול) לא ימנע את מחיקת המעטפת, שהיא הקריטית
         try { using var k = Registry.CurrentUser.OpenSubKey(WinlogonKey, true); k?.DeleteValue("Shell", false); }
         catch (Exception ex) { Config.Log("kiosk clear shell: " + ex.Message); }
-        try { using var k = Registry.CurrentUser.OpenSubKey(PoliciesKey, true); k?.DeleteValue("DisableTaskMgr", false); }
+        try { using var k = Registry.CurrentUser.OpenSubKey(PoliciesKey, true); k?.DeleteValue("DisableTaskMgr", false); k?.DeleteValue("DisableLockWorkstation", false); }
         catch (Exception ex) { Config.Log("kiosk clear policy: " + ex.Message); }
         SetToastPolicy(false);
         SetAccessibilityPolicy(false);   // [x2] מחזיר נגישות/NoWinKeys/AutoPlay (גם כשארית אחרי קריסה, דרך BootGuard)
@@ -1454,6 +1576,19 @@ public static partial class Kiosk
     }
 
     /// <summary>
+    /// קוד חירום: קוד שחזור (VerifyEmergencyCode: השירות הוא מקור האמת) או קוד גיבוי חד-פעמי (#69). בשירות מותקן ופעיל קוד גיבוי נבדק רק בשירות
+    /// (ה-hash המקומי כתיב למשתמש); מקומית רק כשאין שירות או שהוא מופסק באמת. viaBackup = צריך לשרוף את הקוד המקומי
+    /// </summary>
+    private static bool EmergencyCodeOk(string code, out bool viaBackup)
+    {
+        viaBackup = false;
+        if (VerifyEmergencyCode(code)) return true;
+        if (HardLock.ServiceInstalled() && !ServiceStopped()) return false;
+        try { viaBackup = IsBackupCode(code); } catch { return false; }
+        return viaBackup;
+    }
+
+    /// <summary>
     /// ה-hash/salt של קוד השחזור לשימוש מקומי (מצב רך, או שירות מופסק): config.json, ובהיעדרו (נמחק כשהשירות החזיק אותו) הקובץ של השירות ב-ProgramData,
     /// שנקרא רק כשהתהליך מורם (משתמש רגיל לא יכול לקרוא אותו; ומי שעצר את השירות הוא מנהל). לא קורא רשת/pipe.
     /// </summary>
@@ -1482,7 +1617,8 @@ public static partial class Kiosk
     /// </summary>
     public static bool EmergencyUnlock(string code)
     {
-        if (!VerifyEmergencyCode(code)) return false;
+        if (!EmergencyCodeOk(code, out bool viaBackup)) return false;
+        if (viaBackup) BackupCodes.Consume(code);
         int self = Environment.ProcessId;
         var others = Process.GetProcessesByName("OtzariaBridge").Where(p => p.Id != self).ToList();
         if (others.Count > 0)
@@ -1619,10 +1755,29 @@ public static partial class Kiosk
     /// קיצור חירום מהגשר הרץ (Ctrl+Alt+Shift+F12): מבטל את הנעילה כולה (גם את השירות) - אבל רק עם קוד השחזור.
     /// קיצור בלי שום אימות היה מאפשר לכל תלמיד לבטל את הנעילה, ולכן הקוד נדרש.
     /// </summary>
+    /// <summary>#8: כשהנעילה כבויה אבל נשארו שאריות (מסך שחור בלי סייר) — Ctrl+Alt+Shift+F12 משחזר בלי קוד.
+    /// כשהנעילה פעילה הקיצור נתפס ב-hook ודורש קוד שחזור (EmergencyRelease) — אין כאן עקיפה.</summary>
+    public static bool RestoreShellIfUnlocked()
+    {
+        if (IsActive || HardLock.ServiceActive) return false;
+        try { ClearRegistry(); } catch (Exception ex) { Config.Log("restore-shell: " + ex.Message); }
+        if (Process.GetProcessesByName("explorer").Length == 0) StartExplorer();
+        Config.Log("kiosk: שחזור סייר בקיצור (נעילה כבויה) — #8");
+        return true;
+    }
+
     public static bool EmergencyRelease(string code)
     {
-        // WHY: ה-hash המקומי נחשב רק כשהשירות לא מותקן או מופסק באמת (VerifyEmergencyCode); עריכת config.json לא משחררת
-        if (!VerifyEmergencyCode(code)) return false;
+        // WHY: ה-hash המקומי נחשב רק כשהשירות לא מותקן או מופסק באמת (VerifyEmergencyCode); עריכת config.json לא משחררת.
+        // קוד גיבוי חד-פעמי (#69): בשירות נבדק ונשרף אצלו (EmergencyDisable), מקומית רק בלי שירות
+        if (!EmergencyCodeOk(code, out bool viaBackup)) return false;
+        if (viaBackup) BackupCodes.Consume(code);
+        // כמו ב-Disable: ביטול בתוך חלון תזמון נעילה היה ננעל מחדש תוך שניות (ScheduleTick) ויוצר לולאת "בטל-ננעל"
+        if (ScheduleEnabled && SchedMulti.InAnyWindow(DateTime.Now))
+        {
+            Config.Set("kiosk.schedule.skipUntil", SchedMulti.CurrentWindowEnd(DateTime.Now).ToString("o"));
+            Config.Save();
+        }
         EndTempUnlockLocal("ביטול חירום בקוד שחזור", relock: false);
         Release();
         Config.Log("kiosk: הנעילה בוטלה בקיצור חירום עם קוד שחזור");
@@ -1639,7 +1794,8 @@ public static partial class Kiosk
         }
         else if (ServiceDown()) return "רכיב ההקשחה לא מגיב; אי אפשר לאמת סיסמה (קוד שחזור: --unlock)";
         else if (HasPassword && !(Matches(password, "kiosk.passwordHash", "kiosk.salt") ||
-                             Matches(Secret.NormalizeRecovery(password), "kiosk.recoveryHash", "kiosk.recoverySalt")))
+                             Matches(Secret.NormalizeRecovery(password), "kiosk.recoveryHash", "kiosk.recoverySalt") ||
+                             BackupCodes.Consume(password)))
             return "נדרשת סיסמת הנעילה: --password <סיסמה>";
         Config.Set("kiosk.active", false);
         Config.Set("kiosk.strict", false);
@@ -1776,7 +1932,7 @@ public static partial class Kiosk
 
     private static DateTime _snipSeen = DateTime.MinValue;
 
-    /// <summary>כלי החיתוך (שברשימת התוכנות המותרות) רץ בחשבון הזה - עד 120 שניות רצופות, ואז חוזרים לאכוף</summary>
+    /// <summary>כלי החיתוך (שברשימת התוכנות המותרות) רץ בחשבון הזה - עד 60 שניות רצופות, ואז חוזרים לאכוף</summary>
     private static bool SnipCaptureInProgress(int session)
     {
         bool found = false;
@@ -1788,8 +1944,8 @@ public static partial class Kiosk
                     catch { }
                 }
         if (!found) { _snipSeen = DateTime.MinValue; return false; }
-        if (_snipSeen == DateTime.MinValue) { _snipSeen = DateTime.UtcNow; LogThrottled("snip", "watchdog: כלי החיתוך פתוח - explorer לא נהרג עד 120 שניות", 30); }
-        return (DateTime.UtcNow - _snipSeen).TotalSeconds < 120;
+        if (_snipSeen == DateTime.MinValue) { _snipSeen = DateTime.UtcNow; LogThrottled("snip", "watchdog: כלי החיתוך פתוח - explorer לא נהרג עד 60 שניות", 30); }
+        return (DateTime.UtcNow - _snipSeen).TotalSeconds < 60;
     }
 
     private static void Watch()
@@ -1861,8 +2017,8 @@ public static partial class Kiosk
             // אוצריא תמיד ממוקסמת: בלי מזעור, בלי חלון קטן, ובלי חור במקום שורת המשימות
             // אוצריא ממוזערת: מסך מנוחה עם סמל אוצריא, שעה ותאריך, במקום החזרה מיידית
             // שומר מסך אחרי זמן ללא פעילות (0 = כבוי), גם כשאוצריא פתוחה
-            int idleMin = Config.Get("kiosk.restIdleMinutes", 0);
-            if (idleMin > 0 && !Overlay.RestVisible && IdleMs() >= idleMin * 60000L) { Overlay.ShowRest(hwnd, idle: true); return; }
+            int idleMin = Config.Get("kiosk.restIdleMinutes", 1);
+            if (idleMin > 0 && Config.Get("kiosk.saverEnabled", true) && !Overlay.RestVisible && IdleMs() >= idleMin * 60000L) { Overlay.ShowRest(hwnd, idle: true); return; }
             if (Overlay.RestIdle) return;
             if (IsIconic(hwnd))
             {
@@ -1885,6 +2041,7 @@ public static partial class Kiosk
             if (fgPid == 0) return;
             CloseShellWindow(fgPid, session);
             if (Programs.IsAllowedForeground(fgPid)) return; // תוכנה מותרת (רשימה מוגדרת בסיסמה) בחזית
+            if (Config.Get("kiosk.sideBarKeyboard", false) && IsScreenKeyboardPid(fgPid)) return; // מקלדת וירטואלית שנפתחה מהסרגל (מסך מגע)
             try
             {
                 using var fgp = Process.GetProcessById((int)fgPid);
@@ -1912,7 +2069,6 @@ public static partial class Kiosk
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandle(string name);
 
     private static bool _hookLogged;
-
     /// <summary>
     /// תמונת מצב של "האם התהליך הזה בחזית מותר", מחושבת מראש בחוט השומר (Watch, כל 2 שניות) ולא
     /// בתוך ה-hook. אובייקט record יחיד: הקצאה/קריאה של הפניה הן אטומיות ב-.NET, כך שה-hook תמיד
@@ -1960,6 +2116,22 @@ public static partial class Kiosk
 
     private static readonly HashSet<string> BrowserNames = new(StringComparer.OrdinalIgnoreCase)
         { "msedge", "chrome", "firefox", "iexplore", "brave", "opera", "vivaldi" };
+
+    /// <summary>המקלדת הווירטואלית של Windows (osk / TabTip) — מותרת בחזית כשהמנהל הפעיל אותה בסרגל</summary>
+    private static bool IsScreenKeyboardPid(uint pid)
+    {
+        try
+        {
+            // WHY: שם תהליך לבדו ניתן לזיוף (osk.exe בכל תיקיה); משווים גם את נתיב הקובץ לנתיבי Windows הרשמיים
+            string img = ImagePath(pid);
+            if (string.IsNullOrEmpty(img)) return false;
+            string sys = Environment.GetFolderPath(Environment.SpecialFolder.System);
+            string common = Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFiles);
+            return SamePath(img, Path.Combine(sys, "osk.exe")) ||
+                   SamePath(img, Path.Combine(common, "microsoft shared", "ink", "TabTip.exe"));
+        }
+        catch { return false; }
+    }
 
     private static bool IsOtzariaPid(uint pid)
     {
@@ -2011,14 +2183,16 @@ public static partial class Kiosk
             // [r1] שינוי מינימלי בנקודת חיבור (קובץ בבעלות אחר): AltGr (Ctrl+Alt ימני) לא נחשב Ctrl+Alt+O — ר' KioskKeys.IsReturnHotkey
             if (KioskKeys.IsReturnHotkey(vk, down, ctrl, altHeld, (GetAsyncKeyState(0xA4) & 0x8000) != 0, (GetAsyncKeyState(0xA5) & 0x8000) != 0) && ForegroundIsAllowedProgram())
             {
-                Task.Run(ReturnToOtzaria);
+                SafeTask.Run(ReturnToOtzaria);
                 return (IntPtr)1;
             }
             // Ctrl+Alt+Shift+F12: חלון קוד שחזור לביטול חירום של הנעילה. ה-hook כבר לא בחוט ה-UI, אבל עדיין לא
             // מריצים כאן: פתיחת טופס + pipe לשירות בתוך callback חורגים מ-300ms ו-Windows מסירה את ה-hook
             if (ctrl && altHeld && vk == 0x7B && shift && down)
             {
-                Task.Run(() => { try { Config.Log("emergency: זוהה Ctrl+Alt+Shift+F12 ב-hook"); Tray.Invoke(EmergencyForm.Open); } catch (Exception ex) { Config.Log("emergency open: " + ex.Message); } });
+                // לא מריצים כאן ישירות: ה-hook רץ בחוט ה-UI, ו-Tray.Invoke מריץ סינכרונית כשכבר בו -
+                // פתיחת טופס + BringToFront + קריאת pipe לשירות בתוך callback חורגים מ-300ms ו-Windows מתעלמת מה-hook
+                SafeTask.Run(() => { try { Config.Log("emergency: זוהה Ctrl+Alt+Shift+F12 ב-hook"); Tray.Invoke(EmergencyForm.Open); } catch (Exception ex) { Config.Log("emergency open: " + ex.Message); } });
                 return (IntPtr)1;
             }
             GetWindowThreadProcessId(GetForegroundWindow(), out uint fgPid);

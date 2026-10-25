@@ -80,5 +80,152 @@ details.card.explain[open] > summary { margin-bottom: .75em; }
 
 /* #13 (13.10.2026): מצב קומפקטי כמו באוצריא — תפריט צד של אייקונים בלבד */
 body.ss-compact .sidenav { width: auto; min-width: 0; padding-inline: 0.375em; }
-body.ss-compact .nav-item span, body.ss-compact .nav-group, body.ss-compact .nav-search { display: none; }
-body.ss-compact .nav-item { justify-content: center; padding-inline: 0.625em; }
+body.ss-compact .nav-group, body.ss-compact .nav-search { display: none; }
+/* משוב 15.10: כמו באוצריא — כיתוב קטן מתחת לאייקון במצב קומפקטי */
+body.ss-compact .nav-item { flex-direction: column; justify-content: center; align-items: center; gap: 2px; padding: 0.45em 0.3em; width: 4.6em; text-align: center; }
+body.ss-compact .nav-item span { display: block; font-size: 0.68em; line-height: 1.15; white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+/* D5: רשימת בחירה גלילה */
+select.input.listbox { height: auto; padding: 4px; overflow-y: auto; background-image: none; }
+select.input.listbox option { padding: 6px 10px; border-radius: 6px; }
+select.input.listbox option:checked { background: var(--color-primary); color: var(--color-on-primary); }
+
+/* משוב 15.10: שורת "להציג" + מתג "התראה" */
+.check-pair{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.check-pair .check-row{flex:1;min-width:0}
+.mini-switch{display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--color-on-surface-variant);flex-shrink:0;user-select:none}
+.mini-switch input{position:absolute;opacity:0;width:0;height:0}
+.mini-track{position:relative;width:30px;height:16px;border-radius:8px;background:var(--color-outline-variant);transition:background .15s}
+.mini-track::after{content:"";position:absolute;top:2px;inset-inline-start:2px;width:12px;height:12px;border-radius:50%;background:var(--color-surface-container-lowest);transition:inset-inline-start .15s}
+.mini-switch input:checked + .mini-track{background:var(--color-primary)}
+.mini-switch input:checked + .mini-track::after{inset-inline-start:16px}
+.mini-switch input:checked ~ .mini-text{color:var(--text,inherit)}
+.mini-switch input:focus-visible + .mini-track{outline:2px solid var(--color-primary);outline-offset:2px}
+
+/* משוב 15.10: מתגים בשורה ושדות קצרים בחצי רוחב */
+.pill-row{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:4px}
+.mini-switch.pill{font-size:13px}
+.field.half{display:inline-flex;flex-direction:column;width:calc(50% - 10px);vertical-align:top}
+.field.half + .field.half{margin-inline-start:16px}
+.field.half .input{max-width:120px}
+textarea.input{resize:vertical;min-height:4em;font:inherit}
+
+/* משוב 15.10: מתגי הפעלה/כיבוי בסגנון אוצריא (Material switch) במקום תיבות סימון */
+.switch-row{display:flex;align-items:flex-start;gap:12px;cursor:pointer}
+.switch-row > input{position:absolute;opacity:0;width:0;height:0}
+.mini-track.big{flex-shrink:0;width:40px;height:22px;border-radius:11px;margin-top:2px}
+.mini-track.big::after{top:3px;inset-inline-start:3px;width:16px;height:16px;box-shadow:0 1px 2px var(--color-outline)}
+.switch-row > input:checked + .mini-track{background:var(--color-primary)}
+.switch-row > input:checked + .mini-track.big::after{inset-inline-start:21px}
+.switch-row > input:focus-visible + .mini-track{outline:2px solid var(--color-primary);outline-offset:2px}
+.switch-row.is-disabled .mini-track{opacity:.6}
+.section[hidden]{display:none !important}
+
+/* משוב 3.9 — קו עיצובי אחיד להגדרות: כרטיסים ברווח קבוע, כותרת עם פס צבע אוצריא,
+   שורות הגדרה מופרדות בקו עדין, טקסט משני בגודל אחיד, ומתגים/בחירות בצבע אוצריא */
+.card { border-radius: 0.875em; border: 1px solid var(--color-outline-variant); margin-bottom: 1em; }
+.card + .card { margin-top: 0; }
+.card-title { display: flex; align-items: center; gap: 0.5em; font-size: 1.0625em; padding-inline-start: 0.625em; border-inline-start: 0.25em solid var(--color-primary); line-height: 1.3; }
+.switch-row { padding: 0.625em 0; border-bottom: 1px solid var(--color-outline-variant); }
+.switch-row:last-child { border-bottom: 0; }
+.muted, .hint, .card .desc { color: var(--color-on-surface-variant); font-size: 0.875em; line-height: 1.5; }
+input[type=checkbox], input[type=radio], input[type=range] { accent-color: var(--color-primary); }
+.ss-load-step { margin-top: 0.75em; text-align: center; }
+
+/* כפתור שמירה בתחתית טופס: צמוד לשמאל במסך עברי (בסוף השורה), ולימין בקצה בכיוון LTR */
+html[dir="rtl"] .ss-form .row-actions { justify-content: flex-end; }
+html[dir="ltr"] .ss-form .row-actions { justify-content: flex-start; }
+/* כפתור "עדכון עכשיו" בהודעת הרכיב הישן — בשורה נפרדת, בצד שמאל, בלי לגלוש על הטקסט */
+.state-box.error > div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.25em; }
+.state-box.error > div > .btn { align-self: flex-end; margin-inline-start: 0; margin-top: 0.5em; }
+
+/* כפתורים לכל רוחב הכרטיס (למשל הקשחת BIOS) */
+.row-actions.full > .btn { flex: 1 1 0; justify-content: center; min-width: 11em; }
+
+/* כותרת "הגדרות מערכת" וגרסה — במרכז הכרטיס */
+.about-hero > div:last-child { flex: 1; min-width: 0; }
+.about-hero h3, .about-hero p.muted { text-align: center; }
+
+/* תוכנות שזוהו במחשב: רשימה מתקפלת, עם חיפוש וגלילה */
+.prog-suggest { margin-top: 0.75em; border: 1px solid var(--color-outline-variant); border-radius: var(--radius-md); padding: 0.25em 0.75em 0.75em; }
+.prog-suggest > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 0.5em; padding: 0.6em 0; font-weight: 600; color: var(--color-primary); }
+.prog-suggest > summary::-webkit-details-marker { display: none; }
+.prog-suggest > summary::before { content: '◂'; transition: transform .15s; }
+.prog-suggest[open] > summary::before { transform: rotate(-90deg); }
+.prog-search { width: 100%; box-sizing: border-box; padding: 0.55em 0.8em; margin-bottom: 0.5em; border: 1px solid var(--color-outline-variant); border-radius: var(--radius-md); background: transparent; color: inherit; font: inherit; }
+.prog-list { max-height: 15em; overflow-y: auto; display: flex; flex-direction: column; }
+.prog-item { display: flex; align-items: center; gap: 0.6em; text-align: start; padding: 0.55em 0.5em; border: 0; border-bottom: 1px solid var(--color-outline-variant); background: transparent; color: inherit; font: inherit; cursor: pointer; border-radius: 0; }
+.prog-item:hover { background: var(--color-surface-container); }
+.prog-item[hidden] { display: none; }
+.prog-item .ic { color: var(--color-primary); flex-shrink: 0; }
+
+/* תפריט "הוספת תוכנה": סגור כברירת מחדל, הכפתור הידני בראשו */
+.prog-suggest { padding: 0 0 0.5em; overflow: hidden; }
+.prog-suggest > summary { padding: 0.75em 1em; background: var(--color-secondary-container, var(--color-surface-container)); border-radius: var(--radius-md); }
+.prog-suggest[open] > summary { border-end-start-radius: 0; border-end-end-radius: 0; margin-bottom: 0.25em; }
+.prog-suggest > .prog-search { width: calc(100% - 1.5em); margin: 0.5em 0.75em; }
+.prog-suggest > .prog-item, .prog-suggest .prog-list .prog-item { padding-inline: 1em; }
+.prog-manual { width: 100%; font-weight: 600; color: var(--color-primary); }
+.prog-list { max-height: 14em; }
+
+/* תיקון ציור: הסיכום ממלא את כל המסגרת כשהתפריט סגור (בלי פס ריק מתחתיו) */
+.prog-suggest { padding: 0; }
+.prog-suggest[open] { padding-bottom: 0.5em; }
+.prog-suggest > summary { margin: 0; border-radius: calc(var(--radius-md) - 1px); }
+.prog-suggest[open] > summary { border-end-start-radius: 0; border-end-end-radius: 0; margin-bottom: 0.25em; }
+
+/* קבוצת כפתורים בשורת הגדרה (ייצוא/יבוא, הגדרות/הסרה של רכיב השירות): צמודים, לא מרוחקים */
+.btn-group { display: flex; gap: 0.5em; flex-wrap: wrap; }
+.setting-row > .btn-group { flex-shrink: 0; }
+
+/* תפריט נפתח לזמני כיבוי/שינה */
+.time-select { min-width: 11em; width: auto; flex-shrink: 0; }
+
+/* תפריטים נפתחים בהגדרות מקלדת */
+.kb-select { width: 100%; max-width: 28em; }
+/* כפתורי פעולה בשורות הגדרה: אותו רוחב מינימלי, כדי שלא יהיו בגדלים שונים זה מזה */
+.setting-row > .btn, .setting-row > .btn-group > .btn { min-width: 9.5em; justify-content: center; }
+
+/* כפתורי פעולה בתחתית כרטיס (איפוס, שמירה וכו') — בצד שמאל בעברית, ובצד ימין באנגלית */
+html[dir="rtl"] .row-actions:not(.center):not(.full) { justify-content: flex-end; }
+html[dir="ltr"] .row-actions:not(.center):not(.full) { justify-content: flex-start; }
+
+/* שורות כפתורי בחירה (רגישות, תוכנית צריכה...): כפתורים ברוחב שווה, ממורכזים על פני כל השורה */
+.preset-row { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.5em; }
+.preset-row > .btn { flex: 1 1 7em; justify-content: center; }
+
+/* חיווי דולק/כבוי: תגית עם נקודה צבעונית — ירוק לפעיל, אפור לכבוי */
+.state-chip { display: inline-flex; align-items: center; gap: 0.4em; font-weight: 700; flex-shrink: 0; }
+.state-chip .dot { width: 0.6em; height: 0.6em; border-radius: 50%; background: currentColor; display: inline-block; }
+.chip.off { background: color-mix(in srgb, var(--color-on-surface) 10%, transparent); color: var(--color-on-surface-variant, #666); }
+.setting-row > .state-chip { margin-inline-end: 0.75em; }
+.list-item > .state-chip { margin-inline-start: auto; }
+
+/* כפתורי שורת תוכנה: X צמוד ל"פתיחה", הקבוצה בקצה השמאלי; כפתור ה-X צר */
+.prog-actions .btn-x { min-width: 0 !important; padding-inline: 0.9em; }
+
+/* מצב נוכחי: ירוק = פתוח/דולק, אדום = נעול/כבוי, כתום = מוגבל */
+.pol-state { display: inline-flex; align-items: center; gap: 0.4em; font-weight: 700; padding: 0.1em 0.75em; border-radius: 99px; }
+.pol-state i { width: 0.6em; height: 0.6em; border-radius: 50%; background: currentColor; display: inline-block; }
+.pol-state.ok { color: var(--color-ok); background: color-mix(in srgb, var(--color-ok) 16%, transparent); }
+.pol-state.bad { color: var(--color-error); background: color-mix(in srgb, var(--color-error) 14%, transparent); }
+.pol-state.mid { color: #B26A00; background: rgba(178, 106, 0, 0.14); }
+
+/* אודות: הטקסט התיאורי גדול ומודגש יותר */
+.about-hero p:not(.muted) { font-size: 1.2em; font-weight: 600; line-height: 1.7; text-align: center; }
+.about-hero p.muted { font-size: 1.05em; }
+
+label.check-row[hidden] { display: none !important; }
+
+/* #136: ריבועי הסברים ומידע מאוחדים */
+.explain-group > details.explain-sub { border-top: 1px solid var(--color-outline-variant); padding: .6em 0; }
+.explain-group > details.explain-sub:first-of-type { border-top: 0; }
+details.explain-sub > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: .5em; font-weight: 600; }
+details.explain-sub > summary::-webkit-details-marker { display: none; }
+details.explain-sub > summary::before { content: '◂'; transition: transform .15s; }
+details.explain-sub[open] > summary::before { transform: rotate(-90deg); }
+details.explain-sub[open] > summary { margin-bottom: .5em; }
+.explain-warn { border-top: 1px solid var(--color-outline-variant); padding: .6em 0; }
+.explain-warn > b { display: flex; align-items: center; gap: .4em; }
+.info-group .info-sub { border-top: 1px solid var(--color-outline-variant); padding: .75em 0; }
+.info-group .info-sub:first-of-type { border-top: 0; padding-top: 0; }
+.info-sub-title { font-weight: 700; margin-bottom: .4em; display: flex; align-items: center; gap: .4em; }

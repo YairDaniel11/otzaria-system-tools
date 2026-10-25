@@ -41,16 +41,15 @@
   function render(body, d) {
     /* ----- layouts ----- */
     var lay = body.querySelector('[data-slot=lay]');
-    lay.innerHTML = '<div class="preset-row">' + (d.layouts || []).map(function (l) {
-      return '<button class="btn ' + (l.id === d.current ? 'btn-primary' : 'btn-tonal') + '" data-lay="' + ui.esc(l.id) + '">' + ui.esc(l.name) + '</button>';
-    }).join('') + '</div>' +
+    lay.innerHTML = '<select class="input kb-select" data-lay-sel aria-label="שפת הקלדה">' + (d.layouts || []).map(function (l) {
+      return '<option value="' + ui.esc(l.id) + '"' + (l.id === d.current ? ' selected' : '') + '>' + ui.esc(l.name) + '</option>';
+    }).join('') + '</select>' +
       '<p class="muted small">ההחלפה חלה על החלון הפעיל (אוצריא). בתוכנות אחרות אפשר להחליף עם Alt+Shift.</p>';
-    lay.querySelectorAll('[data-lay]').forEach(function (b) {
-      b.addEventListener('click', async function () {
-        try { await SS.bridge.call('/sys/keyboard/set', { layout: b.dataset.lay }); }
-        catch (e) { ui.error(e, 'החלפת שפה'); return; }
-        setTimeout(function () { loadMain(body); }, 350);
-      });
+    var layBtn = lay.querySelector('[data-lay-sel]');
+    layBtn.addEventListener('change', async function () {
+      try { await SS.bridge.call('/sys/keyboard/set', { layout: layBtn.value }); }
+      catch (e) { ui.error(e, 'החלפת שפה'); return; }
+      setTimeout(function () { loadMain(body); }, 350);
     });
 
     /* ----- typing speed ----- */
@@ -111,18 +110,17 @@
     var list = d.methods || [];
     if (!list.length) { slot.innerHTML = '<div class="empty">לא נמצאו שפות מותקנות.</div>'; return; }
     var cur = (d.current || '').toUpperCase();
-    slot.innerHTML = '<div class="preset-row">' +
-      '<button class="btn ' + (!cur ? 'btn-primary' : 'btn-tonal') + '" data-def="">לפי רשימת השפות</button>' +
+    slot.innerHTML = '<select class="input kb-select" data-def-sel aria-label="שפת ברירת מחדל">' +
+      '<option value=""' + (!cur ? ' selected' : '') + '>לפי רשימת השפות</option>' +
       list.map(function (m) {
-        return '<button class="btn ' + (m.id.toUpperCase() === cur ? 'btn-primary' : 'btn-tonal') + '" data-def="' + ui.esc(m.id) + '">' + ui.esc(m.name) + '</button>';
-      }).join('') + '</div>' +
+        return '<option value="' + ui.esc(m.id) + '"' + (m.id.toUpperCase() === cur ? ' selected' : '') + '>' + ui.esc(m.name) + '</option>';
+      }).join('') + '</select>' +
       '<p class="muted small">השפה שתיבחר אוטומטית בכל חלון חדש ובכניסה ל-Windows. למשל עברית, כדי שאפשר יהיה לחפש באוצריא מיד.</p>';
-    slot.querySelectorAll('[data-def]').forEach(function (b) {
-      b.addEventListener('click', async function () {
-        try { await SS.bridge.call('/sys/keyboard/default-language/set', { id: b.dataset.def }, { timeoutMs: 25000 }); ui.toast('שפת ברירת המחדל נשמרה', 'success'); }
-        catch (e) { ui.error(e, 'שפת ברירת מחדל'); }
-        loadDefault(body);
-      });
+    var defSel = slot.querySelector('[data-def-sel]');
+    defSel.addEventListener('change', async function () {
+      try { await SS.bridge.call('/sys/keyboard/default-language/set', { id: defSel.value }, { timeoutMs: 25000 }); ui.toast('שפת ברירת המחדל נשמרה', 'success'); }
+      catch (e) { ui.error(e, 'שפת ברירת מחדל'); }
+      loadDefault(body);
     });
   }
 
@@ -142,7 +140,7 @@
     slot.innerHTML =
       '<div class="setting-row"><div class="setting-text"><b>תאורה</b><span class="muted" dir="ltr">' + ui.esc(d.name || '') + '</span></div>' +
       ui.switchHtml('sw-bl', d.enabled, 'תאורה') + '</div>' +
-      '<div class="slider-row"><span class="icon-btn big static">' + ui.icon('sun') + '</span>' +
+      '<div class="slider-row"><span class="icon-btn big static" aria-hidden="true">' + ui.icon('sun') + '</span>' +
       '<input type="range" class="range" min="0" max="100" step="1" value="' + d.brightness + '" aria-label="בהירות התאורה">' +
       '<output class="range-val">' + d.brightness + '%</output></div>';
     var sw = slot.querySelector('#sw-bl'), r = slot.querySelector('.range'), out = slot.querySelector('.range-val');

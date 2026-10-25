@@ -10,10 +10,10 @@
     <Nullable>disable</Nullable>
     <AssemblyName>OtzariaBridge</AssemblyName>
     <RootNamespace>OtzariaBridge</RootNamespace>
-    <Version>3.6.1</Version>
-    <Product>קיוסק אוצריא</Product>
-    <AssemblyTitle>קיוסק אוצריא - תוכנה לחסימת המחשב ללימוד</AssemblyTitle>
-    <Company>קיוסק אוצריא</Company>
+    <Version>1.0.5</Version>
+    <Product>אחת שאלתי</Product>
+    <AssemblyTitle>אחת שאלתי - תוכנת חסימת מחשב לתוכנות תורניות בלבד</AssemblyTitle>
+    <Company>גמח תורת אסתר</Company>
     <ApplicationIcon>..\assets\icon.ico</ApplicationIcon>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
@@ -45,6 +45,7 @@
     <EmbeddedResource Include="plugins\*.otzplugin" LogicalName="plugins.%(Filename)%(Extension)" />
     <!-- יומן השינויים מוטמע, כדי שיהיה זמין במגש בלי רשת -->
     <EmbeddedResource Include="..\CHANGELOG.md" LogicalName="CHANGELOG.md" />
+    <EmbeddedResource Include="..\assets\icon-source.png" LogicalName="brand-1024.png" />
   </ItemGroup>
 
   <!-- חושף internal (למשל Kiosk.NormalizeRecovery) לפרויקט הבדיקות בלבד -->

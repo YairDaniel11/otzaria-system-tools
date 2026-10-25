@@ -11,38 +11,30 @@
     load: load
   });
 
+  /* #60: טאב מאוחד — רשימה מלאה (פתיחה/"העבר לחזית"/הוספה/הסרה/הצעות זיהוי) + מתג זיהוי אוטומטי */
   async function load(body) {
-    var r;
+    var r, found = [];
     try { r = await SS.bridge.call('/kiosk/programs'); }
     catch (e) { body.innerHTML = ui.errorBox(e, function () { load(body); }); return; }
     var progs = r.programs || [];
-    var html = '<div class="card"><div class="card-title">פתיחת תוכנה</div>' +
-      '<p class="muted">תוכנות לימוד שאפשר לפתוח מכאן גם כשהמחשב נעול. בסיום סוגרים את התוכנה וחוזרים לאוצריא.</p>';
-    if (!progs.length) {
-      html += '<p class="muted">עדיין לא הוגדרו תוכנות. אפשר להוסיף אותן, או להדליק זיהוי אוטומטי, במסך „מצב נעילה” (נדרשת סיסמה).</p>';
-    } else {
-      html += progs.map(function (p) {
-        return '<div class="setting-row"><div class="setting-text"><b>' + ui.esc(p.name) + '</b>' +
-          (p.exists ? '' : '<span class="muted">הקובץ לא נמצא</span>') + '</div>' +
-          '<button class="btn btn-primary" data-open="' + ui.esc(p.id) + '"' + (p.exists ? '' : ' disabled') + '>' + ui.icon('computer') + 'פתיחה</button></div>';
-      }).join('');
-    }
-    var auto = !!r.autoTorah;
-    /* #5 (13.10.2026): זיהוי אוטומטי כאן, כמתג גלולה (שינוי דורש סיסמת נעילה) */
-    html += '<div class="setting-row"><div class="setting-text"><b>זיהוי אוטומטי של תוכנות תורניות</b><span class="muted">אוצר החכמה, בר אילן, כתבי הקודש, חבורתא, הנקדן ו-Word שנמצאים במחשב נוספים לרשימה מעצמם</span></div>' +
-      ui.switchHtml('sw-auto', auto, 'זיהוי אוטומטי') + '</div>';
-    html += '<div class="row-actions"><button class="btn btn-tonal" data-act="manage">' + ui.icon('edit') + 'ניהול הרשימה</button></div></div>';
+    try { found = (await SS.bridge.call('/kiosk/programs/detect')).found || []; } catch (e) { found = []; }
+    found = found.filter(function (f) { return !progs.some(function (p) { return p.path.toLowerCase() === f.path.toLowerCase(); }); });
+    var auto = !!r.autoTorah, K = SS.kioskProg;
+    var html = K ? K.card(progs, found, auto) : '';
+    html += '<div class="card"><div class="setting-row"><div class="setting-text"><b>זיהוי אוטומטי של תוכנות תורניות</b><span class="muted">אוצר החכמה, בר אילן, כתבי הקודש, חבורתא, הנקדן, עדכוני אוצריא, עדכון ספרים אישיים ו-Word שנמצאים במחשב נוספים לרשימה מעצמם</span></div>' +
+      ui.switchHtml('sw-auto', auto, 'זיהוי אוטומטי') + '</div></div>';
     body.innerHTML = html;
     body.querySelector('#sw-auto').addEventListener('click', function () { if (SS.kioskToggleAuto) SS.kioskToggleAuto(body, auto, load); });
-    body.querySelector('[data-act=manage]').addEventListener('click', function () { SS.show('kiosk'); });
-    body.querySelectorAll('[data-open]').forEach(function (b) {
-      b.addEventListener('click', async function () {
-        b.disabled = true;
-        try {
-          await SS.bridge.call('/kiosk/programs/launch', { id: b.dataset.open }, { timeoutMs: 30000 });
-          ui.toast('התוכנה נפתחת…', 'success');
-        } catch (err) { ui.toast(ui.errText(err), 'error'); }
-        setTimeout(function () { b.disabled = false; }, 3000);
+    function on(act, fn) { var b = body.querySelector('[data-act="' + act + '"]'); if (b) b.addEventListener('click', fn); }
+    if (!K) return;
+    on('prog-add', function () { K.add(body, {}, load); });
+    found.forEach(function (f, i) { on('prog-found-' + i, function () { K.add(body, f, load); }); });
+    progs.forEach(function (p) {
+      on('prog-open-' + p.id, function () { K.open(p); setTimeout(function () { load(body); }, 3000); });
+      on('prog-del-' + p.id, function () { K.remove(body, p, load); });
+      on('prog-close-' + p.id, function () { /* מנהל משימות פשוט */
+        SS.bridge.call('/kiosk/programs/close', { id: p.id }).then(function () { ui.toast('התוכנה נסגרת…', 'success'); setTimeout(function () { load(body); }, 3500); },
+          function (err) { ui.toast(ui.errText(err), 'error'); });
       });
     });
   }

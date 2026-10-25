@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- גשר אוצריא מינימלי: רק מה שצופה PDF+OCR צריך (OCR ישיר, קבצים, צימוד).
+       בלי ASP.NET, בלי נעילה/שירות/הגדרות מערכת, בלי חבילות NuGet. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AssemblyName>OtzariaBridge</AssemblyName>
+    <RootNamespace>OtzariaBridge</RootNamespace>
+    <Version>3.9.1</Version>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <DebugType>none</DebugType>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- זיכרון: בלי thread רקע של GC, בלי PGO ובלי EventSource; ConserveMemory גורם ל-GC לדחוס ולהחזיר זיכרון ביתר אגרסיביות -->
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <TieredPGO>false</TieredPGO>
+    <EventSourceSupport>false</EventSourceSupport>
+    <NoWarn>$(NoWarn);CA1416;CS8632;CS1998</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
+  </ItemGroup>
+
+</Project>

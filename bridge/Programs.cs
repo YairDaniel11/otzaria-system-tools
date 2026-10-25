@@ -24,6 +24,15 @@ public static class Programs
 
     // מעטפות ומנהלי מערכת שאסור להוסיף לרשימה (עוקף את הנעילה)
     // הזיהוי הוא לפי זהות (ProcessName, שם הקובץ ו-OriginalFilename מה-VersionInfo) — ר' IsBlockedProc / AppTrust.IsBlockedIdentity
+    /// <summary>קיום קובץ הפעלה — כולל "כינוי הפעלה" של אפליקציית חנות (קובץ reparse של 0 בתים ב-WindowsApps שלפעמים File.Exists מחזיר עליו false)</summary>
+    internal static bool ExeExists(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return false;
+        if (File.Exists(path)) return true;
+        try { var fi = new FileInfo(path); return (fi.Attributes & FileAttributes.ReparsePoint) != 0 && (fi.Attributes & FileAttributes.Directory) == 0; }
+        catch { return false; }
+    }
+
     private static readonly HashSet<string> Blocked = new(StringComparer.OrdinalIgnoreCase)
     {
         "explorer", "cmd", "powershell", "pwsh", "wscript", "cscript", "mshta", "regedit",
@@ -88,6 +97,7 @@ public static class Programs
         Server.Route("/kiosk/programs", _ => ListResult());
         Server.Route("/kiosk/programs/launch", Launch);
         Server.Route("/kiosk/programs/focus", Launch);   // "העבר לחזית": זהה לפתיחה, ולא פותח עותק נוסף
+        Server.Route("/kiosk/programs/close", Close); // מנהל משימות פשוט: סגירת תוכנה מותרת בלבד (גם בנעילה)
         Server.Route("/kiosk/programs/add", Add);
         Server.Route("/kiosk/programs/remove", Remove);
         Server.Route("/kiosk/programs/detect", _ => Detect());
@@ -144,6 +154,10 @@ public static class Programs
     /// </summary>
     private static void Save(List<Entry> list, string password)
     {
+        // רשומות ישנות (למשל shell:AppsFolder\... של אפליקציות Store) אינן נתיב exe מלא — רכיב ההקשחה דוחה את כל הרשימה
+        // בגללן ("רשומת תוכנה אינה תקינה"), ואז אי אפשר להסיר אף תוכנה. מנקים אותן בכל שמירה.
+        int dropped = list.RemoveAll(e => !System.IO.Path.IsPathFullyQualified(e.Path ?? "") || !(e.Path ?? "").EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
+        if (dropped > 0) Config.Log("programs: הוסרו " + dropped + " רשומות ישנות עם נתיב לא תקין");
         if (HardLock.Available) HardLock.SetPrograms(password, ToJson(list), AutoEnabled, Keywords);
         Config.Set(Key, ToJson(list));
         Config.Save();
@@ -165,21 +179,67 @@ public static class Programs
 
     // ---------- נקודות קצה ----------
 
-    private static object ListResult() => new
+    /// <summary>
+    /// אילו תוכנות מהרשימה פתוחות כעת: מעבר אחד על החלונות (ותהליך אחד לכל חלון) במקום מעבר מלא לכל תוכנה —
+    /// עם תריסר תוכנות הרשימה לקחה כמה שניות והטאב "מצב נעילה" נטען לאט
+    /// </summary>
+    private static HashSet<string> RunningIds(List<Entry> list)
     {
-        autoTorah = AutoEnabled,
-        programs = Load().Select(e => new
+        var running = new HashSet<string>();
+        if (list.Count == 0) return running;
+        int session = Process.GetCurrentProcess().SessionId;
+        var procs = new Dictionary<uint, Process>();
+        try
         {
-            id = e.Id,
-            name = e.Name,
-            path = e.Path,
-            procs = e.Procs,
-            exists = IsShellApp(e.Path) || File.Exists(e.Path),
-            running = ExistingWindow(e) != IntPtr.Zero,
-            auto = e.Auto,
-            pinned = e.Pinned,   // [w3] false = רשומה ישנה בלי נעיצה: תותר רק אם הקובץ במיקום קבוע לא-כתיב; אחרת יש להסיר ולהוסיף מחדש
-        }).ToArray()
-    };
+            EnumWindows((h, _) =>
+            {
+                if (running.Count == list.Count) return false;
+                if (!IsWindowVisible(h) || GetWindow(h, 4 /* GW_OWNER */) != IntPtr.Zero || GetWindowTextLength(h) == 0) return true;
+                GetWindowThreadProcessId(h, out uint pid);
+                if (!procs.TryGetValue(pid, out var p))
+                {
+                    try { p = Process.GetProcessById((int)pid); } catch { p = null; }
+                    procs[pid] = p;
+                    if (p != null)
+                    {
+                        try { if (p.SessionId != session || IsOwnOrBlocked(p)) { p.Dispose(); procs[pid] = null; } }
+                        catch { procs[pid] = null; }
+                    }
+                    else return true;
+                    p = procs[pid];
+                    if (p == null) return true;
+                }
+                if (p == null) return true;
+                try { foreach (var e in list) if (!running.Contains(e.Id) && MatchesList(p, new[] { e })) running.Add(e.Id); }
+                catch { }
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch { }
+        foreach (var p in procs.Values) try { p?.Dispose(); } catch { }
+        return running;
+    }
+
+    private static object ListResult()
+    {
+        var all = Load();
+        var running = RunningIds(all);
+        return new
+        {
+            autoTorah = AutoEnabled,
+            programs = all.Select(e => new
+            {
+                id = e.Id,
+                name = e.Name,
+                path = e.Path,
+                procs = e.Procs,
+                exists = IsShellApp(e.Path) || ExeExists(e.Path),
+                running = running.Contains(e.Id),
+                auto = e.Auto,
+                pinned = e.Pinned,   // [w3] false = רשומה ישנה בלי נעיצה: תותר רק אם הקובץ במיקום קבוע לא-כתיב; אחרת יש להסיר ולהוסיף מחדש
+            }).ToArray()
+        };
+    }
 
     private static object SetAuto(JsonElement b)
     {
@@ -278,12 +338,15 @@ public static class Programs
         p != null && p.StartsWith(@"shell:AppsFolder\", StringComparison.OrdinalIgnoreCase) &&
         Regex.IsMatch(p.Substring(@"shell:AppsFolder\".Length), @"^[A-Za-z0-9.\-]+_[a-z0-9]+![A-Za-z0-9.\-]+$");
 
+    /// <summary>חלון חסד פתוח כרגע (למשל אחרי "הצגה בסייר Windows") - KioskGuard לא סוגר אז חלון סייר שנפתח בכוונה</summary>
+    internal static bool InForegroundGrace => DateTime.UtcNow < GraceUntil;
+
     public static bool Activate(Entry e)
     {
         // [r1] alias של כלי החיתוך (כתיב למשתמש) מופעל לפי PackageFamilyName, לא לפי הנתיב
         string target = IsSnipAlias(e.Path) ? SnipPfnPath : e.Path;
         bool shellApp = IsShellApp(target);
-        if (!shellApp && !File.Exists(e.Path)) throw BridgeException.NotFound("הקובץ לא נמצא: " + e.Path);
+        if (!shellApp && !ExeExists(e.Path)) throw BridgeException.NotFound("הקובץ לא נמצא: " + e.Path);
         // [w3] אימות מחדש מול הנעיצה בכל Launch (קובץ שהוחלף/נפרץ לא מופעל). בלי חלון חסד: הזיהוי הוא לפי
         // עץ התהליכים של מה שנפתח (PID+זמן יצירה) ולפי נתיב+נעיצה, לא "כל מה שבחזית ב-30 השניות הקרובות"
         // [r1] TOCTOU: הקובץ נפתח ב-FileShare.Read (נעול מהחלפה/כתיבה), ה-hash מחושב מה-handle, והמנעול מוחזק עד אחרי Process.Start
@@ -311,24 +374,61 @@ public static class Programs
         if (h != IntPtr.Zero)
         {
             Kiosk.BringToFront(h);
-            Task.Run(() => { Thread.Sleep(400); Kiosk.BringToFront(h); }); // ניסיון שני: חלק מהתוכנות גוזלות פוקוס בעת הטעינה
+            SafeTask.Run(() => { Thread.Sleep(400); Kiosk.BringToFront(h); }); // ניסיון שני: חלק מהתוכנות גוזלות פוקוס בעת הטעינה
             return true;
         }
         LastLaunchAt = DateTime.UtcNow;
         _lastLaunchEntry = e;
-        using (var started = Process.Start(new ProcessStartInfo(target)
+        // משוב 15.10: כלי Windows מהחנות הם "כינויי הפעלה" ב-WindowsApps - Process.Start עלול להיכשל; מנסים שוב בלי תיקיית עבודה.
+        try
         {
-            UseShellExecute = true,
-            WorkingDirectory = shellApp ? null : System.IO.Path.GetDirectoryName(e.Path),
-        }))
-        {
+            using var started = Process.Start(new ProcessStartInfo(target)
+            {
+                UseShellExecute = true,
+                WorkingDirectory = shellApp ? null : System.IO.Path.GetDirectoryName(e.Path),
+            });
             if (started != null) RememberLaunched(started);
         }
-        Task.Run(() => Focus(e));
+        catch (Exception ex1)
+        {
+            Config.Log("launch retry " + e.Path + ": " + ex1.Message);
+            try
+            {
+                using var started = Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+                if (started != null) RememberLaunched(started);
+            }
+            catch (Exception ex2) { throw new BridgeException("launch_failed", "הפעלת התוכנה נכשלה: " + ex2.Message, 500); }
+        }
+        SafeTask.Run(() => Focus(e));
         return false;
     }
 
     /// <summary>חלון ראשי של התוכנה אם היא כבר רצה (כולל חלון מוקטן), אחרת Zero</summary>
+    /// מנהל משימות פשוט: סוגר רק תהליכים של תוכנה מהרשימה המותרת — סגירה רגילה, ואחרי 3 שניות בכוח.
+    private static object Close(JsonElement b)
+    {
+        string id = b.Req("id");
+        var e = Load().FirstOrDefault(x => x.Id == id)
+                ?? throw BridgeException.NotFound("התוכנה אינה ברשימת התוכנות המותרות");
+        int session = Process.GetCurrentProcess().SessionId, n = 0;
+        foreach (var p in Process.GetProcesses())
+        {
+            try
+            {
+                if (p.SessionId != session || IsOwnOrBlocked(p) || !MatchesList(p, new[] { e })) { p.Dispose(); continue; }
+                n++;
+                var proc = p;
+                SafeTask.Run(() =>
+                {
+                    try { if (!proc.CloseMainWindow() || !proc.WaitForExit(3000)) proc.Kill(entireProcessTree: true); } catch { }
+                    finally { proc.Dispose(); }
+                });
+            }
+            catch { p.Dispose(); }
+        }
+        return new { closed = n };
+    }
+
     public static IntPtr ExistingWindow(Entry e)
     {
         int session = Process.GetCurrentProcess().SessionId;
@@ -402,7 +502,7 @@ public static class Programs
         {
             if (!System.IO.Path.IsPathRooted(path) || !path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
                 throw BridgeException.BadRequest("יש להזין נתיב מלא לקובץ הפעלה (exe)");
-            if (!File.Exists(path)) throw BridgeException.NotFound("הקובץ לא נמצא: " + path);
+            if (!ExeExists(path)) throw BridgeException.NotFound("הקובץ לא נמצא: " + path);
             string stem = System.IO.Path.GetFileNameWithoutExtension(path);
             if (Blocked.Contains(stem) || AppTrust.IsBlockedIdentity(null, null, AppTrust.GetOriginalName(path), Blocked))
                 throw BridgeException.Forbidden("אי אפשר להוסיף את התוכנה הזו לרשימה");
@@ -469,6 +569,10 @@ public static class Programs
             found.Add(new { name, path, procs = string.Join(", ", procs) });
         foreach (var (name, path, procs) in KnownUtilities())
             found.Add(new { name, path, procs = string.Join(", ", procs) });
+        // משוב 15.10: כל התוכנות המותקנות מתפריט התחל (Excel, מחשבון וכו') — להצעה בלבד, לא אוטומטי
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, path) in StartMenuApps())
+            if (seen.Add(path)) found.Add(new { name, path, procs = System.IO.Path.GetFileNameWithoutExtension(path) });
         return new { found = found.ToArray() };
     }
 
@@ -478,20 +582,65 @@ public static class Programs
     /// תורנית" בלבד ודולק כברירת מחדל - תוסף מערכת לא אמור להתווסף לרשימה המותרת בלי אישור מפורש).
     /// נתיבים ידועים בלבד (בלי חיפוש בכוננים) - אלה כלי מערכת במקום קבוע, לא תוכנות שמתקינים לבד.
     /// </summary>
+    /// <summary>קיצורי דרך בתפריט התחל (משותף + משתמש) שמפנים ל-exe קיים; בלי מסירי התקנה וחסומים</summary>
+    private static List<(string name, string path)> StartMenuApps()
+    {
+        var res = new List<(string, string)>();
+        try
+        {
+            var t = Type.GetTypeFromProgID("WScript.Shell");
+            if (t == null) return res;
+            dynamic sh = Activator.CreateInstance(t);
+            foreach (var root in new[] { Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms), Environment.GetFolderPath(Environment.SpecialFolder.Programs) })
+            {
+                if (!Directory.Exists(root)) continue;
+                foreach (var lnk in Directory.EnumerateFiles(root, "*.lnk", SearchOption.AllDirectories).Take(400))
+                {
+                    try
+                    {
+                        string target = (string)sh.CreateShortcut(lnk).TargetPath;
+                        string name = System.IO.Path.GetFileNameWithoutExtension(lnk);
+                        if (string.IsNullOrEmpty(target) || !target.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || !ExeExists(target)) continue;
+                        if (Regex.IsMatch(name + " " + target, @"(?i)uninstall|unins\d|הסר|setup|update|readme")) continue;
+                        if (Blocked.Contains(System.IO.Path.GetFileNameWithoutExtension(target))) continue;
+                        res.Add((name.Length > 60 ? name[..60] : name, target));
+                    }
+                    catch { }
+                    if (res.Count >= 150) break;
+                }
+            }
+        }
+        catch (Exception ex) { Config.Log("programs: תפריט התחל: " + ex.Message); }
+        return res.OrderBy(x => x.Item1).ToList();
+    }
+
     private static IEnumerable<(string name, string path, string[] procs)> KnownUtilities()
     {
         string sys32 = Environment.GetFolderPath(Environment.SpecialFolder.System);
         string winApps = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WindowsApps");
+        string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         var list = new (string name, string[] procs, string[] candidates)[]
         {
             // "חדש" (צילום אזור) פותח שכבת-גרירה במסך מלא דרך תהליך-עזר נפרד (ScreenClippingHost/ScreenSketch),
             // לא תחת SnippingTool.exe עצמו - בלעדי זה השומר (Kiosk.Watch) לא מזהה את שכבת הגרירה כ"מותר"
             // ומחזיר את אוצריא לחזית תוך רגע, עוד לפני שהמשתמש הספיק לגרור/לבחור אזור (נראה כמו "תקוע בטעינה")
             ("כלי חיתוך (צילום מסך)", new[] { "SnippingTool", "ScreenClippingHost", "ScreenSketch" }, new[] { System.IO.Path.Combine(sys32, "SnippingTool.exe"), System.IO.Path.Combine(winApps, "SnippingTool.exe") }),
+            ("פתקים דביקים", new[] { "Microsoft.Notes" }, new[] { System.IO.Path.Combine(winApps, "StickyNotes.exe"), System.IO.Path.Combine(winApps, "Microsoft.MicrosoftStickyNotes.exe") }),
+            ("שעון וטיימר", new[] { "Time", "ApplicationFrameHost" }, new[] { System.IO.Path.Combine(winApps, "Time.exe") }),
+            // משוב 15.10: עוד כלים מובנים (נתיבים קבועים של Windows 10/11)
+            ("פנקס רשימות", new[] { "notepad", "Notepad" }, new[] { System.IO.Path.Combine(winApps, "notepad.exe"), System.IO.Path.Combine(sys32, "notepad.exe"), System.IO.Path.Combine(win, "notepad.exe") }),
+            ("מחשבון", new[] { "CalculatorApp", "Calculator", "calc", "ApplicationFrameHost" }, new[] { System.IO.Path.Combine(sys32, "calc.exe") }),
+            ("צייר (Paint)", new[] { "mspaint" }, new[] { System.IO.Path.Combine(winApps, "mspaint.exe"), System.IO.Path.Combine(sys32, "mspaint.exe") }),
+            ("WordPad", new[] { "wordpad" }, new[] { System.IO.Path.Combine(pf, "Windows NT", "Accessories", "wordpad.exe") }),
+            ("מפת תווים", new[] { "charmap" }, new[] { System.IO.Path.Combine(sys32, "charmap.exe") }),
+            ("מקלדת על המסך", new[] { "osk" }, new[] { System.IO.Path.Combine(sys32, "osk.exe") }),
+            ("זכוכית מגדלת", new[] { "Magnify" }, new[] { System.IO.Path.Combine(sys32, "Magnify.exe") }),
+            ("מקליט קול", new[] { "SoundRec", "VoiceRecorder" }, new[] { System.IO.Path.Combine(winApps, "SoundRec.exe") }),
         };
         foreach (var u in list)
         {
-            string hit = u.candidates.FirstOrDefault(File.Exists);
+            string hit = u.candidates.FirstOrDefault(ExeExists);
             // [r1] alias ב-WindowsApps (כתיב למשתמש) מוצע כאפליקציית חבילה לפי PackageFamilyName, לא כנתיב
             if (hit != null && IsSnipAlias(hit)) hit = SnipPfnPath;
             if (hit != null) yield return (u.name, hit, u.procs);
@@ -543,6 +692,20 @@ public static class Programs
         }
     }
 
+    /// <summary>קבצי exe ניידים ששמם שונה: התאמה לפי פרטי הגרסה המוטבעים בקובץ (לא משתנים בשינוי שם)</summary>
+    private static IEnumerable<string> ByInfo(string[] keys)
+    {
+        foreach (var f in Portable("*.exe"))
+        {
+            System.Diagnostics.FileVersionInfo vi = null;
+            try { vi = System.Diagnostics.FileVersionInfo.GetVersionInfo(f); } catch { }
+            if (vi == null) continue;
+            var fields = new[] { vi.OriginalFilename, vi.InternalName, vi.ProductName, vi.FileDescription };
+            if (fields.Any(x => !string.IsNullOrEmpty(x) && keys.Any(k => x.Contains(k, StringComparison.OrdinalIgnoreCase))))
+                yield return f;
+        }
+    }
+
     private static IEnumerable<string> Under(string dir, string pattern, string tail)
     {
         string[] dirs;
@@ -570,14 +733,20 @@ public static class Programs
                 System.IO.Path.Combine(r, "אוצר החכמה.exe"),
                 System.IO.Path.Combine(r, "OtzarApp", "OtzarLocal", "launcher", "otzar.exe"),
             }).Concat(Portable("אוצר החכמה*.exe"))),
-        // התקנה למשתמש בלבד (כמו VS Code/Electron) תחת %LOCALAPPDATA%\Programs — לא ב-Program Files
-        new("זית", new[] { "zayit.exe" }, new[] { "zayit" }, () =>
-            new[] { System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "zayit", "zayit.exe") }),
         // #6: גשר חבורתא לאוצריא
         new("חבורתא", new[] { "ChavrutaLauncher.exe" }, new[] { "ChavrutaLauncher", "Chavruta" }, () =>
             new[] { System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Chavruta", "ChavrutaLauncher.exe") }),
         // #7: הנקדן אופליין — תוכנה ניידת, איתור לפי שם הקובץ
         new("הנקדן — אוצריא", new[] { "הנקדן - אוצריא - V1.0.exe" }, new[] { "הנקדן - אוצריא - V1.0" }, () => Portable("הנקדן*.exe")),
+        // עדכוני אוצריא — מזוהה גם אחרי שינוי שם הקובץ, לפי פרטי הגרסה המוטבעים (OriginalFilename/ProductName)
+        new("עדכוני אוצריא", new[] { "עדכוני אוצריא.exe" }, new[] { "עדכוני אוצריא" }, () =>
+            Portable("עדכוני אוצריא*.exe").Concat(ByInfo(new[] { "עדכוני אוצריא", "OtzariaUpdate", "Otzaria Update" }))),
+        // עדכון ספרים אישיים — תוכנה ניידת
+        new("עדכון ספרים אישיים", new[] { "BooksOfflineUpdate.exe" }, new[] { "BooksOfflineUpdate" }, () =>
+            Portable("BooksOfflineUpdate*.exe").Concat(ByInfo(new[] { "BooksOfflineUpdate" }))),
+        // התקנה למשתמש בלבד (כמו VS Code/Electron) תחת %LOCALAPPDATA%\Programs — לא ב-Program Files
+        new("זית", new[] { "zayit.exe" }, new[] { "zayit" }, () =>
+            new[] { System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "zayit", "zayit.exe") }),
     };
 
     private static List<(string name, string path, string[] procs)> _knownCache, _knownCacheTrusted;

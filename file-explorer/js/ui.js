@@ -129,6 +129,9 @@
   /* ---------- toasts ---------- */
   ui.toast = function (message, kind) {
     var host = document.getElementById('toasts');
+    /* אותה הודעה כבר מוצגת — לא מכפילים */
+    var dup = Array.prototype.some.call(host.querySelectorAll('.toast span'), function (s) { return s.textContent === message; });
+    if (dup) return;
     var t = ui.el('<div class="toast ' + (kind || '') + '" role="status">' +
       ui.icon(kind === 'error' ? 'warning' : kind === 'success' ? 'check' : 'info') +
       '<span>' + ui.esc(message) + '</span></div>');
@@ -170,6 +173,11 @@
           return '<label class="check-row"><input type="checkbox" name="' + f.name + '"' + (f.value ? ' checked' : '') + '>' +
             '<span class="check-box">' + ui.icon('check') + '</span><span class="check-text">' + f.label +
             (f.hint ? '<small>' + f.hint + '</small>' : '') + '</span></label>';
+        }
+        if (f.type === 'select') {
+          return '<label class="field"><span class="field-label">' + ui.esc(f.label) + '</span><select class="input" name="' + f.name + '">' +
+            (f.options || []).map(function (o) { return '<option value="' + ui.esc(o.value) + '"' + (o.value === f.value ? ' selected' : '') + '>' + ui.esc(o.label) + '</option>'; }).join('') +
+            '</select></label>';
         }
         return '<label class="field"><span class="field-label">' + ui.esc(f.label) + '</span>' +
           '<input class="input" name="' + f.name + '" type="' + (f.type || 'text') + '"' +

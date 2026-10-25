@@ -74,12 +74,21 @@ public static class Installer
             // עם המתנה קצרה, ואם עדיין נכשל לא מפילים את כל התהליך (בעיה אמיתית: קריסה כאן הפילה
             // את כל הגשר/השומר באמצע נעילה פעילה) - ממשיכים עם שאר ההתקנה, מנסים שוב בהפעלה הבאה
             try { CopyExeWithRetry(Environment.ProcessPath!, InstalledExe); }
-            catch (Exception ex) { Config.Log("install: העתקת exe נכשלה (ימשיך עם הגרסה הקיימת): " + ex.Message); }
+            catch (Exception ex)
+            {
+                Config.Log("install: העתקת exe נכשלה (ימשיך עם הגרסה הקיימת): " + ex.Message);
+                // לא בשקט: אחרת התוספים מתעדכנים והגשר נשאר ישן בלי שהמשתמש יודע
+                try { System.Windows.Forms.MessageBox.Show(Lang.T("עדכון הגשר עצמו נכשל (התוספים עודכנו): ", "Updating the bridge itself failed (plugins were updated): ") + ex.Message +
+                    Lang.T("\n\nסגרו את הגשר מהמגש (ובטלו נעילה אם פעילה) והריצו שוב את הקובץ שהורד.", "\n\nClose the bridge from the tray (and turn off lock mode) and run the downloaded file again."),
+                    "אחת שאלתי", System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Warning); } catch { }
+            }
         }
 
         // כשהשירות מותקן ו-Run של HKLM מצביע על Program Files — הגשר עולה משם (קובץ שרק מנהל כותב), וערך HKCU מיותר ומוסר.
         // אחרת (בלי שירות) — כמו קודם: HKCU מ-LOCALAPPDATA
         bool machineRun = HardLock.ServiceInstalled() && File.Exists(HardLock.ServiceExe) && MachineRunPointsToService();
+        HardLock.AutoUpdateServiceIfUnlocked(); // #21 (upstream): self-update של השירות מאמת חתימת ECDSA (SvcUpdate)
+
         using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
         {
             if (machineRun) k.DeleteValue(RunValue, false);
@@ -283,8 +292,25 @@ public static class Installer
         for (int i = 0; ; i++)
         {
             try { File.Copy(src, dst, overwrite: true); return; }
-            catch (IOException) when (i < 4) { Thread.Sleep(400); }
+            catch (Exception e) when ((e is IOException or UnauthorizedAccessException) && i < 4) { Thread.Sleep(400); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // קובץ רץ/נעול (למשל שירות ההקשחה כ-SYSTEM): Windows מרשה לשנות שם ל-exe רץ —
+                // מעבירים את הישן ל-.old ומעתיקים את החדש; ה-.old נמחק בהפעלה הבאה (CleanupOldExe)
+                string old = dst + ".old";
+                try { if (File.Exists(old)) File.Delete(old); } catch { old = dst + "." + Environment.TickCount64 + ".old"; }
+                File.Move(dst, old);
+                File.Copy(src, dst, overwrite: true);
+                Config.Log("install: ה-exe הישן היה נעול — הוחלף בשינוי שם (" + e.Message + ")");
+                return;
+            }
         }
+    }
+
+    /// <summary>מוחק שאריות OtzariaBridge.exe*.old מעדכון קודם שהחליף קובץ נעול</summary>
+    public static void CleanupOldExe()
+    {
+        try { foreach (var f in Directory.GetFiles(Config.Dir, "OtzariaBridge.exe*.old")) try { File.Delete(f); } catch { } } catch { }
     }
 
     /// <summary>מחזיר הודעת שגיאה, או null בהצלחה</summary>
@@ -299,6 +325,7 @@ public static class Installer
 
         StopOtherInstances();
         using (var k = Registry.CurrentUser.OpenSubKey(RunKey, true)) k?.DeleteValue(RunValue, false);
+        PdfAssoc.Remove(); // "פתח באמצעות"
         try { if (File.Exists(ShortcutPath)) File.Delete(ShortcutPath); } catch { }
 
         if (IsRunningFromInstallDir())

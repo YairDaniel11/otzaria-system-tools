@@ -39,7 +39,7 @@
 - **בוצע (11.10)**: CI ירוק בסבב הראשון (קומפילציה מקומית עם ‎.NET 8‏ + `EnableWindowsTargeting`). הערות לשלבים הבאים:
   - שורת hit בחיפוש: `{type:"hit", entryType:"dir"|"file", ...}` — תואם ל-`bridge.js`.
   - נעילה קפדנית: המעטפת (HKCU Winlogon Shell) היא הגשר עצמו עם `--background`, והוא מפעיל את אוצריא. נדרש `strict:true` מפורש ב-`/kiosk/enable`.
-  - ה-exe דחוס, כ-89MB (ASP.NET + WinForms + WinRT). Release נוצר רק בדחיפת תג `bridge-v*`; עדיין לא נדחף תג.
+  - ה-exe דחוס, כ-89MB (ASP.NET + WinForms + WinRT). (היסטורי) כיום ה-Release מתויג `vX.Y.Z`, לא `bridge-v*`.
   - לא נבדק על Windows אמיתי: Wi-Fi דרך netsh, IPolicyConfig (החלפת התקן שמע), בלוטות׳, hook מקלדת.
 
 ### שלב 2 — סייר הקבצים, ליבה (סשן 2)  ✅

@@ -55,7 +55,7 @@
 - **CI:**
   - `.github/workflows/bridge.yml` בענף הזה בלבד, על `windows-latest`.
   - אורז את `system-settings/` ואת `file-explorer/` לקובצי `.otzplugin` בתוך `bridge/plugins/`. התיקייה ב-gitignore, ומשם הקבצים מוטמעים כמשאב.
-  - artifact נוצר בכל דחיפה. Release נוצר רק בתג `bridge-v*`.
+  - artifact נוצר בכל דחיפה. Release מתויג `vX.Y.Z` (לא `bridge-v*`).
 - **גודל ה-exe:** כ-89MB, עם `EnableCompressionInSingleFile`. אי אפשר לבצע trimming, כי הגשר משתמש ב-WinForms.
 - **שורת hit בחיפוש:** `{type:"hit", entryType:"dir"|"file", name, path, size, modified}`. ב-`bridge.js` הקוד כבר קורא את `entryType`.
 - **Wi-Fi דרך netsh:**
@@ -109,3 +109,30 @@
 - קיצור חירום Ctrl+Alt+Shift+F12 נבדק ב-hook המקלדת ופותח `EmergencyForm`, שדורש את קוד השחזור. אין קיצור בלי אימות, בכוונה.
 - יומן השינויים מוטמע ב-exe (`CHANGELOG.md` כמשאב), ולכן כל שינוי בו משנה את ה-exe.
 - חיפוש תוכן ב-`FsApi.ContentSnippet` מחזיר קטע לשורת התוצאה (שדה `snippet` ב-hit); הסייר פותח את הקובץ עם `find` להדגשה (`FX.highlightIn`).
+
+## גרסת התוספים חייבת לעלות תמיד (לקח מ-3.7.0)
+ב-3.7.0 ה-CI חישב גרסת תוספים 0.x מספירת commits (0.58.0) — נמוכה מ-3.6.0 המותקן, ואוצריא סירבה להתקין (שדרוג לאחור).
+מ-3.7.1 שלב "גרסת התוספים" ב-build.yml לוקח את `<Version>` מ-bridge/OtzariaBridge.csproj. אסור לחזור למספור עצמאי/נמוך.
+לפני כל שחרור: לוודא ש-manifest.json של שני התוספים בקובץ ה-.otzplugin גבוה מהגרסה הקודמת.
+
+## לוח השנה של אוצריא — איך אירוע calendar.event מוצג (נבדק בקוד אוצריא, 15.10.2026, #69)
+מקור: `lib/plugins/adapters/plugin_calendar_adapter.dart` (ענף dev).
+- נקראים רק `title`, `startsAt`, `source`, `importance`. **השעה ו-`endsAt` אינם מוצגים** — האירוע נקבע ליום (`baseGregorianDate`) בלבד. לכן השעות צריכות להיות בתוך הכותרת.
+- `DateTime.tryParse` ממיר מחרוזת עם היסט (`+03:00`) ל-UTC — 00:30 מקומי נופל ביום הקודם. לכן שולחים זמן מקומי בלי היסט (`2026-10-15T00:30:00`).
+- התיאור = `source (importance)`. ערך שאינו `high/medium/low` נראה מוזר — לא שולחים importance.
+- `publishedData.upsert/remove` מרעננים את לוח השנה מיד. הפרסום רץ רק כשדף "הגדרות מערכת" פתוח (אין מנוע רקע); רשומות נשמרות עד שמסירים אותן.
+
+## קיצורי מקלדת של התוספים (#69)
+- מוצהרים במניפסט: `contributes.startup.shortcuts` (`id`, `label`, `key`, `command`) — דורש `app.startup_contributions` + `app.shortcuts`. אוצריא מעירה את התוסף ושולחת `app.command` עם `{ command, shortcutId }`; המשתמש משנה בהגדרות ← קיצורי מקשים. `plugin.openSelf` (`navigation.write`) פותח את דף התוסף, `param` מגיע ב-`plugin.page_opened`.
+- מקשים תפוסים באוצריא: ר' `lib/shortcuts/shortcut_validator.dart` (למשל ctrl+shift+e = לוח שנה). לכן ctrl+shift+alt+…
+- שם קריאת התראת מערכת: `notifications.sendSystem` (לא `notifications.system`, שזה שם ההרשאה).
+
+## i18n
+- `node tools/i18n-missing.js <plugin>` מדפיס מחרוזות עבריות בלי תרגום. מה שנשאר מכוון: נתוני הדמה ב-js/bridge.js, אותיות גימטריה (מטופלות בקוד), מילות חיפוש, ונוסח הקדשה.
+- i18n.js מתרגם מחרוזת מורכבת לפי חלקים (מילים שלמות, מהארוך לקצר) רק אם לא נשאר עברית.
+
+## מופע רקע של הגדרות מערכת (#69)
+- `contributes.background.entrypoint = background.html` (בלי ממשק) + `startup.activationEvents: ["app.startup", "calendar.city_changed"]` + הרשאת `app.run_on_startup` (כבויה עד שהמשתמש מאשר בבאנר).
+- background.js: רק אם יש `bridgeToken` ב-storage (בלי חלון צימוד מהרקע — `SS.bridge.noPair`), ורק אם הגשר עונה. מריץ `SS.sync.zmanim()` ו-`SS.sync.lockCalendar()` (js/sync.js, משותף לדף) ואז `plugin.backgroundDone`.
+
+- **#8 רשת ביטחון למעטפת (15.10.2026):** בנעילה קפדנית ה-Shell ב-HKCU מפנה ל-`%LOCALAPPDATA%\OtzariaBridge\shell-guard.vbs` (wscript //B), שמריץ את הגשר וממתין לו; אם הקובץ חסר, ההפעלה נכשלה או יציאה עם קוד ≠0 (קריסה) — מופעל explorer. בלי wscript: הפניה ישירה כמו קודם. BootGuard (מצב בטוח/נעילה לא מאושרת) נשאר. טרם נבדק ב-Windows.

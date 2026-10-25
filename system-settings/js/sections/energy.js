@@ -77,14 +77,18 @@
       srcs.forEach(function (s) {
         var secs = v[s[0]];
         var cur = secs % 60 === 0 ? secs / 60 : -1;
-        parts.push('<div class="setting-text"><b>' + g[1] + '</b><span class="muted">' + s[1] + (cur === -1 ? ' · כרגע ' + secs + ' שניות' : '') + '</span></div>' +
-          presetRow(MINUTES.map(function (m) { return [m, minLabel(m)]; }), cur, 'data-t', ' data-k="' + g[0] + (s[0] === 'ac' ? 'Ac' : 'Dc') + '"'));
+        /* תפריט נפתח במקום שורת כפתורים: ארבע שורות של שבעה כפתורים היו עומס */
+        var opts = MINUTES.map(function (m) { return '<option value="' + m + '"' + (m === cur ? ' selected' : '') + '>' + minLabel(m) + '</option>'; }).join('');
+        if (cur === -1) opts = '<option value="" selected disabled>' + secs + ' שניות</option>' + opts;
+        parts.push('<div class="setting-row"><div class="setting-text"><b>' + g[1] + '</b><span class="muted">' + s[1] + '</span></div>' +
+          '<select class="input time-select" data-t data-k="' + g[0] + (s[0] === 'ac' ? 'Ac' : 'Dc') + '" aria-label="' + g[1] + ' — ' + s[1] + '">' + opts + '</select></div>');
       });
     });
     time.innerHTML = parts.length ? parts.join('') : '<div class="empty">ההגדרות האלה אינן זמינות במחשב זה.</div>';
     time.querySelectorAll('[data-t]').forEach(function (x) {
-      x.addEventListener('click', function () {
-        var p = {}; p[x.dataset.k] = (+x.dataset.t) * 60;
+      x.addEventListener('change', function () {
+        if (x.value === '') return;
+        var p = {}; p[x.dataset.k] = (+x.value) * 60;
         apply(body, p);
       });
     });

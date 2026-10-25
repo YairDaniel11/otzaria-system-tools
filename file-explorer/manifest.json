@@ -1,8 +1,8 @@
 {
-  "id": "com.otzariakiosk.fileexplorer",
+  "id": "com.chadbedera.fileexplorer",
   "name": "סייר קבצים",
-  "version": "3.6.0",
-  "description": "סייר קבצים מתוך אוצריא: עיון, העתקה, גזירה, הדבקה, מחיקה, שינוי שם, תצוגה מקדימה וחיפוש קבצים. דורש את קיוסק אוצריא; בלעדיה — תיקיות שאושרו.",
+  "version": "1.0.6",
+  "description": "סייר קבצים מתוך אוצריא: עיון, העתקה, גזירה, הדבקה, מחיקה, שינוי שם, תצוגה מקדימה וחיפוש קבצים. דורש את אחת שאלתי; בלעדיה — תיקיות שאושרו.",
   "author": "חד בדרא, יאיר דניאל",
   "schemaVersion": 1,
   "sdkVersion": "1.x",
@@ -27,7 +27,10 @@
     "app.shortcuts",
     "clipboard.read",
     "fonts.local.read",
-    "library.books.provide"
+    "library.books.provide",
+    "library.books.read",
+    "reader.open",
+    "library.content.read"
   ],
   "network": {
     "enabled": true,
@@ -52,9 +55,32 @@
           "title": "מסמך חדש",
           "icon": "add_24_regular",
           "openPlugin": true
+        },
+        {
+          "id": "chadbedera-fx-open",
+          "type": "button",
+          "title": "סייר קבצים",
+          "icon": "folder_24_regular",
+          "openPlugin": true
+        }
+      ],
+      "shortcuts": [
+        {
+          "id": "open-explorer",
+          "label": "פתיחת סייר הקבצים",
+          "key": "ctrl+shift+alt+e",
+          "command": "openExplorer"
+        }
+      ],
+      "libraryBooks": [
+        {
+          "id": "fx-folders",
+          "provider": "fxfolders",
+          "title": "סייר קבצים",
+          "icon": "folder_24_regular"
         }
       ]
     }
   },
-  "homepage": "https://github.com/YairDaniel11/otzaria-system-tools"
+  "homepage": "https://github.com/Hadabadra/achat-shaalti"
 }

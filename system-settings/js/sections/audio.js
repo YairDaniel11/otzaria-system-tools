@@ -24,7 +24,7 @@
     catch (e) { slot.innerHTML = ui.errorBox(e, function () { loadVol(body); }); return; }
     slot.innerHTML =
       '<div class="slider-row">' +
-      '<button class="icon-btn big" data-act="mute" title="השתקה">' + ui.icon(a.muted ? 'mute' : 'speaker') + '</button>' +
+      '<button class="icon-btn big" data-act="mute" title="השתקה" aria-label="השתקה">' + ui.icon(a.muted ? 'mute' : 'speaker') + '</button>' +
       '<input type="range" class="range" min="0" max="100" step="1" value="' + a.volume + '" aria-label="עוצמת שמע">' +
       '<output class="range-val">' + a.volume + '%</output></div>' +
       '<div class="setting-row"><div class="setting-text"><b>השתקה</b><span class="muted">' + ui.esc(a.deviceName || '') + '</span></div>' +

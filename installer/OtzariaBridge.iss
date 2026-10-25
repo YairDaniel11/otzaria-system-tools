@@ -1,4 +1,4 @@
-﻿; מתקין "קיוסק אוצריא - תוכנה לחסימת המחשב ללימוד". בנייה:
+﻿; מתקין "תוכנת חסימת אוצריא - גמח תורת אסתר". בנייה:
 ;   ISCC.exe /DAppVersion=3.0.0 /DExePath=<נתיב ל-OtzariaBridge.exe שפורסם> OtzariaBridge.iss
 ; ההתקנה פר-משתמש (ללא הרשאות מנהל): הקובץ נכנס ל-%LOCALAPPDATA%\OtzariaBridge, שם הגשר מצפה להיות.
 ; הרכיב המוקשח (שירות SYSTEM) נשאר אופציונלי ומותקן מתוך הגדרות המערכת, כמו עד היום.
@@ -12,9 +12,9 @@
 
 [Setup]
 AppId={{6F1C2B7E-4D0A-4B8E-9C53-0E2A7B5D91A4}
-AppName=קיוסק אוצריא - תוכנה לחסימת המחשב ללימוד
+AppName=אחת שאלתי - גמח תורת אסתר
 AppVersion={#AppVersion}
-AppPublisher=חד בדרא, יאיר דניאל
+AppPublisher=גמח תורת אסתר
 DefaultDirName={localappdata}\OtzariaBridge
 DisableDirPage=yes
 DisableProgramGroupPage=yes
@@ -27,7 +27,7 @@ SolidCompression=yes
 OutputBaseFilename=OtzariaBridge-Setup-{#AppVersion}
 OutputDir=Output
 UninstallDisplayIcon={app}\OtzariaBridge.exe
-UninstallDisplayName=קיוסק אוצריא - תוכנה לחסימת המחשב ללימוד
+UninstallDisplayName=אחת שאלתי
 
 WizardStyle=modern
 CloseApplications=no
@@ -57,8 +57,8 @@ Filename: "{app}\OtzariaBridge.exe"; Parameters: "--install --quiet"; StatusMsg:
 // השם בדיסק), אז סורקים את כל תת-התיקיות של <id>\ ובודקים את המניפסט של כל אחת.
 // רק אם הבדיקה האוטומטית לא מצליחה תוך זמן סביר, שואלים את המשתמש כגיבוי.
 const
-  FxPluginId = 'com.otzariakiosk.fileexplorer';
-  SettingsPluginId = 'com.otzariakiosk.systemsettings';
+  FxPluginId = 'com.chadbedera.fileexplorer';
+  SettingsPluginId = 'com.chadbedera.systemsettings';
 
 var
   PluginsConfirmed: Boolean;
@@ -207,7 +207,7 @@ var
 begin
   Form := CreateCustomForm(ScaleX(380), ScaleY(150), False, False);
   try
-    Form.Caption := 'הסרת קיוסק אוצריא';
+    Form.Caption := 'הסרת אחת שאלתי';
     Lbl := TNewStaticText.Create(Form);
     Lbl.Parent := Form;
     Lbl.Caption := 'הקלידו את סיסמת הנעילה (או קוד שחזור) כדי להסיר:';
