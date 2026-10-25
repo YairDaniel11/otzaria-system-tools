@@ -103,6 +103,8 @@ public static class Program
             Kiosk.RestoreOnStartup();
             HardLock.StartSync();
             Kiosk.StartScheduler();
+            UpdateRollback.StartHealthReporter(); // X3 (נקודת חיבור): סימן תקינות אחרי עדכון
+            HandleLock.StartSync();               // X3 (נקודת חיבור): handle ללא FILE_SHARE_DELETE בזמן נעילה
             // אכיפת FxPolicy/Kiosk.AllowedExtensions על דיאלוגי פתיחה/שמירה מקוריים של Windows בכל תהליך
             // (בעיה #53/וורד: "קובץ ← פתיחה ← עיון" בתוכנה חיצונית מאושרת עוקף את הסייר הפנימי). ר' DialogGuard.cs
             DialogGuard.Start();
