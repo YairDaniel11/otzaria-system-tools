@@ -80,17 +80,23 @@ internal static class PdfApi
         return list;
     }
 
-    /// <summary>נתיב מלא קיים, או שם exe שנמצא ב-App Paths (HKCU ואז HKLM)</summary>
+    /// <summary>
+    /// נתיב מלא קיים, או שם exe שנמצא ב-App Paths של HKLM בלבד, ובתנאי שהקובץ במיקום שרק מנהל כותב אליו.
+    /// WHY: HKCU ניתן לכתיבה למשתמש (App Paths\SumatraPDF.exe -> exe שרירותי שהגשר המהימן היה מריץ), וגם נתיב מלא ב-LocalAppData
+    /// ניתן להחלפה. סיכון false-positive: SumatraPDF/WPS שהותקנו למשתמש בלבד (LocalAppData) לא יופיעו; נשארת "ברירת המחדל של Windows".
+    /// </summary>
     private static string Find(string p)
     {
         try
         {
-            if (Path.IsPathFullyQualified(p)) return File.Exists(p) ? p : null;
-            foreach (var root in new[] { Registry.CurrentUser, Registry.LocalMachine })
+            string found = null;
+            if (Path.IsPathFullyQualified(p)) found = File.Exists(p) ? p : null;
+            else
             {
-                using var k = root.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\App Paths\" + p);
-                if (k?.GetValue(null) is string v) { v = Environment.ExpandEnvironmentVariables(v.Trim('"')); if (File.Exists(v)) return v; }
+                using var k = Registry.LocalMachine.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\App Paths\" + p);
+                if (k?.GetValue(null) is string v) { v = Environment.ExpandEnvironmentVariables(v.Trim('"')); if (File.Exists(v)) found = v; }
             }
+            return found != null && AppTrust.IsAdminOnlyLocation(found) ? found : null;
         }
         catch { }
         return null;
@@ -111,6 +117,42 @@ internal static class PdfApi
         return "windows-default";
     }
 
+    /// <summary>סיומת pdf ברשימת המנהל (עם/בלי נקודה מובילה, כמו FsApi.EnsureOpenExtAllowed)</summary>
+    internal static bool PdfAllowedInList(IEnumerable<string> allowed) =>
+        allowed.Any(x => x.TrimStart('.').Equals("pdf", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// פתיחה בנעילה/מצב מוגבל: אותו רצף כמו FsApi.Open — handle נעול (FileShare.Read), נתיב סופי, EnsureNotReadable, FxPolicy, סיומת, hardlink,
+    /// InspectDocument והעתק פרטי נעול. WHY: בדיקת נתיב טקסטואלי ואז Process.Start על המקור השאירה TOCTOU וחסרו בדיקות תוכן/hardlink.
+    /// </summary>
+    private static void OpenVerified(string path)
+    {
+        FileStream hold;
+        try { hold = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read); }
+        catch (IOException) { throw BridgeException.Forbidden("הקובץ פתוח לכתיבה בתוכנה אחרת: סגרו אותו ונסו שוב"); }
+        using (hold)
+        {
+            string fin = PathPolicy.FinalPathOfHandle(hold.SafeFileHandle) ?? throw new IOException("פענוח הנתיב הסופי נכשל");
+            FsApi.EnsureNotReadable(fin);
+            FxPolicy.EnsurePathAllowed(fin);
+            FsApi.EnsureOpenExtAllowed(fin);
+            if (!fin.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)) throw BridgeException.BadRequest("רק קובצי PDF");
+            if (PathPolicy.HardLinkCountOfHandle(hold.SafeFileHandle) > 1)
+                throw BridgeException.Forbidden("הקובץ מקושר בקישור קשיח (hardlink) לשם נוסף: הפתיחה חסומה");
+            string why = FsGuard.InspectDocument(hold, FsGuard.StdExt(fin));
+            if (why != null) throw BridgeException.Forbidden("הקובץ נחסם: " + why);
+            if (hold.Length <= 256L * 1024 * 1024)
+            {
+                string baseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OtzariaBridge", "open");
+                var keep = FsApi.CopyForOpen(hold, fin, baseDir, out string copy);
+                try { Process.Start(new ProcessStartInfo(copy) { UseShellExecute = true }); }
+                catch { keep.Dispose(); throw; }
+                _ = Task.Run(async () => { try { await Task.Delay(TimeSpan.FromMinutes(2)); } finally { keep.Dispose(); } });
+            }
+            else Process.Start(new ProcessStartInfo(fin) { UseShellExecute = true });
+        }
+    }
+
     private static object Open(JsonElement b)
     {
         string raw = b.Req("path");
@@ -122,10 +164,13 @@ internal static class PdfApi
         if (!path.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)) throw BridgeException.BadRequest("רק קובצי PDF");
 
         string id = b.Str("handlerId", "windows-default");
-        if (Kiosk.IsActive)
+        // WHY: בנעילה או במצב מוגבל רק ברירת המחדל של Windows ורק דרך הרצף המאומת; תוכנה חיצונית (exe) לא מופעלת בלי AppTrust
+        bool locked = Kiosk.IsActive || FxPolicy.IsRestricted;
+        if (Kiosk.IsActive && !PdfAllowedInList(Kiosk.AllowedExtensions)) throw BridgeException.Locked();
+        if (locked)
         {
-            if (!Kiosk.AllowedExtensions.Any(x => x.Equals("pdf", StringComparison.OrdinalIgnoreCase))) throw BridgeException.Locked();
-            id = "windows-default"; // בנעילה: לא בוחרים תוכנה אחרת
+            OpenVerified(path);
+            return new { opened = true, handlerId = "windows-default", pageHonored = false };
         }
         var h = Detect(false).FirstOrDefault(x => x.Id == id) ?? throw new BridgeException("no_handler", "התוכנה אינה ברשימה: " + id, 400);
         long page = b.Long("page", 0);
@@ -134,16 +179,16 @@ internal static class PdfApi
         if (h.Id == "windows-default") { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); }
         else if (h.Id == "windows-chooser")
         {
-            if (FxPolicy.IsRestricted) throw FxPolicy.Outside("במצב מוגבל אי אפשר לבחור תוכנה");
             PdfAssoc.ShowOpenWith(path); // חלון שנשאר בחזית (במקום rundll32 שנעלם)
         }
         else if (h.Id.StartsWith("assoc:"))
         {
-            if (FxPolicy.IsRestricted) throw FxPolicy.Outside("במצב מוגבל אי אפשר לבחור תוכנה");
             if (!PdfOpenWith.Sta(() => PdfOpenWith.Open(".pdf", h.Id, path))) throw new BridgeException("open_failed", "הפתיחה בתוכנה שנבחרה נכשלה", 500);
         }
         else
         {
+            // WHY: הגשר מהימן ל-AppTrust; exe שהוחלף אחרי הזיהוי (מטמון 5 דקות) לא יופעל — בדיקת מיקום מנהל-בלבד שוב לפני ההפעלה
+            if (h.Exe == null || !AppTrust.IsAdminOnlyLocation(h.Exe)) throw BridgeException.Forbidden("התוכנה אינה במיקום מהימן");
             var psi = new ProcessStartInfo(h.Exe) { UseShellExecute = false };
             if (atPage && h.Id == "sumatra") { psi.ArgumentList.Add("-page"); psi.ArgumentList.Add(page.ToString()); }
             if (atPage && h.Id.StartsWith("acrobat")) { psi.ArgumentList.Add("/A"); psi.ArgumentList.Add("page=" + page); }

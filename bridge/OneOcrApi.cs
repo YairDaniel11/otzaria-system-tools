@@ -108,16 +108,32 @@ public static class OneOcrApi
         return null;
     }
 
+    // WHY: oneocr.dll/onnxruntime.dll נטענות לתהליך הגשר (מהימן ל-AppTrust). עותק בתיקיית משתמש כתיבה = החלפה בקוד זדוני בתוך הגשר.
+    // סדר עדיפויות: (1) טעינה ישירה ממיקום שרק מנהל כותב אליו (חבילת Snipping Tool ב-WindowsApps), בלי העתקה;
+    // (2) אחרת עותק ב-DataDir, ושתי ה-DLL חייבות להיות חתומות Authenticode של Microsoft (נבדק על handle נעול, ראו EnsureEngine).
+    private static string _loadDir;
+    private static bool _dirTrusted;
+
+    /// <summary>טהור לבדיקה: כל קובצי המנוע במיקום מנהל-בלבד</summary>
+    internal static bool AllAdminOnly(string dir, IEnumerable<string> files, Func<string, bool> adminOnly) =>
+        dir != null && files.All(f => adminOnly(Path.Combine(dir, f)));
+
+    /// <summary>טהור לבדיקה: חתימה תקפה של Microsoft לכל ה-DLL</summary>
+    internal static bool DllsMicrosoftSigned(IEnumerable<string> dllPaths, Func<string, AppTrust.SigInfo> sig) =>
+        dllPaths.All(p => { var s = sig(p); return s != null && s.Valid && AppTrust.IsMicrosoftSubject(s.Subject); });
+
     private static string Prepare()
     {
+        if (_lib != IntPtr.Zero && _loadDir != null) return _loadDir; // כבר טעון
+        string src = FindSourceDir();
+        if (AllAdminOnly(src, Files, AppTrust.IsAdminOnlyLocation)) { _dirTrusted = true; return _loadDir = src; }
+        _dirTrusted = false;
         string dir = DataDir;
         string stamp = Path.Combine(dir, "source.txt");
         bool have = Files.All(f => File.Exists(Path.Combine(dir, f)));
-        if (_lib != IntPtr.Zero && have) return dir; // כבר טעון
-        string src = FindSourceDir();
         if (src == null)
         {
-            if (have) return dir;
+            if (have) return _loadDir = dir;
             throw BridgeException.Unsupported("לא נמצאו קבצי המנוע של כלי החיתוך (Snipping Tool). ודאו שהוא מותקן ב-Windows 11, או הניחו את הקבצים ב-" + dir);
         }
         string last = File.Exists(stamp) ? File.ReadAllText(stamp) : "";
@@ -134,7 +150,7 @@ public static class OneOcrApi
                 throw BridgeException.Unsupported("העתקת קבצי המנוע נכשלה (" + ex.Message + "). נסו להריץ את הגשר כמנהל, או להעתיק ידנית את הקבצים אל " + dir);
             }
         }
-        return dir;
+        return _loadDir = dir;
     }
 
     private static T Fn<T>(string name) where T : Delegate =>
@@ -149,12 +165,18 @@ public static class OneOcrApi
     {
         if (_pipeline != 0) return;
         string dir = Prepare();
+        var holds = new List<FileStream>();
         try
         {
             if (_lib == IntPtr.Zero)
             {
-                NativeLibrary.Load(Path.Combine(dir, "onnxruntime.dll")); // נטען קודם כדי ש-oneocr.dll ימצא אותו
-                var lib = NativeLibrary.Load(Path.Combine(dir, "oneocr.dll"));
+                // נעילה (FileShare.Read) מהאימות ועד הטעינה: אין חלון להחלפת הקובץ בין הבדיקה ל-LoadLibrary
+                string[] dlls = { Path.Combine(dir, "onnxruntime.dll"), Path.Combine(dir, "oneocr.dll") };
+                foreach (var d in dlls) holds.Add(new FileStream(d, FileMode.Open, FileAccess.Read, FileShare.Read));
+                if (!_dirTrusted && !DllsMicrosoftSigned(dlls, AppTrust.GetSignature))
+                    throw BridgeException.Forbidden("קובצי מנוע הזיהוי אינם חתומים ע\"י Microsoft ואינם במיקום מהימן: הטעינה נחסמה");
+                NativeLibrary.Load(dlls[0]); // נטען קודם כדי ש-oneocr.dll ימצא אותו
+                var lib = NativeLibrary.Load(dlls[1]);
                 _lib = lib;
                 CreateInitOptions = Fn<D_Out>("CreateOcrInitOptions");
                 SetDelayLoad = Fn<D_SetDelay>("OcrInitOptionsSetUseModelDelayLoad");
@@ -182,6 +204,7 @@ public static class OneOcrApi
         {
             throw BridgeException.Unsupported("טעינת מנוע הזיהוי נכשלה (" + ex.Message + "). ייתכן שגרסת כלי החיתוך אינה תואמת.");
         }
+        finally { foreach (var h in holds) h.Dispose(); }
 
         Check(CreateInitOptions(out _init), "CreateOcrInitOptions");
         Check(SetDelayLoad(_init, 0), "SetUseModelDelayLoad");

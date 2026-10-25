@@ -40,7 +40,7 @@ internal static class PdfOps
         var cands = new List<string>
         {
             Path.Combine(pf, "PDF24", "gs", "bin", "gswin64c.exe"), Path.Combine(pf, "PDF24", "gs", "bin", "gswin32c.exe"),
-            Path.Combine(pf86, "PDF24", "gs", "bin", "gswin32c.exe"), Path.Combine(la, "PDF24", "gs", "bin", "gswin64c.exe"),
+            Path.Combine(pf86, "PDF24", "gs", "bin", "gswin32c.exe"),
         };
         foreach (var root in new[] { Path.Combine(pf, "gs"), Path.Combine(pf86, "gs") })
             try { if (Directory.Exists(root)) foreach (var d in Directory.GetDirectories(root).OrderByDescending(x => x)) { cands.Add(Path.Combine(d, "bin", "gswin64c.exe")); cands.Add(Path.Combine(d, "bin", "gswin32c.exe")); } } catch { }
@@ -53,6 +53,8 @@ internal static class PdfOps
         try { foreach (var d in Directory.GetDirectories(pf, "qpdf*")) { var p = Path.Combine(d, "bin", "qpdf.exe"); if (File.Exists(p)) return p; } } catch { }
         return OnPath("qpdf.exe");
     }
+
+    internal static bool TrustedEngine(string exe) => exe != null && AppTrust.IsAdminOnlyLocation(exe);
 
     private static string OnPath(string exe)
     {
@@ -77,7 +79,9 @@ internal static class PdfOps
         string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
                la = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         var list = new List<Engine>();
-        void Add(string id, string name, string exe, params string[] ops) { if (exe != null) list.Add(new(id, name, exe, ops)); }
+        // WHY: הגשר מהימן ל-AppTrust ומריץ את המנוע בהרשאותיו; exe מ-LocalAppData/PATH כתיב (או מתחזה בשם gswin64c.exe) היה רץ דרכו.
+        // רק מיקום שרק מנהל כותב אליו. סיכון false-positive: PDF24/mutool/qpdf שהותקנו למשתמש בלבד לא יזוהו.
+        void Add(string id, string name, string exe, params string[] ops) { if (TrustedEngine(exe)) list.Add(new(id, name, exe, ops)); }
 
         string gs = Gs();
         Add("ghostscript", gs != null && gs.Contains("PDF24", StringComparison.OrdinalIgnoreCase) ? "Ghostscript (PDF24)" : "Ghostscript", gs,

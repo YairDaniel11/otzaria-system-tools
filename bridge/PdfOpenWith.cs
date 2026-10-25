@@ -47,6 +47,8 @@ internal static class PdfOpenWith
     /// <summary>פתיחת קובץ בתוכנה שנבחרה מהרשימה</summary>
     public static bool Open(string ext, string id, string file)
     {
+        // הגנה בעומק (WHY): handler שרירותי ממערכת = הרצת תוכנה לא מוכרת; בנעילה/מצב מוגבל רק ברירת המחדל דרך הרצף המאומת
+        if (Kiosk.IsActive || FxPolicy.IsRestricted) return false;
         foreach (var it in Enumerate(ext))
         {
             if (it.Id != id) continue;

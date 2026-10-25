@@ -36,7 +36,7 @@ public static class SnipApi
             installed = pm.FindPackagesForUser("", Pfn).Any();
         }
         catch { /* לא ידוע */ }
-        return new { installed, running = Running(), scriptOverride = File.Exists(OverridePath) };
+        return new { installed, running = Running(), scriptOverride = !LockedDown && File.Exists(OverridePath) };
     }
 
     private static byte[] DecodeImage(string s)
@@ -114,15 +114,32 @@ public static class SnipApi
                 ". ודאו שכלי החיתוך (Snipping Tool) מותקן ב-Windows 11.", 501);
     }
 
-    private static string ScriptFile()
+    /// <summary>
+    /// נעילה/שירות/מצב מוגבל: אסור להריץ שום קוד שמקורו בתיקיית משתמש כתיבה.
+    /// WHY: הגשר תהליך מהימן ל-AppTrust; הרצת snip-text.ps1 מ-%LOCALAPPDATA% (עם Bypass) אפשרה לילד להניח סקריפט ולהריץ קוד דרך אב מהימן.
+    /// </summary>
+    internal static bool LockedDown => Kiosk.IsActive || HardLock.Available || FxPolicy.IsRestricted;
+
+    /// <summary>טהור לבדיקה: בנעילה תמיד הסקריפט המוטמע (override מתעלמים); אחרת override אם קיים</summary>
+    internal static string PickScript(bool lockedDown, string overrideText, string embedded) =>
+        !lockedDown && !string.IsNullOrWhiteSpace(overrideText) ? overrideText : embedded;
+
+    private static string ScriptText()
     {
-        if (File.Exists(OverridePath)) return OverridePath;
-        Directory.CreateDirectory(Config.Dir);
-        string def = Path.Combine(Config.Dir, "snip-text.default.ps1");
-        // BOM נדרש כדי ש-PowerShell 5.1 יקרא עברית נכון
-        var bytes = new UTF8Encoding(true).GetPreamble().Concat(Encoding.UTF8.GetBytes(Script)).ToArray();
-        if (!File.Exists(def) || !File.ReadAllBytes(def).SequenceEqual(bytes)) File.WriteAllBytes(def, bytes);
-        return def;
+        string ov = null;
+        try { if (!LockedDown && File.Exists(OverridePath)) ov = File.ReadAllText(OverridePath, Encoding.UTF8); } catch { }
+        return PickScript(LockedDown, ov, Script);
+    }
+
+    /// <summary>
+    /// שורת הפקודה: הסקריפט מועבר כטקסט ב-EncodedCommand (לא כקובץ ולא Bypass): אין קובץ להחליף במרוץ, וגם מדיניות ההרצה של המחשב נשמרת.
+    /// הפרמטרים עוברים לבלוק הסקריפט כארגומנטים עם מרכאות בודדות מוכפלות.
+    /// </summary>
+    internal static string BuildEncodedCommand(string script, string outFile, int timeoutSec, bool dump)
+    {
+        string q = "'" + outFile.Replace("'", "''") + "'";
+        string cmd = "& {" + (char)10 + script + (char)10 + "} -Out " + q + " -TimeoutSec " + timeoutSec + (dump ? " -Dump" : "");
+        return Convert.ToBase64String(Encoding.Unicode.GetBytes(cmd));
     }
 
     private static async Task<JsonElement> RunScript(string outFile, int timeoutSec, bool dump)
@@ -134,9 +151,10 @@ public static class SnipApi
             RedirectStandardError = true,
             RedirectStandardOutput = true,
         };
-        foreach (var a in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-File", ScriptFile(), "-Out", outFile, "-TimeoutSec", timeoutSec.ToString() })
+        string enc = BuildEncodedCommand(ScriptText(), outFile, timeoutSec, dump);
+        if (enc.Length > 30000) throw new BridgeException("snip_failed", "הסקריפט ארוך מדי להרצה", 500);
+        foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", enc })
             psi.ArgumentList.Add(a);
-        if (dump) psi.ArgumentList.Add("-Dump");
         try { File.Delete(outFile); } catch { }
 
         using var p = Process.Start(psi) ?? throw new BridgeException("unsupported", "לא ניתן להפעיל PowerShell", 501);
@@ -163,8 +181,8 @@ public static class SnipApi
 # snip-text.ps1 - מפעיל את "פעולות טקסט" של כלי החיתוך (UI Automation) ומחזיר את הטקסט שזוהה.
 # הגשר פותח קודם את התמונה בכלי החיתוך, ואז מריץ את הסקריפט הזה.
 # בדיקה ידנית: פתחו תמונה בכלי החיתוך, ואז:
-#   powershell -ExecutionPolicy Bypass -STA -File snip-text.ps1 -Out C:\temp\r.json
-#   powershell -ExecutionPolicy Bypass -STA -File snip-text.ps1 -Out C:\temp\d.json -Dump   (רשימת רכיבי החלון)
+#   powershell -STA -File snip-text.ps1 -Out C:\temp\r.json
+#   powershell -STA -File snip-text.ps1 -Out C:\temp\d.json -Dump   (רשימת רכיבי החלון)
 param(
   [Parameter(Mandatory = $true)][string]$Out,
   [int]$TimeoutSec = 25,

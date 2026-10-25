@@ -28,7 +28,7 @@ internal static class PdfAssoc
         Server.Route("/pdf/inbox/list", _ => new { items = List() });
         Server.Route("/pdf/inbox/ack", Ack);
         // רישום אוטומטי בעלייה (מה שסוכם): הצופה מופיע ב"פתח באמצעות" בלי פעולה נוספת
-        try { if (Config.Get("pdf.assoc", true)) Write(); } catch (Exception ex) { Config.Log("pdf assoc: " + ex.Message); }
+        try { if (Config.Get("pdf.assoc", true) && !Kiosk.IsActive) Write(); } catch (Exception ex) { Config.Log("pdf assoc: " + ex.Message); }
     }
 
     private static string Exe => Path.Combine(Path.GetDirectoryName(Environment.ProcessPath) ?? Config.Dir, ExeName);
@@ -101,13 +101,32 @@ internal static class PdfAssoc
         {
             if (string.IsNullOrWhiteSpace(raw)) return;
             string path = Path.GetFullPath(Environment.ExpandEnvironmentVariables(raw.Trim().Trim('"')));
-            if (!File.Exists(path)) return;
+            if (!InboxPathOk(path)) { Config.Log("open-pdf: נתיב נדחה"); return; }
             Directory.CreateDirectory(InboxDir);
             string id = DateTime.UtcNow.ToString("yyyyMMddHHmmssfff") + "-" + Guid.NewGuid().ToString("N")[..8];
             File.WriteAllText(Path.Combine(InboxDir, id + ".txt"), path);
             OpenPluginInOtzaria();
         }
         catch (Exception ex) { Config.Log("open-pdf: " + ex.Message); }
+    }
+
+    /// <summary>
+    /// נתיב מותר לתור: קובץ קיים עם סיומת pdf, מותר ע"י FxPolicy, ולא באזור סודות/UNC חסום/ADS (FsApi.EnsureNotReadable); בנעילה גם pdf ברשימת המנהל.
+    /// WHY: --open-pdf רץ לפני בדיקת מופע יחיד ובכל מצב, וקיבל כל קובץ — חשיפת נתיבי סודות/קבצים שאינם PDF לתוסף. כשל = לא נרשם (fail-closed).
+    /// </summary>
+    internal static bool InboxPathOk(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) return false;
+            if (!path.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) || FsGuard.HasAds(path)) return false;
+            if (!File.Exists(path)) return false;
+            if (Kiosk.IsActive && !PdfApi.PdfAllowedInList(Kiosk.AllowedExtensions)) return false;
+            FxPolicy.EnsurePathAllowed(path);
+            FsApi.EnsureNotReadable(path);
+            return true;
+        }
+        catch { return false; }
     }
 
     private static void OpenPluginInOtzaria()
@@ -133,8 +152,8 @@ internal static class PdfAssoc
                 var at = File.GetLastWriteTimeUtc(f);
                 if (DateTime.UtcNow - at > Ttl) { File.Delete(f); continue; }
                 string path = File.ReadAllText(f).Trim();
-                try { FxPolicy.EnsurePathAllowed(path); } catch { File.Delete(f); continue; } // מחוץ למדיניות — נזרק בשקט
-                if (Kiosk.IsActive && !Kiosk.AllowedExtensions.Any(x => x.Equals("pdf", StringComparison.OrdinalIgnoreCase))) continue;
+                if (Kiosk.IsActive && !PdfApi.PdfAllowedInList(Kiosk.AllowedExtensions)) continue;
+                if (!InboxPathOk(path)) { File.Delete(f); continue; } // מחוץ למדיניות / לא pdf / סודות — נזרק בשקט (גם קבצי תור ישנים)
                 long size = 0; try { size = new FileInfo(path).Length; } catch { }
                 res.Add(new { id = Path.GetFileNameWithoutExtension(f), path, name = Path.GetFileName(path), size, at = at.ToString("o"), source = "open-with" });
             }
@@ -174,6 +193,8 @@ internal static class PdfAssoc
     /// ו-SHOpenWithDialog מודאלי עם OAIF_EXEC — נשאר עד שהמשתמש בוחר או סוגר.</summary>
     public static void ShowOpenWith(string path)
     {
+        // הגנה בעומק: החלון מאפשר לדפדף לכל תוכנה, ולכן לא בנעילה/מצב מוגבל גם אם הקורא שכח לבדוק
+        if (Kiosk.IsActive || FxPolicy.IsRestricted) return;
         var t = new Thread(() =>
         {
             try
@@ -189,7 +210,7 @@ internal static class PdfAssoc
                 var info = new OPENASINFO { pcszFile = path, pcszClass = null, oaifInFlags = 0x1 | 0x4 | 0x20 }; // ALLOW_REGISTRATION | EXEC | HIDE_REGISTRATION
                 int hr = SHOpenWithDialog(owner.Handle, ref info);
                 if (hr < 0 && hr != unchecked((int)0x800704C7)) // לא "בוטל ע"י המשתמש"
-                    Process.Start(new ProcessStartInfo("rundll32.exe", "shell32.dll,OpenAs_RunDLL " + path) { UseShellExecute = false });
+                    Process.Start(new ProcessStartInfo("rundll32.exe", "shell32.dll,OpenAs_RunDLL \"" + path + "\"") { UseShellExecute = false });
                 owner.Close();
             }
             catch (Exception ex) { Config.Log("open-with dialog: " + ex.Message); }
