@@ -65,6 +65,7 @@ public static class Installer
     public static void Install(bool showMessage)
     {
         Directory.CreateDirectory(Config.Dir);
+        HandleLock.Release(); // X3: נעילת ה-handle (אם התהליך הזה החזיק אותה) לא תחסום החלפת קבצים בהתקנה
 
         if (!IsRunningFromInstallDir())
         {
@@ -107,6 +108,10 @@ public static class Installer
         if (machineRun) Process.Start(new ProcessStartInfo(HardLock.ServiceExe, "--background --portable") { UseShellExecute = false, WorkingDirectory = HardLock.ProgDir });
         else Process.Start(new ProcessStartInfo(InstalledExe, "--background") { UseShellExecute = false, WorkingDirectory = Config.Dir });
 
+        // X3: אם זה עדכון (UpdateApi.Install הכין גיבוי ומצב ממתין לגשר הזה), ממתינים לסימן תקינות ומשחזרים אם לא הגיע.
+        // WHY כאן: זה התהליך היחיד שחי אחרי שהגשר הישן נהרג ויודע איזה קובץ הוחלף. רק כשהמצב שייך ל-hash של עצמנו.
+        if (!machineRun) WatchUpdateHealth();
+
         if (showMessage)
         {
             string msg = Lang.T(Program.AppFullName + " הותקן ויעלה אוטומטית עם כניסה ל-Windows.",
@@ -133,6 +138,20 @@ public static class Installer
         // גם בהתקנה שקטה (מתקין Inno): מבקשים מאוצריא להתקין את התוספים, ומחכים עד שכולם נשלחו —
         // אחרת התהליך יוצא והחוט ברקע נהרג לפני התוסף השני
         if (canInstall) InstallPluginsInOtzaria(wait: true);
+    }
+
+    private static void WatchUpdateHealth()
+    {
+        try
+        {
+            var st = UpdateRollback.Load(UpdateRollback.DefaultRoot);
+            if (st == null || !string.Equals(st.NewSha, InstallTrust.SelfSha256(), StringComparison.OrdinalIgnoreCase)) return;
+            var v = UpdateRollback.Watch(UpdateRollback.DefaultRoot, InstalledExe, UpdateRollback.DefaultTimeoutSec, () => DateTime.UtcNow, Thread.Sleep,
+                stopNew: StopOtherInstances,
+                startOld: () => Process.Start(new ProcessStartInfo(InstalledExe, "--background") { UseShellExecute = false, WorkingDirectory = Config.Dir }));
+            if (v == UpdateRollback.Verdict.Rollback) Environment.ExitCode = 4;
+        }
+        catch (Exception ex) { Config.Log("update-watch: " + ex.Message); }
     }
 
     /// <summary>האם אוצריא רשמה את סכמת otzaria:// (היא עושה זאת בעלייה הראשונה שלה)</summary>
@@ -271,6 +290,7 @@ public static class Installer
     /// <summary>מחזיר הודעת שגיאה, או null בהצלחה</summary>
     public static string Uninstall(string password)
     {
+        HandleLock.Release(); // X3: אחרת תיקיית הנתונים/ה-exe נעולים למחיקה (ר' HandleLock)
         // רכיב ההקשחה (אם מותקן) מוסר קודם, עם אותה סיסמה
         string herr = HardLock.UninstallWithPassword(password);
         if (herr != null) return herr;

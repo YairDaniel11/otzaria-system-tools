@@ -436,6 +436,11 @@ public static class UpdateApi
                 throw new BridgeException("failed", "גרסת הקובץ אינה הגרסה החתומה. העדכון בוטל.", 500);
             Config.Log("update: " + info.Current + " -> " + ver.ToString(3) + " tag=" + info.Tag + " sha256=" + hash);
 
+            // X3: גיבוי הגרסה המותקנת + מצב ממתין לפני שהמתקין מחליף; המתקין ישחזר אם הגרסה החדשה לא מדווחת תקינות.
+            // WHY: HandleLock משוחרר כדי שההחלפה לא תיחסם; Kiosk.IsActive כבר נבדק לעיל (נעילה פעילה = אין עדכון).
+            HandleLock.Release();
+            UpdateRollback.Prepare(UpdateRollback.DefaultRoot, Installer.InstalledExe, hash, ver.ToString(3), Program.Version, DateTime.UtcNow);
+
             // המתקין החדש סוגר את הגשר הזה, מעתיק את עצמו ומפעיל מחדש
             Process.Start(new ProcessStartInfo(exe, "--install --quiet") { UseShellExecute = false, WorkingDirectory = dir });
         }
