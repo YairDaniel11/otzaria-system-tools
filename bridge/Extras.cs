@@ -31,8 +31,7 @@ internal sealed class SideBar : Form
     public SideBar()
     {
         FormBorderStyle = FormBorderStyle.None;
-        ShowInTaskbar = false;
-        TopMost = true;
+        ShowInTaskbar = false;   // [x2] בלי Form.TopMost (גניבת פוקוס): WS_EX_TOPMOST ב-CreateParams
         StartPosition = FormStartPosition.Manual;
         DoubleBuffered = true;
         BackColor = Color.FromArgb(24, 30, 40);
@@ -307,8 +306,7 @@ internal sealed class SideBar : Form
         {
             _activate = activate;
             FormBorderStyle = FormBorderStyle.None;
-            ShowInTaskbar = false;
-            TopMost = true;
+            ShowInTaskbar = false;   // [x2] בלי Form.TopMost (גניבת פוקוס): WS_EX_TOPMOST ב-CreateParams
             StartPosition = FormStartPosition.Manual;
             DoubleBuffered = true;
             BackColor = Color.FromArgb(24, 30, 40);

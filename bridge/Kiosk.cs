@@ -1306,6 +1306,7 @@ public static partial class Kiosk
             if (!InstallHook()) Config.Log("kiosk: התקנת hook המקלדת נכשלה, ה-watchdog ינסה שוב כל ~3 שניות");
             StartShellGuard();
             SetToastPolicy(true);
+            SetAccessibilityPolicy(true);   // [x2]
             HookSessionEnding();
             Overlay.ShowClock(); // שורת המשימות מוסתרת — שעה ותאריך בשעון צף
             Overlay.ShowSideBar(); // סרגל תוכנות בצד המסך: מעבר מהיר בין אוצריא לתוכנות התורניות
@@ -1354,6 +1355,7 @@ public static partial class Kiosk
         try { using var k = Registry.CurrentUser.OpenSubKey(PoliciesKey, true); k?.DeleteValue("DisableTaskMgr", false); }
         catch (Exception ex) { Config.Log("kiosk clear policy: " + ex.Message); }
         SetToastPolicy(false);
+        SetAccessibilityPolicy(false);   // [x2] מחזיר נגישות/NoWinKeys/AutoPlay (גם כשארית אחרי קריסה, דרך BootGuard)
         if (ShellPointsToBridge()) Config.Log("kiosk clear: אזהרה — המעטפת עדיין מפנה לגשר");
     }
 
@@ -1947,6 +1949,12 @@ public static partial class Kiosk
             var k = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
             uint vk = k.vkCode;
             bool down = wParam == (IntPtr)0x100 || wParam == (IntPtr)0x104;
+            // [x2] שחרור מקש תקוע (ר' StuckModifier.cs): הזרקה מסומנת של הקיוסק (Magic, רק up של מקש-שינוי/מקש "כלום", בחלון קצר) עוברת;
+            // מקש-שינוי שנתקע (Win/Ctrl/Alt/Shift) משוחרר והאירוע הנוכחי נבלע. Win אמיתי נשאר חסום (ShouldBlock).
+            long nowMs = Environment.TickCount64;
+            if (StuckInput.IsPassable(k.extra, k.flags, vk, down, Volatile.Read(ref _stuckArmedUntil), nowMs))
+                return CallNextHookEx(_hook, nCode, wParam, lParam);
+            if (StuckFilter(vk, down, nowMs)) return (IntPtr)1;
             bool ctrl = (GetAsyncKeyState(0x11) & 0x8000) != 0;
             bool shift = (GetAsyncKeyState(0x10) & 0x8000) != 0;
             // דגל ה-Alt של ה-hook (LLKHF_ALTDOWN) לא מסומן בכל מקלדת/פריסה (נצפה בלוג: F12 הגיע עם alt=False

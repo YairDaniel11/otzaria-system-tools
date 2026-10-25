@@ -205,7 +205,8 @@ internal sealed class ClockBar : Form
     {
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
-        TopMost = true;
+        // [x2] WHY: Form.TopMost=true גורם ל-WinForms להפעיל/למקד את החלון בהצגה גם עם NOACTIVATE (גניבת פוקוס מהקלדה באוצריא).
+        // TopMost נשאר רק דרך WS_EX_TOPMOST ב-CreateParams
         StartPosition = FormStartPosition.Manual;
         BackColor = Color.FromArgb(28, 32, 38);
         ForeColor = Color.White;
@@ -843,7 +844,7 @@ internal sealed class TempUnlockBanner : Form
         _onDismiss = onDismiss;
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
-        ShowInTaskbar = false; TopMost = true;
+        ShowInTaskbar = false;   // [x2] בלי Form.TopMost (גניבת פוקוס): WS_EX_TOPMOST ב-CreateParams
         BackColor = Color.FromArgb(24, 28, 34);
         RightToLeft = Lang.En ? RightToLeft.No : RightToLeft.Yes;
         Font = new Font("Segoe UI", 11f);
@@ -933,8 +934,7 @@ internal sealed class BlackCover : Form
     public BlackCover()
     {
         FormBorderStyle = FormBorderStyle.None;
-        ShowInTaskbar = false;
-        TopMost = true;
+        ShowInTaskbar = false;   // [x2] בלי Form.TopMost (גניבת פוקוס): WS_EX_TOPMOST ב-CreateParams
         StartPosition = FormStartPosition.Manual;
         BackColor = Color.Black;
     }
@@ -946,7 +946,7 @@ internal sealed class BlackCover : Form
         get
         {
             var cp = base.CreateParams;
-            cp.ExStyle |= 0x08000000 /* WS_EX_NOACTIVATE */ | 0x00000080 /* WS_EX_TOOLWINDOW */;
+            cp.ExStyle |= 0x08000000 /* WS_EX_NOACTIVATE */ | 0x00000080 /* WS_EX_TOOLWINDOW */ | 0x00000008 /* WS_EX_TOPMOST */;
             return cp;
         }
     }
