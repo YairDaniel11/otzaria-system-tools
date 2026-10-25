@@ -315,11 +315,68 @@ public static partial class Kiosk
     /// כל ~3 שניות: מוודא שהתהליכון חי ומגיב (ping), ואם לא — מרים חדש; אחרת מתקין hook מחדש
     /// (Windows מסירה בשקט hook שחרג מ-LowLevelHooksTimeout ואין API לשאול אם הוא עדיין חי)
     /// </summary>
+    // ---------- מקש-שינוי תקוע (ר' StuckModifier) ----------
+    // מצב נוגע רק בתהליכון ה-hook (Track) ובטיימר ה-watchdog (סריקת סרק, רק קריאת _lastKeyEventMs) - ללא נעילה
+    private static readonly StuckModifier _stuckCtrl = StuckModifier.Ctrl(), _stuckAlt = StuckModifier.Alt(),
+        _stuckShift = StuckModifier.Shift(), _stuckWin = StuckModifier.Win();
+    private static long _stuckArmedUntil, _lastKeyEventMs;
+
+    private static bool AsyncDown(byte vk) => (GetAsyncKeyState(vk) & 0x8000) != 0;
+    private static bool AsyncDown(byte[] vks) { foreach (var v in vks) if (AsyncDown(v)) return true; return false; }
+
+    /// <summary>
+    /// נקרא מה-hook לכל אירוע מקלדת (אחרי בדיקת Magic). מחזיר true אם שוחרר מקש תקוע: האירוע הנוכחי נבלע (המשתמש מקליד שוב),
+    /// כדי שהמקש הרגיל לא יגיע ליעד בעוד המערכת עדיין חושבת ש-Win/Ctrl לחוץ (Win+E וכד').
+    /// </summary>
+    private static bool StuckFilter(uint vk, bool down, long now)
+    {
+        Volatile.Write(ref _lastKeyEventMs, now);
+        if (!down)
+        {   // ב-callback של ה-up המצב האסינכרוני עוד "לחוץ": מאפסים רק את המקש עצמו, בלי לשפוט
+            if (vk is 0x11 or 0xA2 or 0xA3) _stuckCtrl.Reset();
+            else if (vk is 0x12 or 0xA4 or 0xA5) _stuckAlt.Reset();
+            else if (vk is 0x10 or 0xA0 or 0xA1) _stuckShift.Reset();
+            else if (vk is 0x5B or 0x5C) _stuckWin.Reset();
+            return false;
+        }
+        bool countable = !StuckInput.IsModifierVk(vk);
+        var s = _stuckWin.Track(AsyncDown(StuckModifier.WinVks), vk is 0x5B or 0x5C, countable, now);
+        if (s == StuckVerdict.Stuck) { ReleaseStuck(_stuckWin, "typed key"); return true; }
+        s = _stuckCtrl.Track(AsyncDown(0x11) || AsyncDown(StuckModifier.CtrlVks), vk is 0x11 or 0xA2 or 0xA3, countable, now);
+        if (s == StuckVerdict.Stuck) { ReleaseStuck(_stuckCtrl, "typed keys"); return true; }
+        s = _stuckAlt.Track(AsyncDown(0x12) || AsyncDown(StuckModifier.AltVks), vk is 0x12 or 0xA4 or 0xA5, countable, now);
+        if (s == StuckVerdict.Stuck) { ReleaseStuck(_stuckAlt, "typed keys"); return true; }
+        s = _stuckShift.Track(AsyncDown(0x10) || AsyncDown(StuckModifier.ShiftVks), vk is 0x10 or 0xA0 or 0xA1, countable, now);
+        if (s == StuckVerdict.Stuck) { ReleaseStuck(_stuckShift, "typed keys"); return true; }
+        return false;
+    }
+
+    /// <summary>שחרור אמיתי של הצדדים הלחוצים בהזרקה מסומנת (Magic). ההזרקה ברקע: לא להאריך את ה-callback של ה-hook</summary>
+    private static void ReleaseStuck(StuckModifier m, string why)
+    {
+        var sides = m.Vks.Where(v => AsyncDown(v)).ToList();
+        if (sides.Count == 0) sides = m.Vks.ToList();   // המצב הכללי (VK_CONTROL) לחוץ בלי צד ידוע: משחררים את שני הצדדים
+        var seq = StuckInput.BuildRelease(StuckInput.NeedsNoName(m), sides);
+        Volatile.Write(ref _stuckArmedUntil, Environment.TickCount64 + StuckInput.ArmMs);
+        Task.Run(() => { try { StuckInput.Inject(seq); } catch { } });
+        LogThrottled("stuck" + m.Name, "stuck " + m.Name + " (" + why + ") - released, keyboard unblocked", 30);
+    }
+
+    /// <summary>סריקת סרק (כל ~3 שניות מה-watchdog): מקש-שינוי "לחוץ" בלי שום אירוע מקלדת שניות רבות = key-up אבד</summary>
+    private static void StuckIdleSweep()
+    {
+        long last = Volatile.Read(ref _lastKeyEventMs), now = Environment.TickCount64;
+        if (last == 0) { Volatile.Write(ref _lastKeyEventMs, now); return; }
+        foreach (var (m, win) in new[] { (_stuckWin, true), (_stuckCtrl, false), (_stuckAlt, false), (_stuckShift, false) })
+            if (StuckInput.IdleStuck(AsyncDown(m.Vks), win, last, now)) { ReleaseStuck(m, "idle"); m.Reset(); }
+    }
+
     private static void HookWatchdogTick()
     {
         try
         {
             if (!IsActive) return;
+            try { StuckIdleSweep(); } catch { }
             lock (HookGate)
             {
                 bool dead = _hookThread == null || !_hookThread.IsAlive;
@@ -717,6 +774,12 @@ public static partial class Kiosk
 
     // ---------- התראות toast: חסימה במדיניות ----------
     private const string ToastPolicyKey = @"Software\Policies\Microsoft\Windows\CurrentVersion\PushNotifications";
+
+    // [x2] נקודת חיבור יחידה: קיצורי נגישות + NoWinKeys/AutoPlay (ר' AccessibilityPolicy). ה-Release/ClearRegistry/BootGuard מחזירים
+    private static void SetAccessibilityPolicy(bool on)
+    {
+        if (on) AccessibilityPolicy.Apply(); else AccessibilityPolicy.Restore();
+    }
 
     private static void SetToastPolicy(bool on)
     {
