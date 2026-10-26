@@ -900,6 +900,13 @@ internal static class ServiceRecovery
         $"failure {service} reset= {ResetSeconds} actions= {Actions}",
         $"failureflag {service} 1",
     };
+
+    /// <summary>ניטרול התאוששות לפני הסרה: בלי actions SCM לא מפעיל מחדש גם אם התהליך נהרג</summary>
+    internal static string[] DisableArgs(string service) => new[]
+    {
+        $"failureflag {service} 0",
+        $"failure {service} reset= 0 actions= \"\"",
+    };
 }
 
 /// <summary>

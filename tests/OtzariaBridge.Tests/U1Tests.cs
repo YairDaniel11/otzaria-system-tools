@@ -177,9 +177,9 @@ public class U1Tests
         // WHY: נעיצת SHA-256 שייכת לקובץ מסוים; נתיב אחר עם נעיצה ישנה = אימות מול הקובץ הלא נכון (או נעיצה שתאפשר החלפה)
         string sha = new('b', 64);
         var st = new JsonObject { ["otzariaPath"] = @"C:\Otz\otzaria.exe", ["otzariaSha256"] = sha };
-        Assert.Null(HardLockService.ApplyEnableOtzariaPath(st, @"C:\Otz\otzaria.exe"));   // אותו נתיב
+        Assert.Null(HardLockService.ApplyEnableOtzariaPath(st, @"C:\Otz\otzaria.exe", _ => true));   // אותו נתיב
         Assert.Equal(sha, st["otzariaSha256"]!.ToString());
-        Assert.Null(HardLockService.ApplyEnableOtzariaPath(st, @"C:\Other\otzaria.exe")); // נתיב שונה
+        Assert.Null(HardLockService.ApplyEnableOtzariaPath(st, @"C:\Other\otzaria.exe", _ => true)); // נתיב שונה
         Assert.Equal(@"C:\Other\otzaria.exe", st["otzariaPath"]!.ToString());
         Assert.Equal("", st["otzariaSha256"]!.ToString());
         Assert.Null(HardLockService.ApplyEnableOtzariaPath(st, ""));                      // ריק: לא נוגעים

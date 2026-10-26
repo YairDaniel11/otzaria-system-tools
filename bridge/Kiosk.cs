@@ -1790,9 +1790,11 @@ public static partial class Kiosk
     }
 
     /// <summary>ביטול נעילה בזמן הסרה</summary>
-    public static string ReleaseForUninstall(string password)
+    public static string ReleaseForUninstall(string password, bool alreadyVerified = false)
     {
-        if (HardLock.Available)
+        // alreadyVerified: השירות כבר אימת את הסיסמה ב-op=uninstall והוא עשוי להימחק בכל רגע (אימות חוזר ייכשל בטעות)
+        if (alreadyVerified) { }
+        else if (HardLock.Available)
         {
             try { HardLock.Verify(password, true); }
             catch (BridgeException) { return "נדרשת סיסמת הנעילה: --password <סיסמה>"; }

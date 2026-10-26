@@ -824,7 +824,7 @@ public static class HardLock
     {
         try
         {
-            foreach (var p in BridgeProcs.Scan().Where(x => x.Pid != skipPid && BridgeProcs.SamePath(x.Path, exe)))
+            foreach (var p in BridgeProcs.Scan().Where(x => x.Pid != skipPid && x.Pid != Environment.ProcessId && BridgeProcs.SamePath(x.Path, exe))) // WHY: לעולם לא הורגים את התהליך הקורא (השירות עצמו; באג VM: stop-bridges הרג את השירות)
                 try { using var pr = Process.GetProcessById(p.Pid); pr.Kill(); pr.WaitForExit(3000); } catch { }
         }
         catch (Exception ex) { SvcLog("stop bridges: " + ex.Message); }
@@ -1108,6 +1108,12 @@ public class HardLockService : ServiceBase
         _bridgeTimer = new System.Threading.Timer(_ => WatchBridge(), null, 1000, 1000);
         _threadTimer = new System.Threading.Timer(_ => ThreadGuardTick(), null, 200, ProcessDacl.ThreadHardenIntervalMs);
         HardLock.SvcLog("service: עלה (גרסה " + Program.Version + "), נעילה " + (Active ? "פעילה" : "כבויה"));
+        // WHY (באג VM): הסרה שנקטעה (קריסה/הריגה) השאירה uninstalling:true והשירות עלה והקשיח שוב. ההסרה אומתה בסיסמה, אז ממשיכים אותה (idempotent)
+        if (_state["uninstalling"]?.GetValue<bool>() == true)
+        {
+            _uninstalling = true;
+            SafeTask.Run(() => SelfUninstall(0));
+        }
     }
 
     protected override void OnStop()
@@ -1324,11 +1330,13 @@ public class HardLockService : ServiceBase
     /// SHA-256 של הקובץ הקודם. עכשיו: אותה בדיקה כמו "settings", ונעיצה ישנה מנוקה כשהנתיב שונה (ParsePolicy מנקה אותה); נתיב זהה משאיר את הנעיצה.
     /// מחזיר שגיאה (בלי לשנות את state) או null
     /// </summary>
-    internal static JsonObject ApplyEnableOtzariaPath(JsonObject state, string otz)
+    internal static JsonObject ApplyEnableOtzariaPath(JsonObject state, string otz, Func<string, bool> fileExists = null)
     {
         if (string.IsNullOrEmpty(otz)) return null;
         var e = ParsePolicy(new JsonObject { ["otzariaPath"] = otz }, out var enPolicy);
         if (e != null) return e;
+        // WHY (באג VM): נתיב מלא לקובץ שלא קיים נכנס, enable החזיר ok והנעילה נשארה פעילה בלי תוכנה להריץ. בהפעלה (לא בשמירת הגדרות) הקובץ חייב להתקיים
+        if (!(fileExists ?? File.Exists)(otz.Trim())) return Err("bad_request", "קובץ אוצריא לא נמצא בנתיב שצוין");
         bool samePath = BridgeProcs.SamePath(state["otzariaPath"]?.ToString(), otz);
         foreach (var kv in enPolicy)
             if (!(samePath && kv.Key == "otzariaSha256")) state[kv.Key] = kv.Value;
@@ -2021,7 +2029,8 @@ public class HardLockService : ServiceBase
                 case "stop-bridges":
                     // יציאה מורשית של הגשרים (עדכון/התקנה) בלי taskkill: רק כשהנעילה לא נאכפת (אחרת גשר חייב לרוץ) — והשירות עצמו הורג
                     if (Configured && Enforced) return Err("forbidden", "הנעילה נאכפת — לא ניתן לסגור את הגשר");
-                    Task.Run(() => HardLock.StopBridgesAt(HardLock.ServiceExe, _clientPid));
+                    int cpid0 = _clientPid; // WHY: _clientPid הוא ThreadStatic; בתוך Task.Run הוא 0 והלקוח עצמו היה נהרג
+                    Task.Run(() => HardLock.StopBridgesAt(HardLock.ServiceExe, cpid0));
                     return Ok();
 
                 case "uninstall":
@@ -2039,7 +2048,8 @@ public class HardLockService : ServiceBase
                     _state["active"] = false;
                     _state["uninstalling"] = true;
                     Save();
-                    SafeTask.Run(SelfUninstall);
+                    int clientPid = _clientPid; // הלקוח (--uninstall) רץ מאותו exe וממתין לסיום; לא הורגים אותו (באג VM: יצא -1 בלי הודעה)
+                    SafeTask.Run(() => SelfUninstall(clientPid));
                     return Ok();
 
                 default:
@@ -2474,11 +2484,25 @@ public class HardLockService : ServiceBase
         }
     }
 
-    private void SelfUninstall()
+    private static void DisableRecovery()
+    {
+        try { foreach (string a in ServiceRecovery.DisableArgs(HardLock.ServiceName)) Config.Run("sc.exe", a, 10000); }
+        catch (Exception ex) { HardLock.SvcLog("uninstall: ניטרול recovery: " + ex.Message); }
+    }
+
+    private static void RestoreRecovery()
+    {
+        try { foreach (string a in ServiceRecovery.FailureArgs(HardLock.ServiceName)) Config.Run("sc.exe", a, 10000); }
+        catch (Exception ex) { HardLock.SvcLog("uninstall: שחזור recovery: " + ex.Message); }
+    }
+
+    private void SelfUninstall(int clientPid)
     {
         try
         {
             Thread.Sleep(500);
+            // WHY: SCM מפעיל מחדש אחרי כל יציאה/קריסה; אם הוא יפעיל מחדש באמצע ההסרה ההקשחה תחזור. מנטרלים לפני כל דבר אחר
+            DisableRecovery();
             // סדר (WHY, באג VM): קודם משחררים אכיפה והקשחת אתחול (SafeBoot/WinRE/recoveryenabled) ומאמתים; רק אחר כך מוחקים.
             // כשל בשחרור = ההסרה נעצרת (לא מוחקים את מצב השחזור) ואפשר להריץ שוב: הכל idempotent
             EnforcePolicies(false);
@@ -2494,6 +2518,7 @@ public class HardLockService : ServiceBase
             if (!released)
             {
                 HardLock.SvcLog("uninstall: שחרור הקשחת האתחול לא הושלם - ההסרה נעצרה (להריץ שוב --uninstall)");
+                RestoreRecovery();
                 lock (_gate) { _uninstalling = false; _state["uninstalling"] = false; Save(); } // חוזרים לאכיפה רגילה; ניסיון חוזר אפשרי
                 return;
             }
@@ -2502,10 +2527,10 @@ public class HardLockService : ServiceBase
             Config.Run("sc.exe", "delete " + HardLock.ServiceName, 10000);
             // הגשר רץ מ-Program Files ומוגן מהריגה ע"י המשתמש (DACL) — בלי זה rmdir להלן נכשל על exe נעול
             Thread.Sleep(2500); // לגשר/לתהליך ההסרה זמן לסיים את הזרימה שלהם לפני ההריגה
-            HardLock.StopBridgesAt(HardLock.ServiceExe, Environment.ProcessId); // לא הורגים את השירות עצמו לפני שהפעיל את המחיקה
+            HardLock.StopBridgesAt(HardLock.ServiceExe, clientPid); // (StopBridgesAt כבר מדלג על התהליך הקורא) לא הורגים את השירות עצמו לפני שהפעיל את המחיקה
             // מחיקת הקבצים אחרי שהשירות ייעצר
             Process.Start(new ProcessStartInfo("cmd.exe",
-                $"/c ping -n 6 127.0.0.1 >nul & rmdir /s /q \"{HardLock.ProgDir}\" & rmdir /s /q \"{HardLock.DataDir}\"")
+                $"/c ping -n 6 127.0.0.1 >nul & rmdir /s /q \"{HardLock.ProgDir}\" & rmdir /s /q \"{HardLock.DataDir}\" & ping -n 8 127.0.0.1 >nul & rmdir /s /q \"{HardLock.ProgDir}\"")
                 { CreateNoWindow = true, UseShellExecute = false });
         }
         catch (Exception ex) { HardLock.SvcLog("uninstall: " + ex.Message); }

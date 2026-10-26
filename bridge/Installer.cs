@@ -156,7 +156,7 @@ public static class Installer
             var st = UpdateRollback.Load(UpdateRollback.DefaultRoot);
             if (st == null || !string.Equals(st.NewSha, InstallTrust.SelfSha256(), StringComparison.OrdinalIgnoreCase)) return;
             var v = UpdateRollback.Watch(UpdateRollback.DefaultRoot, InstalledExe, UpdateRollback.DefaultTimeoutSec, () => DateTime.UtcNow, Thread.Sleep,
-                stopNew: StopOtherInstances,
+                stopNew: () => StopOtherInstances(),
                 startOld: () => Process.Start(new ProcessStartInfo(InstalledExe, "--background") { UseShellExecute = false, WorkingDirectory = Config.Dir }));
             if (v == UpdateRollback.Verdict.Rollback) Environment.ExitCode = 4;
         }
@@ -264,7 +264,15 @@ public static class Installer
         finally { Marshal.FinalReleaseComObject(link); }
     }
 
-    private static void StopOtherInstances()
+    /// <summary>
+    /// WHY (באג VM, שורש "השירות קורס בהסרה"): הלולאה הזו הרגה כל OtzariaBridge.exe, כולל תהליך השירות עצמו (אותו exe, session 0):
+    /// מנהל מורם הרג אותו ישירות, ולא-מנהל קיבל Access denied ואז stop-bridges שגם הוא הרג את השירות. השירות מת באמצע SelfUninstall,
+    /// SCM הפעיל אותו מחדש וההקשחה חזרה. בהסרה (keepService) תהליך של session 0 לא נוגעים בו - הוא מסיים את עצמו.
+    /// </summary>
+    internal static bool ShouldKill(int pid, int sessionId, int selfPid, bool keepService) =>
+        pid != selfPid && !(keepService && sessionId == 0);
+
+    private static void StopOtherInstances(bool keepService = false)
     {
         int self = Environment.ProcessId;
         // גשר שהשירות הפעיל מוגן מהריגה ע"י המשתמש (DACL) כל עוד הנעילה נאכפת. כשהיא לא נאכפת הוא משחרר את ההגנה בתוך ~5 שניות
@@ -274,14 +282,15 @@ public static class Installer
             bool denied = false;
             foreach (var p in Process.GetProcessesByName("OtzariaBridge"))
             {
-                if (p.Id == self) continue;
+                int sid = 0; try { sid = p.SessionId; } catch { }
+                if (!ShouldKill(p.Id, sid, self, keepService)) continue;
                 try { p.Kill(); p.WaitForExit(3000); }
                 catch (System.ComponentModel.Win32Exception) { denied = true; }
                 catch { }
             }
             if (!denied) return;
             // גשר שהשירות הפעיל מוגן מהריגה: בקשה מאומתת לשירות (הוא עצמו הורג), מותרת רק כשהנעילה לא נאכפת
-            HardLock.Call(new System.Text.Json.Nodes.JsonObject { ["op"] = "stop-bridges" });
+            if (!keepService || attempt == 0) HardLock.Call(new System.Text.Json.Nodes.JsonObject { ["op"] = "stop-bridges" });
             Thread.Sleep(2000);
         }
     }
@@ -313,17 +322,37 @@ public static class Installer
         try { foreach (var f in Directory.GetFiles(Config.Dir, "OtzariaBridge.exe*.old")) try { File.Delete(f); } catch { } } catch { }
     }
 
+    /// <summary>מחכה עד שהשירות נמחק (או לא היה). null = נמחק/לא קיים; אחרת שגיאה</summary>
+    private static string WaitServiceGone()
+    {
+        try
+        {
+            if (!HardLock.ServiceInstalled()) return null;
+            for (int i = 0; i < 480; i++) // עד ~4 דקות: שחרור WinRE/bcdedit איטי
+            {
+                Thread.Sleep(500);
+                if (!HardLock.ServiceInstalled()) return null;
+            }
+            return "השירות לא הוסר בזמן (ייתכן ששחרור הקשחת האתחול נכשל). פרטים ב-" + Path.Combine(HardLock.DataDir, "service.log") + "; אפשר להריץ שוב --uninstall";
+        }
+        catch { return null; }
+    }
+
     /// <summary>מחזיר הודעת שגיאה, או null בהצלחה</summary>
     public static string Uninstall(string password)
     {
         HandleLock.Release(); // X3: אחרת תיקיית הנתונים/ה-exe נעולים למחיקה (ר' HandleLock)
         // רכיב ההקשחה (אם מותקן) מוסר קודם, עם אותה סיסמה
+        bool hadService = HardLock.ServiceInstalled();
         string herr = HardLock.UninstallWithPassword(password);
         if (herr != null) return herr;
-        string err = Kiosk.ReleaseForUninstall(password);
+        string err = Kiosk.ReleaseForUninstall(password, alreadyVerified: hadService);
         if (err != null) return err;
 
-        StopOtherInstances();
+        // WHY: ההסרה בשירות אסינכרונית; ממתינים שתסתיים (ומאמתים) במקום להכריז הצלחה לפני הזמן
+        string werr = WaitServiceGone();
+        if (werr != null) return werr;
+        StopOtherInstances(keepService: true);
         using (var k = Registry.CurrentUser.OpenSubKey(RunKey, true)) k?.DeleteValue(RunValue, false);
         PdfAssoc.Remove(); // "פתח באמצעות"
         try { if (File.Exists(ShortcutPath)) File.Delete(ShortcutPath); } catch { }
