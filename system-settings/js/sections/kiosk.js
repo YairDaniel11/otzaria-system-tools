@@ -312,7 +312,8 @@
         '<p>רשמו אותו על דף ושמרו במקום בטוח, <b>לא ליד המחשב</b>. אם תשכחו את הסיסמה, אפשר לבטל את הנעילה עם הקוד הזה בחלון „ביטול נעילה”, או מחלון פקודה:</p>' +
         '<code class="cmd" dir="ltr">OtzariaBridge.exe --unlock ' + ui.esc(code) + '</code>' +
         '<p><b>חובה לשמור את הקוד לפני הפעלת הנעילה:</b></p><div class="row-actions full">' +
-        '<button type="button" class="btn btn-tonal" data-keep="file">' + ui.icon('download') + 'שמירה לקובץ</button>' +
+        '<select data-keep-drive aria-label="כונן חיצוני"><option value="">טוען כוננים חיצוניים…</option></select>' +
+        '<button type="button" class="btn btn-tonal" data-keep="file" disabled>' + ui.icon('download') + 'שמירה לכונן חיצוני</button>' +
         '<button type="button" class="btn btn-tonal" data-keep="print">' + ui.icon('edit') + 'הדפסה</button></div>',
       fields: [{ name: 'ack', type: 'checkbox', label: 'שמרתי/הדפסתי את הקוד והוא במקום בטוח' }],
       actions: [{ label: 'סיום', value: true, kind: 'primary' }],
@@ -323,12 +324,28 @@
         btn.disabled = true; cb.disabled = true;
         cb.addEventListener('change', function () { btn.disabled = !(cb.checked && kept); });
         /* סבב G (9): שמירה לקובץ או הדפסה — חובה לפני שאפשר לסיים (וגם לפני הפעלת נעילה, נאכף בגשר) */
+        var sel = form.querySelector('[data-keep-drive]');
+        var fileBtn = form.querySelector('[data-keep=file]');
+        /* שמירה לקובץ רק לכונן נשלף (אין עותק במחשב); הגשר מאמת שוב */
+        function loadDrives() {
+          bcall('/sys/usb/list').then(function (d) {
+            var drives = (d && d.drives) || [];
+            var cur = sel.value;
+            sel.innerHTML = drives.length
+              ? drives.map(function (x) { return '<option value="' + ui.esc(x.letter) + '\\">' + ui.esc(x.letter + ' ' + (x.label || x.model || 'כונן חיצוני')) + '</option>'; }).join('')
+              : '<option value="">לא נמצא כונן חיצוני — חברו כונן והמתינו רגע</option>';
+            if (cur) sel.value = cur;
+            fileBtn.disabled = !drives.length;
+          }, function () { sel.innerHTML = '<option value="">רשימת הכוננים לא זמינה</option>'; fileBtn.disabled = true; });
+        }
+        loadDrives();
+        var drvTimer = setInterval(function () { if (!form.isConnected) clearInterval(drvTimer); else loadDrives(); }, 4000);
         form.querySelectorAll('[data-keep]').forEach(function (kb) {
           kb.addEventListener('click', function () {
             var mode = kb.getAttribute('data-keep');
-            bcall('/kiosk/recovery/keep', { code: code, mode: mode }).then(function (r) {
+            bcall('/kiosk/recovery/keep', { code: code, mode: mode, dir: mode === 'file' ? sel.value : undefined }).then(function (r) {
               kept = true; cb.disabled = false;
-              ui.toast(mode === 'print' ? 'נשלח להדפסה' : 'נשמר: ' + ((r && r.path) || 'מסמכים'), 'success');
+              ui.toast(mode === 'print' ? 'נשלח להדפסה' : 'נשמר: ' + ui.isolateLtr((r && r.path) || ''), 'success');
             }, function (err) { ui.toast(friendlyErr(err), 'error'); });
           });
         });

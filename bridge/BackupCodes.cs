@@ -157,7 +157,7 @@ internal static class BackupCodes
     internal static string ResolveMode(string mode) => (mode ?? "").Trim().ToLowerInvariant() switch { "print" => "print", "file" => "file", _ => "none" };
 
     /// <summary>תיקיית יעד מאושרת לקובץ קודים: רק שורש/תיקיה על כונן נשלף קיים. null = לא מאושר. typeOf מקבל שורש כונן ("E:\")</summary>
-    internal static string RemovableTarget(string dir, Func<string, DriveType> typeOf)
+    internal static string RemovableTarget(string dir, Func<string, DriveType> typeOf, Func<string, bool> isReparse = null)
     {
         if (string.IsNullOrWhiteSpace(dir)) return null;
         try
@@ -165,9 +165,24 @@ internal static class BackupCodes
             string full = Path.GetFullPath(dir);
             string root = Path.GetPathRoot(full);
             if (string.IsNullOrEmpty(root) || root.StartsWith(@"\\", StringComparison.Ordinal)) return null;
-            return typeOf(root) == DriveType.Removable ? full : null;
+            if (typeOf(root) != DriveType.Removable) return null;
+            // junction / symlink / reparse point בכל רכיב בדרך (מהשורש עד היעד) יכול להפנות לכונן קבוע — נדחה
+            isReparse ??= DefaultIsReparse;
+            string cur = root;
+            foreach (var part in full.Substring(root.Length).Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                cur = Path.Combine(cur, part);
+                if (isReparse(cur)) return null;
+            }
+            return full;
         }
         catch { return null; }
+    }
+
+    private static bool DefaultIsReparse(string path)
+    {
+        try { return Directory.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0; }
+        catch { return true; }
     }
 
     private static string WriteFile(string[] codes, string dir)

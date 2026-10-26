@@ -326,7 +326,7 @@
       for (var i = 0; i < 10; i++) { var c = ''; for (var j = 0; j < 12; j++) c += A.charAt(Math.floor(Math.random() * A.length)); M.backup.push(c.replace(/(.{4})(?=.)/g, '$1-')); }
       return { ok: true, codes: M.backup.slice(), path: 'Documents\\אחת שאלתי - קודי גיבוי לשחזור.txt', left: 10 };
     },
-    '/kiosk/recovery/keep': function () { return { ok: true, path: 'Documents\\אחת שאלתי - קוד שחזור.txt' }; },
+    '/kiosk/recovery/keep': function () { return { ok: true, path: 'E:\\אחת שאלתי - קוד שחזור.txt' }; },
     '/kiosk/enable': function (b) {
       if (!M.kiosk.hasPassword) throw mockErr('bad_request', 'יש להגדיר סיסמה תחילה');
       checkPw(b.password, false);

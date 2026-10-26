@@ -133,6 +133,23 @@ public class QaFinalATests : IDisposable
         Assert.Null(BackupCodes.RemovableTarget("   ", _ => DriveType.Removable));
     }
 
+    [Fact]
+    public void RemovableTarget_rejects_reparse_points_and_fixed_drives()
+    {
+        Assert.Null(BackupCodes.RemovableTarget(@"E:\link\x", _ => DriveType.Removable, p => p.EndsWith("link", StringComparison.OrdinalIgnoreCase)));
+        Assert.Equal(Path.GetFullPath(@"E:\a\b"), BackupCodes.RemovableTarget(@"E:\a\b", _ => DriveType.Removable, _ => false));
+        Assert.Equal(Path.GetFullPath(@"E:\"), BackupCodes.RemovableTarget(@"E:\", _ => DriveType.Removable, _ => false));
+        Assert.Null(BackupCodes.RemovableTarget(@"C:\", _ => DriveType.Fixed, _ => false));
+        Assert.Null(BackupCodes.RemovableTarget(@"E:\a\..\..\Windows", _ => DriveType.Fixed, _ => false));
+    }
+
+    [Fact]
+    public void RecoveryKeep_text_has_pretty_code_and_no_path()
+    {
+        string t = PackG.BuildText("ABCD1234EFGH5678");
+        Assert.Contains("ABCD-1234-EFGH-5678", t);
+    }
+
     // ---- #7 נעילה ותפס שחרור ב-BootHardening ----
     private sealed class MiniHost : BootHardening.IBootHost
     {

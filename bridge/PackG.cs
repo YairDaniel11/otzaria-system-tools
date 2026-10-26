@@ -23,32 +23,60 @@ internal static class PackG
 
     public static void MarkNewCode() { Config.Set(SavedKey, false); }
 
-    /// <summary>{ code, mode: "file" | "print" } — שומר את הקוד לקובץ במסמכים (ו/או מדפיס) ומסמן שנשמר</summary>
+    /// <summary>{ code, mode: "file" | "print", dir } — "file" כותב רק לכונן נשלף (dir = שורש/תיקיה בו); "print" דרך קובץ זמני שנמחק. אין עותק קבוע במחשב</summary>
     private static object Keep(JsonElement b)
     {
         string code = (b.Str("code") ?? "").Trim();
         if (!Kiosk.IsRecoveryCode(code)) throw BridgeException.BadRequest(Lang.T("קוד השחזור אינו תואם", "The recovery code doesn't match"));
-        string pretty = string.Join("-", Enumerable.Range(0, (code.Replace("-", "").Length + 3) / 4)
-            .Select(i => code.Replace("-", "").Substring(i * 4, Math.Min(4, code.Replace("-", "").Length - i * 4))));
-        string docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-        string path = Path.Combine(docs, Program.AppName + " - " + Lang.T("קוד שחזור", "recovery code") + ".txt");
-        File.WriteAllText(path,
-            Program.AppName + " — " + Lang.T("קוד שחזור", "recovery code") + "\r\n\r\n" + pretty + "\r\n\r\n" +
+        string mode = (b.Str("mode") ?? "file").Trim().ToLowerInvariant();
+        if (mode != "file" && mode != "print") throw BridgeException.BadRequest(Lang.T("אפשרות שמירה לא מוכרת", "Unknown keep option"));
+        string text = BuildText(code);
+        string path = null;
+        if (mode == "file")
+        {
+            string dir = BackupCodes.RemovableTarget(b.Str("dir"), d => { try { return new DriveInfo(d).DriveType; } catch { return DriveType.Unknown; } });
+            if (dir == null || !Directory.Exists(dir))
+                throw BridgeException.BadRequest(Lang.T("שמירה לקובץ אפשרית רק לכונן חיצוני (נשלף). בחרו כונן מהרשימה, או הדפיסו.", "Saving to a file is possible only to an external (removable) drive. Pick a drive from the list, or print."));
+            path = WriteTo(dir, text);
+            try { Process.Start(new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe"), "/select,\"" + path + "\"") { UseShellExecute = false }); }
+            catch (Exception ex) { Config.Log("recovery keep: " + ex.Message); }
+        }
+        else
+        {
+            string tmpDir = Path.Combine(Path.GetTempPath(), "otzaria-print-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tmpDir);
+            string tmp = WriteTo(tmpDir, text);
+            try { Process.Start(new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "notepad.exe"), "/p \"" + tmp + "\"") { UseShellExecute = false }); }
+            catch (Exception ex) { Config.Log("recovery print: " + ex.Message); }
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                await System.Threading.Tasks.Task.Delay(30_000);
+                try { File.WriteAllText(tmp, new string('*', 512)); } catch { }
+                try { Directory.Delete(tmpDir, true); } catch { }
+            }).Observe("recovery temp cleanup", quiet: true);
+        }
+        Config.Set(SavedKey, true);
+        Config.Save();
+        AdminLog.Add(mode == "print" ? "הדפסת קוד שחזור" : "שמירת קוד שחזור לכונן חיצוני");
+        return new { ok = true, path };
+    }
+
+    private static string WriteTo(string dir, string text)
+    {
+        string path = Path.Combine(dir, Program.AppName + " - " + Lang.T("קוד שחזור", "recovery code") + ".txt");
+        File.WriteAllText(path, text, System.Text.Encoding.UTF8);
+        return path;
+    }
+
+    internal static string BuildText(string code)
+    {
+        string raw = code.Replace("-", "");
+        string pretty = string.Join("-", Enumerable.Range(0, (raw.Length + 3) / 4).Select(i => raw.Substring(i * 4, Math.Min(4, raw.Length - i * 4))));
+        return Program.AppName + " — " + Lang.T("קוד שחזור", "recovery code") + "\r\n\r\n" + pretty + "\r\n\r\n" +
             Lang.T("שמרו את הדף במקום בטוח, לא ליד המחשב.", "Keep this page in a safe place, not next to the computer.") + "\r\n" +
             Lang.T("ביטול נעילה: בחלון \"ביטול נעילה\", או מחלון פקודה:", "To turn off the lock: in the \"Turn off lock\" window, or from a command prompt:") +
             "\r\nOtzariaBridge.exe --unlock " + pretty + "\r\n" +
-            "\r\n" + Lang.T("נוצר: ", "Created: ") + DateTime.Now.ToString("yyyy-MM-dd HH:mm") + "\r\n", System.Text.Encoding.UTF8);
-        string mode = b.Str("mode") ?? "file";
-        try
-        {
-            if (mode == "print") Process.Start(new ProcessStartInfo("notepad.exe", "/p \"" + path + "\"") { UseShellExecute = false });
-            else Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = false });
-        }
-        catch (Exception ex) { Config.Log("recovery keep: " + ex.Message); }
-        Config.Set(SavedKey, true);
-        Config.Save();
-        AdminLog.Add(mode == "print" ? "הדפסת קוד שחזור" : "שמירת קוד שחזור לקובץ");
-        return new { ok = true, path };
+            "\r\n" + Lang.T("נוצר: ", "Created: ") + DateTime.Now.ToString("yyyy-MM-dd HH:mm") + "\r\n";
     }
 
     // ---------- ימי שבוע לזמני נעילה (0 = ראשון … 6 = שבת). רשימה ריקה = כל הימים ----------
