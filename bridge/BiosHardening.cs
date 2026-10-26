@@ -17,7 +17,7 @@ namespace OtzariaBridge;
 ///   - Asus: אין API צרכני כלל (רק ACT, עסקי בלבד, Intel Gen12+ 2022 ואילך) — לא ממומש, רק זיהוי+הסבר.
 ///
 /// כל פעולה מדווחת בכנות: attempted/success/message. לעולם לא "הצלחה" בלי אישור בפועל מה-WMI.
-/// ר' docs/SECURITY_NOTES.md לפירוט מלא של המגבלות (כולל סיכון סיסמה שנשכחה).
+/// למידע על מגבלות - פנו למפתח יאיר דניאל.
 /// </summary>
 public static class BiosHardening
 {
