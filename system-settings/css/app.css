@@ -229,3 +229,44 @@ details.explain-sub[open] > summary { margin-bottom: .5em; }
 .info-group .info-sub { border-top: 1px solid var(--color-outline-variant); padding: .75em 0; }
 .info-group .info-sub:first-of-type { border-top: 0; padding-top: 0; }
 .info-sub-title { font-weight: 700; margin-bottom: .4em; display: flex; align-items: center; gap: .4em; }
+
+/* ---------- לוח "בריאות ההקשחה" ומרכז חירום ----------
+   הרמה מסומנת באייקון ובמילה (לא רק בצבע). --health-warn כהה מספיק לניגודיות AA על רקע בהיר, ובהיר בכהה */
+:root { --health-warn: #8A5300; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --health-warn: #FFB95C; } }
+body.dark-mode { --health-warn: #FFB95C; }
+
+.health-head { display: flex; align-items: center; gap: 1em; padding: .75em 1em; border-radius: var(--radius-md); background: var(--color-surface-container); margin-bottom: .5em; }
+.health-head h3 { font-size: 1.15em; font-weight: 700; }
+.health-big { width: 2.75em; height: 2.75em; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; background: var(--color-surface-container-lowest); }
+.health-big .ic { width: 1.5em; height: 1.5em; }
+.health-head.ok .health-big { color: var(--color-ok); }
+.health-head.warn .health-big { color: var(--health-warn); }
+.health-head.bad { background: var(--color-error-container); color: var(--color-on-error-container); }
+.health-head.bad .health-big { color: var(--color-error); }
+.health-list { list-style: none; margin: 0; padding: 0; }
+.health-row { display: flex; align-items: flex-start; gap: .75em; padding: .6em 0; border-top: 1px solid var(--color-outline-variant); }
+.health-row:first-child { border-top: 0; }
+.health-ic { flex-shrink: 0; margin-top: .1em; display: inline-flex; }
+.health-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .1em; }
+.health-text b { font-weight: 600; }
+.health-badge { flex-shrink: 0; font-size: .8em; font-weight: 700; padding: .1em .7em; border-radius: 99px; white-space: nowrap; }
+.health-row.ok .health-ic, .health-row.ok .health-badge { color: var(--color-ok); }
+.health-row.warn .health-ic, .health-row.warn .health-badge { color: var(--health-warn); }
+.health-row.bad .health-ic, .health-row.bad .health-badge { color: var(--color-error); }
+.health-row.na .health-ic, .health-row.na .health-badge { color: var(--color-on-surface-variant); }
+.health-row .health-badge { background: color-mix(in srgb, currentColor 14%, transparent); }
+.emergency .em-steps { padding-inline-start: 1.4em; display: flex; flex-direction: column; gap: .5em; margin: .75em 0; }
+.emergency .cmd { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
+details.explain-sub > summary:focus-visible, details.field-group > summary:focus-visible, .more-details > summary:focus-visible {
+  outline: none; box-shadow: 0 0 0 .1875em var(--color-surface), 0 0 0 .3125em var(--color-primary); border-radius: var(--radius-sm, 6px);
+}
+@media (max-width: 42.5em) {
+  .health-row { flex-wrap: wrap; }
+  .health-badge { order: 3; margin-inline-start: 2em; }
+  .health-head { padding: .6em .75em; }
+  .emergency .row-actions .btn { flex: 1 1 100%; }
+}
+@media (forced-colors: active) {
+  .health-row.bad .health-badge, .health-row.warn .health-badge { border: 1px solid CanvasText; }
+}
