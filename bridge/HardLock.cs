@@ -1993,7 +1993,7 @@ public class HardLockService : ServiceBase
                     foreach (var n in src)
                     {
                         var parts = (n?.ToString() ?? "").Split('|');
-                        if (parts.Length != 2 || !ValidB64(parts[0]) || !ValidB64(parts[1])) return Err("bad_request", "רשימת קודים לא תקינה");
+                        if (parts.Length != 2 || !ValidB64(parts[0]) || !ValidB64(parts[1].StartsWith("v2$", StringComparison.Ordinal) ? parts[1][3..] : parts[1])) return Err("bad_request", "רשימת קודים לא תקינה");
                         dst.Add(n.ToString());
                     }
                     _state["backupCodes"] = dst;
