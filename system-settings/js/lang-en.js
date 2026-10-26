@@ -4,6 +4,16 @@
   var I = window.I18N;
   var t = function (s) { return I.t(s); };
   I.add({
+    'תיקיות מותרות במצב מוגבל (סמנו את התיקיות שמותר לפתוח):': 'Allowed folders in restricted mode (check the folders that may be opened):',
+    'דקות פתוח אחרי הזנת סיסמה (מצב נעול, בין 1 ל-1440)': 'Minutes open after entering the password (locked mode, 1 to 1440)',
+    'סיסמת מנהל (נדרשת לשמירה)': 'Admin password (required to save)',
+    'יש להקליד את סיסמת המנהל כדי לשמור שינויים': 'Enter the admin password to save changes',
+    'הסייר ייחסם עכשיו לכל מי שאין לו את סיסמת המנהל.': 'The explorer will be blocked now for anyone without the admin password.',
+    'הסייר יחזור להיות פתוח לגמרי, בלי נעילה ובלי הגבלה לתיקיות.': 'The explorer will be fully open again, with no lock and no folder restriction.',
+    'נעילת הסייר': 'Lock the explorer',
+    'כיבוי ההגבלה': 'Turn off restriction',
+    'נעילה': 'Lock',
+    'הפעולה בוטלה, לא בוצע שינוי': 'Cancelled, nothing was changed',
     'הצג את זמני הנעילה בלוח השנה של אוצריא': 'Show lock times in the Otzaria calendar',
     'כל זמני הנעילה המתוזמנים יופיעו כאירועים בלוח השנה של אוצריא לשבוע הקרוב, ויתעדכנו אוטומטית. כיבוי המתג מסיר אותם': 'All scheduled lock times appear as events in the Otzaria calendar for the coming week and update automatically. Turning it off removes them',
     'ייבוא סדרים מקובץ': 'Import sedarim from a file',

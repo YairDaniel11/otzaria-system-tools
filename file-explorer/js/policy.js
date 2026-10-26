@@ -164,12 +164,14 @@
         mode('restricted', 'מוגבל לתיקיות', 'אפשר לעיין, לקרוא ולכתוב רק בתיקיות שנבחרו. כוננים ותיקיות אחרות אינם נגישים') +
         mode('locked', 'נעול עד הזנת סיסמה', 'הסייר לא זמין עד שמזינים את סיסמת המנהל') + '</fieldset>' +
         '<fieldset class="fx-pol-fs" id="fx-pol-roots"><legend>תיקיות מותרות (למצב מוגבל)</legend>' +
+        '<p class="muted small">סמנו את התיקיות שמותר לפתוח. הבחירה חלה רק כשהמצב הוא "מוגבל לתיקיות".</p>' +
         '<div class="fx-pol-list">' + rows.join('') + '</div>' +
         '<div class="fx-pol-add"><input class="input" id="fx-pol-custom" dir="ltr" placeholder="C:\\Users\\Name\\Folder" aria-label="הוספת תיקייה מותאמת">' +
         '<button type="button" class="btn btn-tonal" data-pol="add">הוספת תיקייה</button></div></fieldset>' +
         '<div class="fx-pol-fs"><label class="field fx-pol-min"><span class="field-label">דקות פתוח אחרי הזנת סיסמה (מצב נעול)</span>' +
-        '<input class="input" id="fx-pol-min" type="number" min="1" max="1440" value="' + esc(s.unlockMinutes || 15) + '" dir="ltr"></label></div>' +
-        '<label class="field"><span class="field-label">סיסמת מנהל</span>' +
+        '<input class="input" id="fx-pol-min" type="number" min="1" max="1440" value="' + esc(s.unlockMinutes || 15) + '" dir="ltr" aria-describedby="fx-pol-min-h"></label>' +
+        '<p class="muted small" id="fx-pol-min-h">אחרי הזנת הסיסמה הסייר נשאר פתוח לזמן הזה ונועל את עצמו שוב. בין 1 ל-1440 דקות.</p></div>' +
+        '<label class="field"><span class="field-label">סיסמת מנהל (נדרשת לשמירה)</span>' +
         '<input class="input" id="fx-pol-pw" type="password" dir="ltr" autocomplete="current-password" aria-describedby="fx-pol-err"></label>' +
         '<div class="form-msg" id="fx-pol-err" role="alert" hidden></div>' +
         '<div class="fx-set-actions"><button type="submit" class="btn btn-primary">שמירה</button>' +
@@ -190,9 +192,11 @@
           var v = (inp.value || '').trim().replace(/\//g, '\\').replace(/^"(.*)"$/, '$1');
           if (!/^([A-Za-z]:\\|\\\\)/.test(v)) { showErr('יש להזין נתיב מלא, למשל C:\\Users\\שם\\Desktop'); return; }
           showErr('');
-          if (!list.querySelector('input[data-path="' + v.replace(/"/g, '') + '"]')) list.insertAdjacentHTML('beforeend', rootRow('', v, true));
+          var dup = Array.prototype.find.call(list.querySelectorAll('input[data-path]'), function (x) { return x.dataset.path.toLowerCase() === v.toLowerCase(); });
+          if (dup) dup.checked = true; else list.insertAdjacentHTML('beforeend', rootRow('', v, true));
           inp.value = '';
         } else if (b.dataset.pol === 'lock') {
+          if (!(await FX.ui.confirm('נעילה מיידית', '<p>הסייר ייחסם עכשיו, וכדי לפתוח אותו שוב יצטרכו את סיסמת המנהל.</p>', 'נעילה', 'danger'))) return;
           try { await P.lock(); if (FX.app && FX.app.afterPolicy) await FX.app.afterPolicy(); }
           catch (e) { showErr(FX.errorText(e)); }
         }
@@ -207,12 +211,21 @@
         if (mode === 'restricted' && !roots.length) { showErr('במצב מוגבל יש לבחור לפחות תיקייה אחת'); return; }
         var minutes = parseInt(form.querySelector('#fx-pol-min').value, 10);
         if (!(minutes >= 1 && minutes <= 1440)) { showErr('מספר הדקות חייב להיות בין 1 ל-1440'); return; }
+        if (!form.querySelector('#fx-pol-pw').value) { showErr('יש להקליד את סיסמת המנהל כדי לשמור שינויים'); return; }
+        if (mode !== (state && state.mode || 'off')) {
+          var msgs = {
+            locked: ['נעילת הסייר', '<p>הסייר ייחסם עכשיו לכל מי שאין לו את סיסמת המנהל.</p>', 'נעילה'],
+            off: ['כיבוי ההגבלה', '<p>הסייר יחזור להיות פתוח לגמרי, בלי נעילה ובלי הגבלה לתיקיות.</p>', 'כיבוי'],
+            restricted: ['הגבלה לתיקיות', '<p>הסייר יאפשר גישה רק לתיקיות שסימנתם ברשימה.</p>', 'הגבלה']
+          }[mode];
+          if (msgs && !(await FX.ui.confirm(msgs[0], msgs[1], msgs[2], mode === 'off' ? 'danger' : undefined))) return;
+        }
         var btn = form.querySelector('button[type=submit]');
         btn.disabled = true;
         try {
           await P.set({ password: form.querySelector('#fx-pol-pw').value, mode: mode, roots: roots, unlockMinutes: minutes });
           form.querySelector('#fx-pol-pw').value = '';
-          FX.ui && FX.ui.toast('מדיניות הסייר נשמרה', 'success');
+          FX.ui && FX.ui.toast(mode === 'locked' ? 'הסייר ננעל. מעכשיו נדרשת סיסמה כדי לפתוח אותו' : mode === 'restricted' ? 'הסייר הוגבל לתיקיות שנבחרו' : 'ההגבלה כובתה, הסייר פתוח', 'success');
           root.innerHTML = P.editorHtml();
           P.bindEditor(root);
           if (FX.app && FX.app.afterPolicy) await FX.app.afterPolicy();

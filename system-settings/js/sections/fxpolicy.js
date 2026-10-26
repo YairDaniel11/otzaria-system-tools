@@ -24,16 +24,16 @@
     roots.forEach(function (r) { if (!cand.some(function (c) { return c.path.toLowerCase() === r.toLowerCase(); })) cand.push({ name: '', path: r }); });
     var fields = [
       { name: 'mode', label: 'מצב הסייר', type: 'select', value: st.mode || 'off', options: MODES.map(function (m) { return { value: m[0], label: m[1] }; }) },
-      { type: 'note', label: 'תיקיות מותרות במצב מוגבל:' }
+      { type: 'note', label: 'תיקיות מותרות במצב מוגבל (סמנו את התיקיות שמותר לפתוח):' }
     ];
     cand.forEach(function (c, i) {
-      fields.push({ name: 'r' + i, type: 'checkbox', label: (c.name ? c.name + ' — ' : '') + c.path, value: roots.some(function (r) { return r.toLowerCase() === c.path.toLowerCase(); }) });
+      fields.push({ name: 'r' + i, type: 'checkbox', label: ui.esc((c.name ? c.name + ' — ' : '') + c.path), value: roots.some(function (r) { return r.toLowerCase() === c.path.toLowerCase(); }) });
     });
     fields.push({ name: 'extra', label: 'תיקייה נוספת (נתיב מלא, לא חובה)', dir: 'ltr', placeholder: 'D:\\לימוד' });
-    fields.push({ name: 'min', label: 'דקות פתיחה בסיסמה', value: String(st.unlockMinutes || 15), dir: 'ltr' });
+    fields.push({ name: 'min', label: 'דקות פתוח אחרי הזנת סיסמה (מצב נעול, בין 1 ל-1440)', value: String(st.unlockMinutes || 15), dir: 'ltr' });
     /* C5: הועבר מהגדרות הנעילה הכלליות */
     fields.push({ name: 'xls', type: 'checkbox', label: 'אפשור צפייה בקובצי ‪Excel (xlsx)‬ בסייר הקבצים', value: !!ks.allowExcelDocs, hint: 'ברירת מחדל: בסייר הקבצים אפשר לצפות ולפתוח רק מסמכי Word. מצגות PowerPoint חסומות תמיד ואין אפשרות להתיר אותן; סימון כאן מתיר גם גיליונות Excel' });
-    fields.push({ name: 'pw', label: 'סיסמת נעילה', type: 'password', dir: 'ltr' });
+    fields.push({ name: 'pw', label: 'סיסמת מנהל (נדרשת לשמירה)', type: 'password', dir: 'ltr' });
     body.innerHTML = '<div class="card"><div class="card-title">נעילת סייר הקבצים</div>' +
       '<p class="muted">אותן הגדרות שבסייר הקבצים: מה מותר לגלוש בסייר. מצב נוכחי: ' + (function (m) { return m === 'locked' ? '<span class="pol-state bad"><i></i>נעול</span>' : m === 'restricted' ? '<span class="pol-state mid"><i></i>מוגבל לתיקיות שנבחרו</span>' : '<span class="pol-state ok"><i></i>פתוח</span>'; })(st.effective || st.mode) + '</p>' +
       '<p><button class="btn" type="button" data-act="open-fx">' + ui.icon('lock') + 'פתיחת הגדרות הנעילה בסייר הקבצים</button></p><div data-slot="f"></div></div>';
@@ -44,7 +44,7 @@
     await ui.inlineForm(body.querySelector('[data-slot=f]'), {
       fields: fields,
       validate: function (x) {
-        if (!x.pw) return 'יש להקליד את סיסמת הנעילה';
+        if (!x.pw) return 'יש להקליד את סיסמת המנהל כדי לשמור שינויים';
         if (!(+x.min >= 1 && +x.min <= 1440)) return 'מספר הדקות חייב להיות בין 1 ל-1440';
         if (x.extra.trim() && !/^([A-Za-z]:\\|\\\\)/.test(x.extra.trim())) return 'יש להזין נתיב מלא';
         return '';
@@ -53,6 +53,10 @@
         var sel = cand.filter(function (c, i) { return x['r' + i]; }).map(function (c) { return c.path; });
         if (x.extra.trim()) sel.push(x.extra.trim().replace(/\//g, '\\'));
         if (x.mode === 'restricted' && !sel.length) throw new Error('במצב מוגבל יש לבחור לפחות תיקייה אחת');
+        if (x.mode !== (st.mode || 'off')) {
+          var warn = { locked: 'הסייר ייחסם עכשיו לכל מי שאין לו את סיסמת המנהל.', off: 'הסייר יחזור להיות פתוח לגמרי, בלי נעילה ובלי הגבלה לתיקיות.' }[x.mode];
+          if (warn && !(await ui.confirm(x.mode === 'locked' ? 'נעילת הסייר' : 'כיבוי ההגבלה', '<p>' + warn + '</p>', x.mode === 'locked' ? 'נעילה' : 'כיבוי', x.mode === 'off' ? 'danger' : undefined))) throw new Error('הפעולה בוטלה, לא בוצע שינוי');
+        }
         await SS.bridge.call('/fs/policy/set', { password: x.pw, mode: x.mode, roots: sel, unlockMinutes: +x.min });
         if (!!x.xls !== !!ks.allowExcelDocs) await SS.bridge.call('/kiosk/settings', { password: x.pw, allowExcelDocs: !!x.xls });
       }

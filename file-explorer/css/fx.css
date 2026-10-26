@@ -520,6 +520,14 @@ mark.fx-hit.cur { background: var(--color-tertiary-container); color: var(--colo
 .fx-pol-add { display: flex; gap: 0.5em; flex-wrap: wrap; margin-top: 0.375em; }
 .fx-pol-add .input { flex: 1 1 14em; width: auto; }
 .fx-pol-min { max-width: 14em; }
+@media (max-width: 30em) {
+  .fx-lock { padding: 0.75em; }
+  .fx-lock-card { padding: 1.125em 1em 1.25em; }
+  .fx-pol-fs { padding: 0.375em 0.625em 0.625em; }
+  .fx-pol-min { max-width: none; }
+  .fx-pol .fx-set-actions { flex-wrap: wrap; }
+  .fx-pol-add .btn { flex: 1 1 100%; }
+}
 
 /* חבילה [ב]: פס מקום בכוננים */
 .fx-dbar { display: block; height: 6px; border-radius: 3px; background: var(--fx-line); overflow: hidden; margin-bottom: 2px; }

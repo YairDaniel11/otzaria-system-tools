@@ -214,6 +214,10 @@
       permission_denied: 'חסרה הרשאה מתאימה לתוסף'
     };
     var code = String(err.code || '').replace(/^error\./, '');
+    /* שגיאות גולמיות מהגשר (503 / fail-closed וכד') - לא מציגים למנהל כמו שהן */
+    if (/fail[-_ ]?closed|\b50[0-9]\b|service unavailable|ECONN|Failed to fetch|NetworkError/i.test(String(err.message || '') + ' ' + code)) {
+      return 'לא ניתן לאמת כרגע את מצב הנעילה, ולכן הפעולה נחסמה לביטחון. נסו שוב בעוד רגע; אם זה נמשך, הפעילו מחדש את "אחת שאלתי".';
+    }
     var en = window.I18N && window.I18N.isEn() && map[code];
     if (err.message && !/^[a-z_.]+$/.test(err.message) && !en) return err.message;
     return map[code] || err.message || 'שגיאה לא ידועה';
