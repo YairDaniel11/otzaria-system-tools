@@ -469,8 +469,7 @@ internal static class AppTrust
             int hr = WinVerifyTrust(new IntPtr(-1), GenericVerifyV2, ref wd);
             // [r1] רוב קבצי System32 חתומים בקטלוג ולא בחתימה משובצת: בלי זה "חתימת Microsoft תקפה" נכשלת ל-svchost/ctfmon וכו'
             if (hr != 0) return ComputeCatalogSignature(path);
-            using var cert = new X509Certificate2(X509Certificate.CreateFromSignedFile(path));
-            return new SigInfo(true, cert.Subject ?? "");
+            return SubjectIfMachineTrusted(path);
         }
         catch { return SigInfo.None; }
         finally
@@ -478,6 +477,41 @@ internal static class AppTrust
             if (pFile != IntPtr.Zero) Marshal.FreeHGlobal(pFile);
             Marshal.FreeHGlobal(pPath);
         }
+    }
+
+    /// <summary>
+    /// WHY (QA-B 4): WinVerifyTrust רץ בהרשאות המשתמש ולכן סומך גם על שורשי HKCU (משתמש רגיל יכול להוסיף שורש CA לרישום שלו, להנפיק אישור
+    /// "O=Microsoft Corporation" ולחתום קובץ). לכן אחרי שהחתימה אומתה דורשים שגם שרשרת האישור שממנו נלקח ה-Subject תסתיים בשורש מחנות
+    /// LocalMachine\Root (שרק מנהל כותב אליה), ולא מ-CurrentUser. המגבלה שנשארת (מתועדת): ה-Subject נשלף מהחתימה הראשונה בקובץ.
+    /// </summary>
+    private static SigInfo SubjectIfMachineTrusted(string signedFile)
+    {
+        using var cert = new X509Certificate2(X509Certificate.CreateFromSignedFile(signedFile));
+        var extra = new X509Certificate2Collection();
+        try { extra.Import(signedFile); } catch { }   // אישורי הביניים המשובצים בחתימה (בלי רשת)
+        return ChainsToMachineRoot(cert, extra) ? new SigInfo(true, cert.Subject ?? "") : SigInfo.None;
+    }
+
+    /// <summary>השרשרת של האישור מסתיימת בשורש שנמצא ב-LocalMachine\Root (לא CurrentUser). בלי רשת, בלי בדיקת תוקף זמן (חתימות ישנות עם חותמת זמן)</summary>
+    internal static bool ChainsToMachineRoot(X509Certificate2 cert, X509Certificate2Collection extra = null)
+    {
+        try
+        {
+            using var machine = new X509Store(StoreName.Root, StoreLocation.LocalMachine);
+            machine.Open(OpenFlags.ReadOnly | OpenFlags.OpenExistingOnly);
+            using var chain = new X509Chain();
+            var pol = chain.ChainPolicy;
+            pol.TrustMode = X509ChainTrustMode.CustomRootTrust;
+            pol.CustomTrustStore.AddRange(machine.Certificates);
+            pol.RevocationMode = X509RevocationMode.NoCheck;
+            pol.UrlRetrievalTimeout = TimeSpan.FromSeconds(2);
+            pol.DisableCertificateDownloads = true;
+            pol.VerificationFlags = X509VerificationFlags.IgnoreNotTimeValid | X509VerificationFlags.IgnoreCtlNotTimeValid
+                | X509VerificationFlags.IgnoreNotTimeNested | X509VerificationFlags.IgnoreWrongUsage;
+            if (extra != null) pol.ExtraStore.AddRange(extra);
+            return chain.Build(cert);
+        }
+        catch { return false; }
     }
 
     // ---------- חתימת קטלוג (קבצי Windows) ----------
@@ -541,8 +575,7 @@ internal static class AppTrust
                 if (WinVerifyTrust(new IntPtr(-1), GenericVerifyV2, ref wd) != 0) return SigInfo.None;
             }
             finally { hashPin.Free(); }
-            using var cert = new X509Certificate2(X509Certificate.CreateFromSignedFile(ci.wszCatalogFile));
-            return new SigInfo(true, cert.Subject ?? "");
+            return SubjectIfMachineTrusted(ci.wszCatalogFile);
         }
         catch { return SigInfo.None; }
         finally

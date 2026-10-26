@@ -88,25 +88,30 @@ internal static class AccessibilityPolicy
         try
         {
             using var k = Registry.CurrentUser.CreateSubKey(SaveKey);
-            bool saved = k.GetValue("saved") != null;
-            foreach (var f in Features)
-            {
-                uint? cur = Get(f, false, 0);
-                if (cur == null) continue;
-                if (!saved) k.SetValue("a_" + f, NeedsDisable(cur.Value) ? 1 : 0, RegistryValueKind.DWord);
-                if (NeedsDisable(cur.Value)) Get(f, true, WithoutHotkey(cur.Value));
-            }
             using var p = Registry.CurrentUser.CreateSubKey(ExplorerPolicy);
-            foreach (var (name, val) in PolicyValues)
+            bool saved = k.GetValue("saved") != null;
+            // WHY (QA-B 8): כל המקורות + סימון saved נכתבים לפני שמשנים משהו. בעבר saved נכתב אחרון: חריגה באמצע (או קריסה אחרי NoWinKeys=1)
+            // השאירה הפעלה הבאה לרשום את ערכי הנעילה כ"מקור", והמקשים נשארו כבויים לצמיתות
+            if (!saved)
             {
-                if (!saved)
+                foreach (var f in Features)
+                {
+                    uint? cur = Get(f, false, 0);
+                    if (cur != null) k.SetValue("a_" + f, NeedsDisable(cur.Value) ? 1 : 0, RegistryValueKind.DWord);
+                }
+                foreach (var (name, _) in PolicyValues)
                 {
                     object o = p.GetValue(name);
                     k.SetValue("p_" + name, o is int i ? i : -1, RegistryValueKind.DWord);   // -1 = לא היה קיים
                 }
-                p.SetValue(name, val, RegistryValueKind.DWord);
+                k.SetValue("saved", 1, RegistryValueKind.DWord);
             }
-            k.SetValue("saved", 1, RegistryValueKind.DWord);
+            foreach (var f in Features)
+            {
+                uint? cur = Get(f, false, 0);
+                if (cur != null && NeedsDisable(cur.Value)) Get(f, true, WithoutHotkey(cur.Value));
+            }
+            foreach (var (name, val) in PolicyValues) p.SetValue(name, val, RegistryValueKind.DWord);
         }
         catch (Exception ex) { Config.Log("accessibility policy apply: " + ex.Message); }
     }
@@ -118,7 +123,16 @@ internal static class AccessibilityPolicy
         {
             using (var k = Registry.CurrentUser.OpenSubKey(SaveKey, true))
             {
-                if (k == null || k.GetValue("saved") == null) return;
+                if (k == null) return;
+                if (k.GetValue("saved") == null)
+                {
+                    // בלי מקור שמור (השורד של כשל ישן): מוחקים רק ערכי מדיניות שזהים לשלנו, כדי שלא יישארו כבויים לצמיתות
+                    using var p0 = Registry.CurrentUser.OpenSubKey(ExplorerPolicy, true);
+                    if (p0 != null)
+                        foreach (var (name, val) in PolicyValues)
+                            if (p0.GetValue(name) is int c0 && c0 == val) p0.DeleteValue(name, false);
+                    return;
+                }
                 foreach (var f in Features)
                 {
                     bool was = k.GetValue("a_" + f) is int a && a != 0;

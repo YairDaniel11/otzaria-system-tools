@@ -386,6 +386,18 @@ public static class FsGuard
         return i < len && h[i] == '<';
     }
 
+    /// <summary>יעד hyperlink בטוח: רק http/https/mailto/tel (לא file:, UNC, ms-*, search-ms וכו'). ריק/עוגן פנימי (#) מותר</summary>
+    internal static bool IsSafeHyperlinkTarget(string target)
+    {
+        string t = (target ?? "").Trim();
+        if (t.Length == 0 || t[0] == '#') return true;
+        if (t.StartsWith(@"\\", StringComparison.Ordinal) || t.StartsWith("//", StringComparison.Ordinal)) return false;
+        int c = t.IndexOf(':');
+        if (c < 0) return true;   // יחסי (שם קובץ/תיקייה): לא נטען מרחוק
+        string scheme = t[..c].ToLowerInvariant();
+        return scheme is "http" or "https" or "mailto" or "tel";
+    }
+
     private static string InspectRels(XmlReader r, string n)
     {
         while (r.Read())
@@ -394,7 +406,8 @@ public static class FsGuard
             if (IsRiskyContentType(Attr(r, "Type"))) return "המסמך מפנה לרכיב מאקרו/מוטבע (" + n + ")";
             if (!(Attr(r, "TargetMode") ?? "").Trim().Equals("External", StringComparison.OrdinalIgnoreCase)) continue;
             // קישור רגיל (hyperlink) מותר: נפתח רק בלחיצה. כל משאב חיצוני אחר נטען אוטומטית (תבנית, תמונה, OLE)
-            if ((Attr(r, "Type") ?? "").EndsWith("/hyperlink", StringComparison.OrdinalIgnoreCase)) continue;
+            // QA-B 11: אבל לא לכל סכמה (ms-msdt:, search-ms:, ms-settings:, file://\שרת = דליפת NTLM). רק http/https/mailto/tel
+            if ((Attr(r, "Type") ?? "").EndsWith("/hyperlink", StringComparison.OrdinalIgnoreCase) && IsSafeHyperlinkTarget(Attr(r, "Target"))) continue;
             return "המסמך מפנה למשאב חיצוני/תבנית מרוחקת (" + n + ")";
         }
         return null;

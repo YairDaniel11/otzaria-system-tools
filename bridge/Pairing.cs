@@ -217,13 +217,17 @@ public static class Pairing
         return null;
     }
 
+    private static DateTime _nextDialogAt = DateTime.MinValue;
+
     public static async Task<object> Request(JsonElement b, int remotePort = 0)
     {
         string client = (b.Str("client") ?? "").Trim();
         string name = (b.Str("name") ?? client).Trim();
         string caller = null; try { if (remotePort > 0) caller = CallerProcess(remotePort); } catch { }
-        Config.Log("pair/request מ-" + (caller ?? "לא ידוע") + ": " + client);
+        // WHY (QA-B 9): הבקשה פתוחה לכל תהליך מקומי; הרישום קודם לבדיקת אורך/תווים אפשר הזרקת שורות ליומן ו-16KB לשורה. קודם בודקים ומנקים
         if (client.Length == 0 || client.Length > 60) throw BridgeException.BadRequest("שדה client חסר או ארוך מדי");
+        if (client.Any(char.IsControl)) throw BridgeException.BadRequest("שדה client מכיל תווים לא חוקיים");
+        Config.Log("pair/request מ-" + (caller ?? "לא ידוע") + ": " + client);
         name = new string(name.Where(ch => !char.IsControl(ch)).ToArray()); // בלי שורות חדשות/תווי בקרה בחלון האישור
         if (name.Length > 60) name = name[..60];
         if (caller != null) name += " (" + caller + ")";
@@ -234,6 +238,10 @@ public static class Pairing
             throw new BridgeException("busy", "חלון אישור אחר כבר פתוח במחשב", 409);
         try
         {
+            // הגבלת קצב: חלון TopMost חדש לכל היותר פעם ב-10 שניות (גם אחרי פקיעה, לא רק אחרי דחייה), כדי שתהליך לא יכסה את אוצריא שוב ושוב
+            if (!AutoApproveOpen && DateTime.UtcNow < _nextDialogAt)
+                throw new BridgeException("too_many", "בקשות צימוד תכופות מדי. נסו שוב בעוד רגע", 429);
+            _nextDialogAt = DateTime.UtcNow.AddSeconds(10);
             bool approved = AutoApproveOpen || await PairDialog.AskAsync(name, Kiosk.IsActive);
             if (!approved)
             {

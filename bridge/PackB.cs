@@ -109,6 +109,7 @@ public static class PackB
             // WHY: בדיקה מראש של כל הרשומות, ודחיית כל הארכיב (fail-closed) לפני שנכתב בייט: פריסה לאב של Startup,
             // zip-slip, נתיב מוחלט/ADS, או רשומה מריצה בנעילה
             CheckZipEntries(zip.Entries.Select(x => x.FullName), dest);
+            CheckZipSize(zip.Entries.Select(x => (x.Length, x.CompressedLength)));
             foreach (var e in zip.Entries)
             {
                 string target = Path.GetFullPath(Path.Combine(dest, e.FullName));
@@ -120,6 +121,25 @@ public static class PackB
             }
         }
         return new { path = dest, files = count };
+    }
+
+    internal const long MaxUnzipBytes = 4L << 30, MaxUnzipRatio = 1000;
+    internal const int MaxUnzipEntries = 50000;
+
+    /// <summary>
+    /// QA-B 15: תקרות חילוץ (פצצת zip ממלאת דיסק גם מתיקייה מותרת): מספר רשומות, גודל כולל מפורק, ויחס דחיסה לרשומה גדולה.
+    /// הגדלים בכותרת ה-zip ניתנים לזיוף כלפי מטה, לכן החילוץ עצמו חותך גם הוא (ExtractToFile כותב רק את הגודל האמיתי; הבדיקה כאן מגבילה את ההצהרה)
+    /// </summary>
+    internal static void CheckZipSize(IEnumerable<(long length, long compressed)> entries)
+    {
+        long total = 0; int n = 0;
+        foreach (var (len, comp) in entries)
+        {
+            if (++n > MaxUnzipEntries) throw BridgeException.Forbidden("הארכיב מכיל יותר מדי קבצים");
+            total += len;
+            if (total > MaxUnzipBytes) throw BridgeException.Forbidden("הארכיב גדול מדי לאחר פריסה");
+            if (len > (64L << 20) && comp > 0 && len / comp > MaxUnzipRatio) throw BridgeException.Forbidden("יחס הדחיסה בארכיב חריג (חשד לפצצת zip)");
+        }
     }
 
     /// <summary>שם רשומה בטוח: יחסי, בלי "..", בלי כונן/ADS (:), בלי נתיב מוחלט/UNC</summary>

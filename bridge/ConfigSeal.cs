@@ -172,6 +172,12 @@ public static class ConfigSeal
         "kiosk.twoFactor", "kiosk.otzariaPath", "kiosk.schedule.enabled", "kiosk.schedule.start", "kiosk.schedule.end", "kiosk.schedule.warn",
     };
 
+    /// <summary>
+    /// מפתחות שנכללים בחתימה רק כשיש להם ערך (QA-B 3). WHY: הוספה ל-SecurityKeys הייתה משנה את הייצוג הקנוני של כל התקנה קיימת
+    /// ופוסלת את החתימה שלה בעדכון (נעילה תקועה); כך config קיים בלי המפתחות האלה נשאר תקף, והוספה ידנית שלהם = אי-התאמה = נסגר.
+    /// </summary>
+    public static readonly string[] OptionalSealedKeys = { "fx.policy.mode", "fx.policy.roots", "fx.policy.unlockMinutes", "kiosk.resetOnShutdown" };
+
     public const string SealKey = "sec.seal";
 
     /// <summary>ייצוג קנוני יציב של ערכי מפתחות האבטחה (ממוין, JSON קומפקטי; מפתח חסר = null)</summary>
@@ -180,6 +186,8 @@ public static class ConfigSeal
         var sb = new StringBuilder("otzaria-config-seal-v1\n");
         foreach (string k in SecurityKeys.OrderBy(x => x, StringComparer.Ordinal))
             sb.Append(k).Append('=').Append(cfg?[k]?.ToJsonString() ?? "null").Append('\n');
+        foreach (string k in OptionalSealedKeys.OrderBy(x => x, StringComparer.Ordinal))   // רק כשקיימים (QA-B 3)
+            if (cfg?[k] is JsonNode v) sb.Append(k).Append('=').Append(v.ToJsonString()).Append('\n');
         return sb.ToString();
     }
 
