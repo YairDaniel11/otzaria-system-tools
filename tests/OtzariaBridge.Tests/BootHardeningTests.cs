@@ -203,4 +203,20 @@ public class BootHardeningTests
         Assert.Equal("bad", BootHardening.BuildFindings(new BootHardening.Posture { SecureBoot = false }).Single(x => x.Id == "secureBoot").Level);
         Assert.Equal("bad", BootHardening.BuildFindings(new BootHardening.Posture { TpmPresent = true, TpmEnabled = false }).Single(x => x.Id == "tpm").Level);
     }
+
+    [Fact]
+    public void Full_release_restores_winre_safeboot_and_recovery_even_without_state()
+    {
+        // מצב אבד: WinRE כבוי, recoveryenabled=No, SafeBoot רשום, ואין קובץ מצב (State=null)
+        var h = new FakeHost { ReEnabled = false };
+        h.Bcd["recoveryenabled"] = "No";
+        h.SafeBoot.Add("Minimal\\" + BootHardening.SafeBootName); h.SafeBoot.Add("Network\\" + BootHardening.SafeBootName);
+        var r = BootHardening.Enforce(h, false, full: true);
+        Assert.False(r.Incomplete);
+        Assert.True(h.ReEnabled);
+        Assert.Equal("Yes", h.Bcd["recoveryenabled"]);
+        Assert.Empty(h.SafeBoot);
+        // idempotent: ריצה שנייה ללא שגיאה
+        Assert.False(BootHardening.Enforce(h, false, full: true).Incomplete);
+    }
 }

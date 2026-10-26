@@ -93,8 +93,9 @@ public static class BootHardening
     /// <summary>
     /// active=true: מחיל הקשחה ורושם מקור. active=false: מחזיר רק רשומות קיימות. בטוח להרצה חוזרת.
     /// </summary>
-    public static Result Enforce(IBootHost host, bool active)
+    public static Result Enforce(IBootHost host, bool active, bool full = false)
     {
+        // full (רק בהסרה מלאה): משחזר גם כשקובץ המצב אבד / הדגלים לא נשמרו (WHY, באג VM: WinRE ו-recoveryenabled=No נשארו אחרי הסרה)
         var res = new Result();
         JsonObject st = LoadState(host);
         bool dirty = false;
@@ -116,7 +117,7 @@ public static class BootHardening
                     if (!ok) { st.Remove(key); dirty = true; }
                 }
             }
-            else if (st[key]?.GetValue<bool>() == true)
+            else if (full || st[key]?.GetValue<bool>() == true)
             {
                 bool ok = !host.SafeBootExists(set, SafeBootName) || (host.SafeBootDelete(set, SafeBootName) && !host.SafeBootExists(set, SafeBootName));
                 res.Steps.Add(new Step { Id = key, Ok = ok, Changed = ok, Message = ok ? "הרישום ב-SafeBoot\\" + set + " הוסר" : "הסרת הרישום מ-SafeBoot\\" + set + " נכשלה (יחזור לנסות)" });
@@ -142,7 +143,7 @@ public static class BootHardening
                 else if (en == false) res.Steps.Add(new Step { Id = "reagentc", Ok = true, Message = "WinRE כבר כבוי" });
                 else res.Steps.Add(new Step { Id = "reagentc", Ok = false, Message = "לא ניתן לקרוא את מצב WinRE (reagentc /info)" });
             }
-            else if (st["reagentcDisabledByUs"]?.GetValue<bool>() == true)
+            else if (st["reagentcDisabledByUs"]?.GetValue<bool>() == true || (full && ParseReagentcEnabled(host.Run("reagentc.exe", "/info")) != true))
             {
                 host.Run("reagentc.exe", "/enable");
                 bool ok = ParseReagentcEnabled(host.Run("reagentc.exe", "/info")) == true;
@@ -153,7 +154,7 @@ public static class BootHardening
         catch (Exception ex) { res.Steps.Add(new Step { Id = "reagentc", Ok = false, Message = "reagentc: " + ex.Message }); }
 
         // --- bcdedit ---
-        EnforceBcd(host, active, st, res, ref dirty);
+        EnforceBcd(host, active, st, res, ref dirty, full);
 
         // בכל מצב: שומרים את סיכום המצב, כדי ש-/bios/status יראה "הקשחה לא הושלמה" כשצריך
         st["incomplete"] = new JsonArray(res.Steps.Where(s => !s.Ok).Select(s => (JsonNode)JsonValue.Create(s.Id + ": " + s.Message)).ToArray());
@@ -164,11 +165,11 @@ public static class BootHardening
         return res;
     }
 
-    private static void EnforceBcd(IBootHost host, bool active, JsonObject st, Result res, ref bool dirty)
+    private static void EnforceBcd(IBootHost host, bool active, JsonObject st, Result res, ref bool dirty, bool full = false)
     {
         var recs = st["bcd"] as JsonObject ?? new JsonObject();
         st["bcd"] = recs;
-        if (!active && recs.Count == 0) return;
+        if (!active && recs.Count == 0 && !full) return;
 
         string enumText;
         try { enumText = host.Run("bcdedit.exe", "/enum {current}"); }
@@ -198,6 +199,14 @@ public static class BootHardening
                 bool ok = string.Equals(now, desired, StringComparison.OrdinalIgnoreCase);
                 res.Steps.Add(new Step { Id = id, Ok = ok, Changed = ok, Message = ok ? name + " הוגדר ל-" + desired + " (מקור: " + (cur ?? "ברירת מחדל") + ")" : name + " לא הוגדר (עכשיו: " + (now ?? "ברירת מחדל") + ")" });
                 if (!ok && !has) { recs.Remove(name); dirty = true; }
+            }
+            else if (!has && full && name == "recoveryenabled" && string.Equals(cur, desired, StringComparison.OrdinalIgnoreCase))
+            {
+                // אין רשומת מקור (המצב אבד): ברירת המחדל של Windows היא Yes
+                host.Run("bcdedit.exe", "/set {current} recoveryenabled Yes");
+                string now = ParseBcdValue(host.Run("bcdedit.exe", "/enum {current}"), name);
+                bool ok = string.Equals(now, "Yes", StringComparison.OrdinalIgnoreCase);
+                res.Steps.Add(new Step { Id = id, Ok = ok, Changed = ok, Message = ok ? name + " הוחזר ל-Yes" : name + " לא הוחזר (יחזור לנסות)" });
             }
             else if (has)
             {
@@ -232,22 +241,26 @@ public static class BootHardening
     // ---------- נקודת הכניסה מהשירות (HardLock.Tick) ----------
 
     private static bool? _lastActive;
+    private static Result _lastResult;
+    /// <summary>תוצאת ההרצה המלאה האחרונה (להסרה: האם השחרור הושלם)</summary>
+    internal static bool LastFullReleaseComplete => _lastResult != null && !_lastResult.Incomplete;
     private static int _ticks;
 
     /// <summary>
     /// נקראת בכל Tick (5 שניות) מהשירות. מריצה אכיפה רק במעבר active, או אחת לכ-5 דקות כאימות חוזר
     /// (מישהו שינה bcdedit/מחק מפתח SafeBoot). לא זורקת חריגה: כשל ברישום ביומן בלבד.
     /// </summary>
-    public static void Enforce(bool active)
+    public static void Enforce(bool active, bool full = false)
     {
         try
         {
-            bool changed = _lastActive != active;
+            bool changed = _lastActive != active || full;
             if (!changed && ++_ticks < 60) return;
             _ticks = 0;
             _lastActive = active;
             var host = new RealHost();
-            var r = Enforce(host, active);
+            var r = Enforce(host, active, full);
+            if (full) { _lastResult = r; }
             if (r.Incomplete) host.Log("boot-hardening: הקשחה לא הושלמה: " + string.Join("; ", r.Steps.Where(s => !s.Ok).Select(s => s.Id)));
             WritePosture(host);
         }

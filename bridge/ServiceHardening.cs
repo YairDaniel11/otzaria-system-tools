@@ -44,8 +44,30 @@ internal static class BridgeProcs
     /// (HardenExisting לא מבטל handle קיים). נעילה נאכפת → נהרגים והשירות מעלה גשר משלו (עם DACL מרגע היצירה).
     /// WHY: DACL שנקבע בדיעבד לא סוגר handle שכבר נפתח; רק תהליך שנולד מוגן בטוח.
     /// </summary>
-    internal static List<ProcInfo> Untrusted(IEnumerable<ProcInfo> procs, string serviceExe, ISet<int> ownPids) =>
-        procs.Where(p => SamePath(p.Path, serviceExe) && !ownPids.Contains(p.Pid)).ToList();
+    /// <summary>
+    /// פטורים (WHY, באג VM): תהליך השירות עצמו (אותו exe, session 0) לא יהרג בלולאת קריסה; ותהליך מורם מאותו נתיב מהימן
+    /// (--unlock/--uninstall בחירום) לא נהרג תוך שניות. מורם = מנהל, ממילא יכול לעקוף. exempt: בדיקה נוספת (למשל מורם)
+    /// </summary>
+    internal static List<ProcInfo> Untrusted(IEnumerable<ProcInfo> procs, string serviceExe, ISet<int> ownPids, Func<ProcInfo, bool> exempt = null) =>
+        procs.Where(p => SamePath(p.Path, serviceExe) && !ownPids.Contains(p.Pid)
+            && p.Pid != Environment.ProcessId && p.Session != 0 && !(exempt?.Invoke(p) ?? false)).ToList();
+
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(IntPtr proc, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetTokenInformation(IntPtr token, int cls, out int info, int len, out int ret);
+
+    /// <summary>האם הטוקן של התהליך מורם (TokenElevation). כשל → false (נחשב לא מורם, כלומר ניתן להריגה)</summary>
+    internal static bool IsElevated(int pid)
+    {
+        IntPtr h = OpenProcess(0x1000, false, pid), tok = IntPtr.Zero;
+        if (h == IntPtr.Zero) return false;
+        try
+        {
+            if (!OpenProcessToken(h, 0x8, out tok)) return false;
+            return GetTokenInformation(tok, 20, out int el, 4, out _) && el != 0;
+        }
+        catch { return false; }
+        finally { if (tok != IntPtr.Zero) CloseHandle(tok); CloseHandle(h); }
+    }
 
     [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]

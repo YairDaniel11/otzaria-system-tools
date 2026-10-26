@@ -1617,12 +1617,15 @@ public static partial class Kiosk
     /// WHY: גשר מוקשח (DACL) לא ניתן להריגה ע"י תהליך המשתמש, וגשר שנשאר רץ מחזיק kiosk.active בזיכרון ונשאר נעול.
     /// לכן מאותתים לו בקובץ סימון (עם הקוד, שהגשר מאמת בעצמו מול השירות/המקומי) והוא משחרר ויוצא; Kill רק כגיבוי לגשרים ישנים.
     /// </summary>
+    private static int SafeSession(Process p) { try { return p.SessionId; } catch { return -1; } }
+
     public static bool EmergencyUnlock(string code)
     {
         if (!EmergencyCodeOk(code, out bool viaBackup)) return false;
         if (viaBackup) BackupCodes.Consume(code);
         int self = Environment.ProcessId;
-        var others = Process.GetProcessesByName("OtzariaBridge").Where(p => p.Id != self).ToList();
+        // WHY: session 0 = תהליך השירות; לא מסמנים/הורגים אותו (הריגתו = קריסת השירות)
+        var others = Process.GetProcessesByName("OtzariaBridge").Where(p => p.Id != self && SafeSession(p) != 0).ToList();
         if (others.Count > 0)
         {
             string marker = EmergencyMarkerPath;

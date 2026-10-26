@@ -121,3 +121,42 @@ public class ServiceHardeningR3Tests
         finally { try { if (Directory.Exists(link)) Directory.Delete(link, false); Directory.Delete(root, true); } catch { } }
     }
 }
+
+public class VmBugfixTests
+{
+    private const string Exe = @"C:\Program Files\OtzariaBridge\OtzariaBridge.exe";
+
+    [Fact]
+    public void Untrusted_never_includes_the_service_itself_or_session0_or_exempt()
+    {
+        var procs = new[]
+        {
+            new ProcInfo(Environment.ProcessId, 1, Exe), // השירות עצמו
+            new ProcInfo(777, 0, Exe),                    // session 0 = שירות
+            new ProcInfo(50, 1, Exe),                     // מורם (חירום)
+            new ProcInfo(60, 1, Exe),                     // גשר משתמש רגיל
+        };
+        var u = BridgeProcs.Untrusted(procs, Exe, new HashSet<int>(), p => p.Pid == 50);
+        Assert.Single(u);
+        Assert.Equal(60, u[0].Pid);
+    }
+
+    [Fact]
+    public void Pipe_backoff_grows_and_logs_sparsely()
+    {
+        Assert.Equal(1000, HardLockService.PipeBackoff.DelayMs(1));
+        Assert.Equal(2000, HardLockService.PipeBackoff.DelayMs(2));
+        Assert.Equal(30000, HardLockService.PipeBackoff.DelayMs(100));
+        int logs = Enumerable.Range(1, 1000).Count(HardLockService.PipeBackoff.ShouldLog);
+        Assert.True(logs <= 11);
+    }
+
+    [Fact]
+    public void Enable_with_bad_path_does_not_change_state()
+    {
+        var st = new JsonObject { ["active"] = false };
+        var e = HardLockService.ApplyEnableOtzariaPath(st, "relative\notexe.txt");
+        Assert.NotNull(e);
+        Assert.False(st["active"]!.GetValue<bool>());
+    }
+}

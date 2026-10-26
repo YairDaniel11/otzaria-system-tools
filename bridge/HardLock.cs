@@ -1443,9 +1443,16 @@ public class HardLockService : ServiceBase
         return ps;
     }
 
+    internal static class PipeBackoff
+    {
+        internal static int DelayMs(int fails) => Math.Min(30000, 1000 << Math.Min(Math.Max(fails - 1, 0), 5));
+        internal static bool ShouldLog(int fails) => fails > 0 && (fails & (fails - 1)) == 0;
+    }
+
     private async Task PipeLoop(CancellationToken ct)
     {
         var ps = MakePipeSecurity();
+        int pipeFails = 0;
         while (!ct.IsCancellationRequested)
         {
             try
@@ -1462,7 +1469,16 @@ public class HardLockService : ServiceBase
                     pipe = NamedPipeServerStreamAcl.Create(HardLock.PipeName, PipeDirection.InOut, PipeMaxInstances,
                         PipeTransmissionMode.Byte, opts, 4096, 4096, ps);
                 }
-                catch { if ((opts & PipeOptions.FirstPipeInstance) != 0) { Interlocked.Exchange(ref _firstPipe, 0); HardLock.SvcLog("pipe: יצירת המופע הראשון נכשלה (ייתכן ששם ה-pipe תפוס בידי תהליך אחר)"); } throw; }
+                catch
+                {
+                    // WHY: איפוס הדגל + השהיה של שנייה הציפו את service.log; עכשיו backoff אקספוננציאלי ולוג רק בכשלים 1,2,4,8...
+                    if ((opts & PipeOptions.FirstPipeInstance) != 0) Interlocked.Exchange(ref _firstPipe, 0);
+                    pipeFails++;
+                    if (PipeBackoff.ShouldLog(pipeFails)) HardLock.SvcLog("pipe: יצירת המופע נכשלה (ייתכן ששם ה-pipe תפוס בידי תהליך אחר), ניסיון " + pipeFails);
+                    await Task.Delay(PipeBackoff.DelayMs(pipeFails), ct);
+                    continue;
+                }
+                pipeFails = 0;
                 try { await pipe.WaitForConnectionAsync(ct); }
                 catch { pipe.Dispose(); throw; }
                 // מגבלת חיבורים במקביל (סך הכול ולפי PID): מעבר לה החיבור נסגר מיד, בלי לתפוס חוט/מופע
@@ -1795,11 +1811,12 @@ public class HardLockService : ServiceBase
 
                 case "enable":
                     if ((e = Check(pw, false)) != null) return e;
+                    // WHY: נתיב לא תקין נדחה לפני כל שינוי מצב (fail-closed בלי שמירה חלקית: בעבר active=true נשאר בזיכרון אחרי הכשל)
+                    string otz = q["otzariaPath"]?.ToString();
+                    if ((e = ApplyEnableOtzariaPath(_state, otz)) != null) return e;
                     _state["active"] = true;
                     _state["activatedBy"] = "manual"; // נעילה ידנית לא תבוטל בסוף חלון התזמון
                     _state["tempUnlockUntil"] = "";   // הפעלה בסיסמה מסיימת פתיחה זמנית
-                    string otz = q["otzariaPath"]?.ToString();
-                    if ((e = ApplyEnableOtzariaPath(_state, otz)) != null) return e;
                     Save();
                     HardLock.SvcLog("service: נעילה הופעלה");
                     SafeTask.Run(Tick);
@@ -2300,6 +2317,7 @@ public class HardLockService : ServiceBase
     /// </summary>
     private void EnsureBridgeInSessions()
     {
+        if (_uninstalling) return; // WHY: אחרי הסרה אסור להרים גשרים מחדש (ההרמה מחדש מחזירה אכיפה ונועלת את קבצי המחיקה)
         if (!File.Exists(HardLock.ServiceExe)) return;
         var active = Native.ActiveSessions();
         _sessions = active.Count;
@@ -2310,7 +2328,7 @@ public class HardLockService : ServiceBase
         // גשר אמיתי שהשירות לא יצר (Run/explorer/משתמש): למשתמש handle מלא אליו, ו-HardenExisting לא מבטל handle קיים → נהרג,
         // והשירות מעלה גשר משלו (נולד עם DACL). גשרים שהשירות יצר נבדקים גם מול זמן ההתחלה (PID שהוחזר לא נחשב)
         PruneOwn(procs);
-        var untrusted = BridgeProcs.Untrusted(procs, HardLock.ServiceExe, _ownBridges.Keys.ToHashSet());
+        var untrusted = BridgeProcs.Untrusted(procs, HardLock.ServiceExe, _ownBridges.Keys.ToHashSet(), p => BridgeProcs.IsElevated(p.Pid));
         foreach (var u in untrusted)
         {
             try { using var pr = Process.GetProcessById(u.Pid); pr.Kill(); HardLock.SvcLog($"service: נהרג גשר שלא הופעל ע\"י השירות (pid {u.Pid}, session {u.Session}) — יעלה גשר מוגן"); }
@@ -2461,16 +2479,30 @@ public class HardLockService : ServiceBase
         try
         {
             Thread.Sleep(500);
+            // סדר (WHY, באג VM): קודם משחררים אכיפה והקשחת אתחול (SafeBoot/WinRE/recoveryenabled) ומאמתים; רק אחר כך מוחקים.
+            // כשל בשחרור = ההסרה נעצרת (לא מוחקים את מצב השחזור) ואפשר להריץ שוב: הכל idempotent
             EnforcePolicies(false);
             EnforceUsb(false);
             EnforceOffice(false);
-            BootHardening.Enforce(false); // BOOTHARDENING: אחרת SafeBoot/WinRE נשארים נעולים אחרי הסרה
+            bool released = false;
+            for (int i = 0; i < 3 && !released; i++)
+            {
+                BootHardening.Enforce(false, full: true); // BOOTHARDENING: אחרת SafeBoot/WinRE נשארים נעולים אחרי הסרה
+                released = BootHardening.LastFullReleaseComplete;
+                if (!released) Thread.Sleep(1500);
+            }
+            if (!released)
+            {
+                HardLock.SvcLog("uninstall: שחרור הקשחת האתחול לא הושלם - ההסרה נעצרה (להריץ שוב --uninstall)");
+                lock (_gate) { _uninstalling = false; _state["uninstalling"] = false; Save(); } // חוזרים לאכיפה רגילה; ניסיון חוזר אפשרי
+                return;
+            }
             HardLock.SvcLog("service: הסרה");
             HardLock.UnregisterMachineRun();
             Config.Run("sc.exe", "delete " + HardLock.ServiceName, 10000);
             // הגשר רץ מ-Program Files ומוגן מהריגה ע"י המשתמש (DACL) — בלי זה rmdir להלן נכשל על exe נעול
             Thread.Sleep(2500); // לגשר/לתהליך ההסרה זמן לסיים את הזרימה שלהם לפני ההריגה
-            HardLock.StopBridgesAt(HardLock.ServiceExe);
+            HardLock.StopBridgesAt(HardLock.ServiceExe, Environment.ProcessId); // לא הורגים את השירות עצמו לפני שהפעיל את המחיקה
             // מחיקת הקבצים אחרי שהשירות ייעצר
             Process.Start(new ProcessStartInfo("cmd.exe",
                 $"/c ping -n 6 127.0.0.1 >nul & rmdir /s /q \"{HardLock.ProgDir}\" & rmdir /s /q \"{HardLock.DataDir}\"")

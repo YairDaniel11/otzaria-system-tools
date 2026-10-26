@@ -337,7 +337,7 @@ public static class Installer
         }
         else
         {
-            try { Directory.Delete(Config.Dir, true); } catch (Exception ex) { return "התיקייה לא נמחקה: " + ex.Message; }
+            try { if (Directory.Exists(Config.Dir)) Directory.Delete(Config.Dir, true); } catch (Exception ex) { return "התיקייה לא נמחקה: " + ex.Message; }
         }
         return null;
     }
