@@ -1,7 +1,11 @@
 // #65 — מתווך דיווחי תקלות: מקבל דיווח מהגשר ופותח issue ב-GitHub. הטוקן נשמר רק כאן (GH_TOKEN, Secret).
 // בלי KV: כפילות נבדקת בחיפוש ב-GitHub (fingerprint פתוח), מגבלה יומית לפי issues עם auto-report מהיום,
 // ומגבלה לכל IP בזיכרון ה-Worker (5 לשעה, הגנה בסיסית). גוף ≤ 8000 תווים.
+// WHY (הצפת כפילויות): אם חיפוש ה-GitHub נכשל — נכשלים סגור (503), לא "אין כפילות". בנוסף, מגבלה לכל fingerprint:
+// ב-KV אם מוגדר binding בשם DEDUPE (אופציונלי, לא חובה), ואחרת בזיכרון ה-isolate כגיבוי.
 const ipHits = new Map();
+const fpHits = new Map();
+const FP_MAX = 1; // דיווח אחד לכל fingerprint ביממה
 const DAILY_MAX = 30;
 
 export default {
@@ -32,12 +36,24 @@ export default {
     });
     const search = async q => {
       const r = await gh('/search/issues?per_page=1&q=' + encodeURIComponent(q));
-      return r.ok ? (await r.json()).total_count : 0;
+      if (!r.ok) throw new Error('search ' + r.status); // fail-closed: לא מחזירים 0 בכישלון
+      return (await r.json()).total_count;
     };
 
-    if (await search(`repo:${repo} is:issue is:open in:body fp-${fingerprint}`)) return new Response('duplicate', { status: 409 });
-    const today = new Date().toISOString().slice(0, 10);
-    if (await search(`repo:${repo} is:issue label:${manual ? 'user-feedback' : 'auto-report'} created:>=${today}`) >= DAILY_MAX) return new Response('rate', { status: 429 });
+    // מגבלה לפי fingerprint — לפני החיפוש, כי אינדקס החיפוש של GitHub מתעכב ודיווח חדש לא נראה בו מיד
+    const day = new Date().toISOString().slice(0, 10), fk = repo + ':' + fingerprint + ':' + day;
+    try {
+      if (env.DEDUPE) { if (await env.DEDUPE.get(fk)) return new Response('duplicate', { status: 409 }); }
+      else if ((fpHits.get(fk) || 0) >= FP_MAX) return new Response('duplicate', { status: 409 });
+    } catch { return new Response('dedupe unavailable', { status: 503 }); }
+
+    let dup, daily;
+    try {
+      dup = await search(`repo:${repo} is:issue is:open in:body fp-${fingerprint}`);
+      if (dup) return new Response('duplicate', { status: 409 });
+      daily = await search(`repo:${repo} is:issue label:${manual ? 'user-feedback' : 'auto-report'} created:>=${day}`);
+    } catch { return new Response('dedupe unavailable', { status: 503 }); }
+    if (daily >= DAILY_MAX) return new Response('rate', { status: 429 });
 
     const r = await gh(`/repos/${repo}/issues`, {
       method: 'POST',
@@ -48,6 +64,10 @@ export default {
       })
     });
     if (!r.ok) return new Response('github ' + r.status, { status: 502 });
+    try {
+      if (env.DEDUPE) await env.DEDUPE.put(fk, '1', { expirationTtl: 86400 });
+      else { fpHits.set(fk, 1); if (fpHits.size > 5000) fpHits.clear(); }
+    } catch { /* הדיווח כבר נפתח — לא מכשילים */ }
     return new Response('ok', { status: 201 });
   }
 };
