@@ -21,7 +21,7 @@ BitLocker (כבוי / TPM בלבד / עם PIN), TPM (קיים/פעיל), Secure 
 
 ## מה דורש פעולה ידנית
 
-- **BitLocker עם PIN לפני אתחול.** אי אפשר לקבוע PIN בלי אינטראקציה. הפעלה: `manage-bde -protectors -add C: -TPMAndPIN` (או Group Policy "Require additional authentication at startup"). בלי PIN, תוקף עם גישה פיזית יכול לעקוף את הנעילה ולקרוא את הדיסק מחוץ ל-Windows.
+- **BitLocker עם PIN לפני אתחול.** אי אפשר לקבוע PIN בלי אינטראקציה. הפעלה: `manage-bde -protectors -add C: -TPMAndPIN` (או Group Policy "Require additional authentication at startup").
 - **סיסמת BIOS.** ב-Dell/Asus/יצרנים אחרים ידנית. ב-Lenovo/HP אפשר דרך `/bios/harden`, ואז מומלץ לאמת ב-BIOS.
 - **Secure Boot ו-TPM** שכבויים: הפעלה בתפריט ה-BIOS.
 - **Dell:** אתחול USB וסדר/תפריט אתחול ידניים. UEFI Network Stack ו-Legacy ROM דרך cctk (לא נבדק על Dell אמיתי).
