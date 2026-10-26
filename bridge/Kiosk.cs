@@ -25,7 +25,13 @@ public static partial class Kiosk
     private static IntPtr _hook = IntPtr.Zero;
     private static LowLevelKeyboardProc _hookProc;
 
-    public static bool IsActive => Config.Get("kiosk.active", false);
+    public static bool IsActive => !SafeBoot && Config.Get("kiosk.active", false);
+
+    /// <summary>
+    /// עלייה במצב בטוח (QA-B 5): הנעילה מדולגת רק בעלייה הזו, בזיכרון. WHY: בעבר נכתב kiosk.active=false לדיסק, ומי שהגיע ל-Safe Mode
+    /// (Shift+Restart) שחרר את הנעילה לצמיתות בלי סיסמה. עכשיו ההגדרה נשארת, והנעילה חוזרת בעלייה הרגילה הבאה.
+    /// </summary>
+    internal static bool SafeBoot;
     // כשהשירות מחזיק את הסיסמה אין עותק מקומי (ר' PurgeLocalPassword), ולכן "יש סיסמה" כולל גם את השירות
     private static bool HasPassword => !string.IsNullOrEmpty(Config.Get<string>("kiosk.passwordHash", null)) || HardLock.Available;
     internal const int MinPasswordLength = 10;
@@ -435,6 +441,7 @@ public static partial class Kiosk
         sideBarKeyboard = Config.Get("kiosk.sideBarKeyboard", false),
         sideBarPosition = Config.Get("kiosk.sideBarPosition", "right"),
         resetOnShutdown = Config.Get("kiosk.resetOnShutdown", false),
+        otzariaRefused = OtzariaRefused,   // QA-B 7: אוצריא שונתה/עודכנה ולא תואמת את הנעיצה; ה-UI מציג הודעה ומפנה לנעיצה מחדש
         openSections = OpenSections,
         allSections = AllSections,
         warnings = Warnings(),
@@ -1233,6 +1240,12 @@ public static partial class Kiosk
     /// עכשיו הקובץ נפתח ב-FileShare.Read (AppTrust.LaunchLock), ה-SHA מה-handle, וה-handle מוחזק עד אחרי Process.Start.
     /// start=null: בדיקה בלבד (בלי הפעלה). מחזיר false אם לא אומת / לא הופעל
     /// </summary>
+    /// <summary>
+    /// QA-B 7: אוצריא (במיקום כתיב) סורבה בגלל אי-התאמה לנעיצה, למשל אחרי עדכון עצמי. WHY: בלי זה המשתמש רואה מסך מנוחה בלי הסבר.
+    /// נעיצה מחדש בלי ביטול נעילה: שמירת הגדרות עם otzariaPath (בסיסמת מנהל) => HardLock.SetOtzariaPath. מומלץ להתקין ב-Program Files (אין צורך בנעיצה).
+    /// </summary>
+    internal static volatile bool OtzariaRefused;
+
     private static bool CheckOtzariaForLaunch(string path, Action start = null)
     {
         AppTrust.LaunchLock fl = null;
@@ -1251,6 +1264,7 @@ public static partial class Kiosk
             }
             var v = DecideLaunch(trusted, pinned, actual, svc);
             if (v == LaunchVerdict.AllowAndPin) { PinOtzaria(path); try { Config.Save(); } catch { } }
+            OtzariaRefused = v == LaunchVerdict.Refuse;
             if (v == LaunchVerdict.Refuse)
                 LogThrottled("otzUntrusted", "watchdog: קובץ אוצריא במיקום כתיב למשתמש ואינו תואם את הנעיצה - לא מופעל (הפעלת הנעילה מחדש בסיסמה תנעץ את הגרסה הנוכחית)", 120);
             if (v == LaunchVerdict.Refuse) return false;
@@ -1318,10 +1332,8 @@ public static partial class Kiosk
             bool locked = ((IsActive && Config.Get("kiosk.confirmed", false)) || HardLock.ServiceActive) && !safeMode;
             if (safeMode && IsActive)
             {
-                Config.Log("kiosk: מצב בטוח — הנעילה מבוטלת לעלייה הזו");
-                Config.Set("kiosk.active", false);
-                Config.Set("kiosk.confirmed", false);
-                Config.Save();
+                Config.Log("kiosk: מצב בטוח — הנעילה מדולגת לעלייה הזו בלבד (ההגדרה נשמרת; תחזור בעלייה רגילה)");
+                SafeBoot = true;
             }
             if (locked) return;
             SetTaskbars(true); // אם התהליך הקודם קרס כשהסתיר את שורת המשימות - מחזירים אותה
@@ -1443,6 +1455,7 @@ public static partial class Kiosk
             try
             {
                 using var k = Registry.CurrentUser.CreateSubKey(PoliciesKey);
+                RecordPolicyOriginals(k);
                 // Ctrl+Alt+Del ← "נעילה" ו-Win+L מובילים למסך הנעילה של Windows, ושם כפתור "נגישות" שמאפשר לצאת מהנעילה
                 // (דיווח בפורום: ילדים פותחים דרכו את המחשב). בזמן הנעילה פעולת הנעילה של Windows מבוטלת; משתחררת עם ביטול הנעילה
                 k.SetValue("DisableLockWorkstation", 1, RegistryValueKind.DWord);
@@ -1513,12 +1526,46 @@ public static partial class Kiosk
         }
     }
 
+    private const string PolOrigKey = @"Software\OtzariaBridge\KioskPolicyOrig";
+    private static readonly string[] OurPolicies = { "DisableTaskMgr", "DisableLockWorkstation" };
+
+    /// <summary>
+    /// QA-B 12: שומר את הערכים המקוריים של מדיניות המערכת (שייתכן שהארגון קבע) לפני שדורסים. נשמר רק בפעם הראשונה (לא דורסים מקור במקור שלנו).
+    /// -1 = לא היה קיים
+    /// </summary>
+    private static void RecordPolicyOriginals(RegistryKey pol)
+    {
+        try
+        {
+            using var o = Registry.CurrentUser.CreateSubKey(PolOrigKey);
+            if (o.GetValue("saved") != null) return;
+            foreach (string n in OurPolicies) o.SetValue(n, pol.GetValue(n) is int i ? i : -1, RegistryValueKind.DWord);
+            o.SetValue("saved", 1, RegistryValueKind.DWord);
+        }
+        catch (Exception ex) { Config.Log("kiosk policy orig: " + ex.Message); }
+    }
+
+    /// <summary>משחזר מקור אם נשמר (ורק אם הערך הנוכחי הוא שלנו = 1); בלי מקור שמור: מחיקה כמו קודם (כשל סגור לכיוון פתיחת המחשב)</summary>
+    private static void RestorePolicyOriginals(RegistryKey pol)
+    {
+        if (pol == null) return;
+        using var o = Registry.CurrentUser.OpenSubKey(PolOrigKey);
+        bool have = o?.GetValue("saved") != null;
+        foreach (string n in OurPolicies)
+        {
+            int? orig = have && o.GetValue(n) is int v && v >= 0 ? v : null;
+            if (orig != null && (pol.GetValue(n) is not int cur || cur == 1)) pol.SetValue(n, orig.Value, RegistryValueKind.DWord);
+            else if (pol.GetValue(n) is int c2 && c2 == 1 || !have) pol.DeleteValue(n, false);
+        }
+        if (have) try { Registry.CurrentUser.DeleteSubKeyTree(PolOrigKey, false); } catch { }
+    }
+
     private static void ClearRegistry()
     {
         // כל מפתח בנפרד: כישלון במדיניות (מפתח נעול) לא ימנע את מחיקת המעטפת, שהיא הקריטית
         try { using var k = Registry.CurrentUser.OpenSubKey(WinlogonKey, true); k?.DeleteValue("Shell", false); }
         catch (Exception ex) { Config.Log("kiosk clear shell: " + ex.Message); }
-        try { using var k = Registry.CurrentUser.OpenSubKey(PoliciesKey, true); k?.DeleteValue("DisableTaskMgr", false); k?.DeleteValue("DisableLockWorkstation", false); }
+        try { using var k = Registry.CurrentUser.OpenSubKey(PoliciesKey, true); RestorePolicyOriginals(k); }
         catch (Exception ex) { Config.Log("kiosk clear policy: " + ex.Message); }
         SetToastPolicy(false);
         SetAccessibilityPolicy(false);   // [x2] מחזיר נגישות/NoWinKeys/AutoPlay (גם כשארית אחרי קריסה, דרך BootGuard)

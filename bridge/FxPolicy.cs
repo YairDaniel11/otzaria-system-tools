@@ -61,7 +61,14 @@ public static class FxPolicy
     /// בדיאלוגי Open/Save ובסייר; עכשיו ברירת המחדל בנעילה היא restricted. "off" מפורש של המנהל נשמר כפי שהוא.
     /// </summary>
     private static bool ModeDefaulted(HardLock.PolicySnapshot sp) =>
-        sp?.FxMode == null && string.IsNullOrEmpty(Config.Get<string>(KMode, null));
+        sp?.FxMode == null && string.IsNullOrEmpty(CfgMode());
+
+    /// <summary>
+    /// WHY (QA-B 3): כשהשירות פעיל ואין לו מדיניות, fx.policy.* ב-config.json (כתיב למשתמש) נחשב אמין רק אם חתום (sec.seal).
+    /// בלי זה תלמיד היה כותב fx.policy.mode=off ומבטל את ברירת המחדל "restricted". לא אמין => כאילו לא הוגדר דבר (ברירות מחדל מחמירות).
+    /// </summary>
+    internal static bool ConfigTrusted() => !HardLock.Available || Kiosk.SecurityIntact();
+    private static string CfgMode() => ConfigTrusted() ? Config.Get<string>(KMode, null) : null;
 
     internal static string DefaultMode(bool kioskActive) => kioskActive ? "restricted" : "off";
 
@@ -70,9 +77,9 @@ public static class FxPolicy
         FsApi.KnownFolders().Where(k => k.id != "home").Select(k => k.path).ToArray();
 
     private static string RawMode(HardLock.PolicySnapshot sp) =>
-        sp?.FxMode ?? Config.Get<string>(KMode, null) ?? DefaultMode(Kiosk.IsActive);
+        sp?.FxMode ?? CfgMode() ?? DefaultMode(Kiosk.IsActive);
     private static string[] RawRoots(HardLock.PolicySnapshot sp) =>
-        sp?.FxRoots ?? (ModeDefaulted(sp) && Kiosk.IsActive ? DefaultRoots() : Config.GetList(KRoots));
+        sp?.FxRoots ?? (ModeDefaulted(sp) && Kiosk.IsActive ? DefaultRoots() : ConfigTrusted() ? Config.GetList(KRoots) : Array.Empty<string>());
 
     /// <summary>האם path בתוך תיקייה שהמנהל אישר במפורש (לא ברירות המחדל), במצב מוגבל. לבדיקת סיומות מריצות</summary>
     internal static bool IsInApprovedRoots(string path)
@@ -88,7 +95,7 @@ public static class FxPolicy
         }
         catch { return false; }
     }
-    private static int RawMinutes(HardLock.PolicySnapshot sp) => sp?.FxUnlockMinutes ?? Config.Get(KMinutes, DefaultMinutes);
+    private static int RawMinutes(HardLock.PolicySnapshot sp) => sp?.FxUnlockMinutes ?? (ConfigTrusted() ? Config.Get(KMinutes, DefaultMinutes) : DefaultMinutes);
 
     /// <summary>הגירה לרכיב ההקשחה (בהתקנה/עדכון שלו): אם עוד אין לו מדיניות, מעבירים את הנוכחית מ-config.json</summary>
     internal static void SyncToService(string password)
@@ -256,6 +263,7 @@ public static class FxPolicy
         Config.Set(KRoots, arr);
         Config.Set(KMinutes, JsonValue.Create(minutes));
         Config.Save();
+        Kiosk.SealConfig();   // fx.policy.* חתומים (QA-B 3)
         Relock();
         Config.Log("fx policy: mode=" + mode + " roots=" + roots.Count);
         return Get();

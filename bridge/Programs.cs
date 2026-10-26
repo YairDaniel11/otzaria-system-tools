@@ -52,6 +52,9 @@ public static class Programs
         "extrac32", "makecab", "ieexec", "infdefaultinstall", "presentationhost", "syncappvpublishingserver", "scriptrunner",
         "jsc", "vbc", "rcsi", "csi", "cdb", "ntsd", "windbg", "iexpress", "sdbinst", "verclsid", "xwizard", "eudcedit",
         "fsquirt", "dccw", "telnet", "tftp", "ssh", "scp", "sftp", "winrs", "pktmon", "netsh", "dnscmd", "fltmc",
+        // QA-B 10: פרשנים/כלי הרצה שמותקנים בדרך כלל ב-Program Files (נתיב מהימן) ולכן לא נהרגו לפי המיקום
+        "python", "pythonw", "py", "pyw", "node", "java", "javaw", "php", "perl", "ruby", "autohotkey", "autohotkey64", "autohotkey32",
+        "winget", "ssh-keygen", "ssh-agent", "sh", "git-bash", "lua", "deno", "bun", "wslhost", "wslconfig",
     };
 
     // בעיה #14 סעיף 6: נכתבים בחוט בקשה (Activate) ונקראים בחוט השומר (ShouldYieldTo וכו') —

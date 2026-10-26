@@ -707,7 +707,7 @@ public static class FsApi
 
     /// <summary>כתיבת קובץ בינארי בחתיכות. גוף: { path, content (base64), append?, overwrite?, unique?, makeDirs? }.
     /// unique = אם הקובץ קיים — "שם (2).סיומת" (לא דורס). החתיכה הראשונה מחזירה את הנתיב הסופי; הבאות מצרפות אליו עם append.</summary>
-    private static object WriteBinary(JsonElement b)
+    internal static object WriteBinary(JsonElement b)
     {
         string path = FullPath(b.Req("path"));
         Kiosk.EnsureFileWriteAllowed();
@@ -718,30 +718,38 @@ public static class FsApi
         if (!Directory.Exists(dir))
         {
             if (!makeDirs) throw BridgeException.NotFound("התיקייה לא נמצאה: " + dir);
+            EnsureWriteTargetAllowed(path);   // לפני יצירת תיקיות: סיומת חסומה לא יוצרת תיקיות בדרך
             Directory.CreateDirectory(dir); // יוצר גם תתי-תיקיות חסרות (מבנה תיקיות משוכפל)
         }
         byte[] data;
         try { data = Convert.FromBase64String(b.Str("content", "")); }
         catch (FormatException) { throw BridgeException.BadRequest("התוכן אינו base64 תקין"); }
 
-        if (!append)
+        if (!append && File.Exists(path))
         {
-            if (File.Exists(path))
+            if (unique)
             {
-                if (unique)
-                {
-                    string stem = Path.GetFileNameWithoutExtension(path), ext = Path.GetExtension(path);
-                    int n = 2;
-                    do { path = Path.Combine(dir, stem + " (" + n + ")" + ext); n++; } while (File.Exists(path));
-                }
-                else if (!overwrite) throw BridgeException.Exists("הקובץ כבר קיים: " + path);
+                string stem = Path.GetFileNameWithoutExtension(path), ext = Path.GetExtension(path);
+                int n = 2;
+                do { path = Path.Combine(dir, stem + " (" + n + ")" + ext); n++; } while (File.Exists(path));
             }
-            File.WriteAllBytes(path, data);
+            else if (!overwrite) throw BridgeException.Exists("הקובץ כבר קיים: " + path);
         }
-        else
+        if (append && !File.Exists(path)) throw BridgeException.NotFound("הקובץ לא נמצא להמשך כתיבה: " + path);
+        // WHY (QA-B 1): אותה סדרת בדיקות כמו ב-WriteText — בלעדיה אפשר היה לכתוב .exe/.bat/.lnk לתיקייה לא מוגנת, לצרף לקובץ קיים או לכתוב דרך hardlink
+        EnsureWriteTargetAllowed(path);
+        EnsureNoHardlink(path);
+        // TOCTOU: handle בלי קטימה, בדיקת הנתיב הסופי שלו, ורק אז קטימה/כתיבה
+        var mode = append ? FileMode.Open : (overwrite ? FileMode.OpenOrCreate : FileMode.CreateNew);
+        using (var fs = new FileStream(path, mode, FileAccess.Write, FileShare.Read))
         {
-            if (!File.Exists(path)) throw BridgeException.NotFound("הקובץ לא נמצא להמשך כתיבה: " + path);
-            using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+            string fin = PathPolicy.FinalPathOfHandle(fs.SafeFileHandle) ?? throw new IOException("פענוח הנתיב הסופי נכשל");
+            EnsureNotProtected(fin);
+            FxPolicy.EnsurePathAllowed(fin);
+            EnsureWriteTargetAllowed(fin);
+            if ((Kiosk.IsActive || FxPolicy.IsRestricted) && PathPolicy.HardLinkCountOfHandle(fs.SafeFileHandle) > 1)
+                throw BridgeException.Forbidden("הקובץ מקושר בקישור קשיח (hardlink) לשם נוסף: הכתיבה אליו חסומה");
+            if (append) fs.Seek(0, SeekOrigin.End); else fs.SetLength(0);
             fs.Write(data, 0, data.Length);
         }
         return new { path, size = new FileInfo(path).Length };

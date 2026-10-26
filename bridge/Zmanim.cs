@@ -42,7 +42,9 @@ internal static class Zmanim
 
     private static object CacheSet(JsonElement b)
     {
-        lock (Gate) { _cacheJson = b.GetRawText(); _cacheUtc = DateTime.UtcNow; }
+        string raw = b.GetRawText();
+        if (raw.Length > 262144) throw BridgeException.BadRequest("מטמון הזמנים גדול מדי");   // QA-B 15: במקום עד 64MB בזיכרון
+        lock (Gate) { _cacheJson = raw; _cacheUtc = DateTime.UtcNow; }
         return new { ok = true };
     }
 
