@@ -122,7 +122,7 @@
     offline: 'הגשר אינו מחובר',
     bad_response: 'תשובה לא תקינה מהגשר'
   };
-  ui.errText = function (e) {
+  ui.rawErrText = function (e) {
     if (!e) return 'שגיאה לא ידועה';
     var code = e.code || 'internal';
     var msg = e.message && /[֐-׿]/.test(e.message) && !(window.I18N && window.I18N.isEn() && ERR[e.code]) ? e.message : '';
@@ -134,6 +134,20 @@
       return ERR[code];
     }
     return msg || ERR[code] || ('שגיאה: ' + code);
+  };
+
+  /* הודעות ידידותיות לכל הטאבים: משפט פשוט + "מה לעשות", בלי מונחים טכניים */
+  var TECH_RE = /\b[45]\d\d\b|fail[- ]?closed|exception|stack|undefined|\bnull\b|HTTP|ECONN|fetch|network|pipe/i;
+  var NET_CODES = { transport: 1, offline: 1, timeout: 1, bad_response: 1 };
+  ui.errText = function (e) {
+    var code = e && e.code, raw = (e && e.message) || '';
+    if (!e || code === 'wrong_password' || code === 'locked' || code === 'too_many') return ui.rawErrText(e);
+    if (NET_CODES[code] || /\b503\b|ECONN|fetch|network/i.test(raw))
+      return 'הגשר לא זמין כרגע. מה לעשות: ודאו שהאייקון של „אחת שאלתי” פועל במגש המערכת, המתינו כמה שניות ונסו שוב.';
+    if (/fail[- ]?closed|corrupt|פגום|לא מגיב|\b50[0-9]\b/i.test(raw) || code === 'corrupt' || code === 'internal')
+      return 'רכיב ההקשחה לא הגיב, ולכן הפעולה נחסמה כדי לשמור על האבטחה. מה לעשות: המתינו דקה ונסו שוב. אם זה חוזר, הפעילו מחדש את המחשב.';
+    var t = ui.rawErrText(e);
+    return TECH_RE.test(t) ? 'הפעולה לא הושלמה. מה לעשות: נסו שוב, ואם זה חוזר — רעננו את העמוד או הפעילו מחדש את הגשר.' : t;
   };
 
   /* ---------- toasts ---------- */

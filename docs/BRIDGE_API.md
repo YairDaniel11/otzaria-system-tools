@@ -227,6 +227,16 @@ Win / Alt+Tab / Alt+Esc / Ctrl+Esc / Alt+F4 על חלון אוצריא, מעקב
 
 `/kiosk/status` כולל גם את השדה `hard`, באותו מבנה כמו `/kiosk/hard/status`.
 
+שדות בריאות אופציונליים ב-`hard` (גם ב-`/kiosk/hard/status`; בוליאנים/קודים בלבד, בלי נתיבים או SID; `null` = לא ידוע):
+
+| שדה | משמעות |
+|---|---|
+| `enforcementIssues` | מערך קודים קצרים לכל חסימה שלא הוחלה: `unverified` (נכתבה ולא אומתה) או `error`. מערך ריק = הכול הוחל |
+| `stateCorrupt` | קובץ המצב של השירות נראה פגום |
+| `hasRecovery` | השירות מחזיק קוד שחזור |
+| `configSealOk` | חתימת מפתחות האבטחה ב-config.json תקינה (מטמון קיים של `Kiosk.SecurityIntact`, בלי קריאת pipe נוספת; בלי שירות: true) |
+| `updateHealth` | `{ state: none/waiting/healthy/rollback, ok, pending, rollback }` לפי `pending.json` ו-`health.ok` של UpdateRollback. `none` = אין עדכון תלוי (ok=true) |
+
 ## דיווחים (Reports.cs — בסיס מינימלי, 13.10.2026)
 - `POST /diag/list` → `{enabled, items:[{id, sent, date, kind, text}]}` — ממתינים (outbox) ונשלחו (outbox/sent, 30 אחרונים).
 - `POST /diag/delete {ids}` — מחיקת ממתינים לפני שליחה.

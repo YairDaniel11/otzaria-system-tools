@@ -20,12 +20,12 @@
 |---|---|---|
 | רכיב ההקשחה (שירות) | `POST /kiosk/status` ← `hard.installed`, `hard.running`, `hard.needsUpdate` | קיים |
 | נעילה | `active`, `tempUnlock.active`, `schedule.enabled/start/end` | קיים |
-| אכיפת הנעילה | `hard.enforcementIssues` (או `enforcementIssues`) | **לא נחשף כרגע** ב-`/kiosk/status`; קיים רק בצינור השירות (`op=status`). עד שיחשף: "לא זמין". |
-| קובץ ההגדרות | `hard.stateCorrupt`, `hard.configSealOk` (או ברמה העליונה) | **לא נחשפים כרגע**. אותו טיפול. `configSealOk` הוא שם מוצע, לא קיים. |
-| קוד שחזור | `hard.hasRecovery`, ובגיבוי `recoverySaved` מ-`/kiosk/status` | `recoverySaved` קיים; `hasRecovery` לא נחשף. |
+| אכיפת הנעילה | `hard.enforcementIssues` (או `enforcementIssues`) | נחשף: מערך קודים (`unverified`/`error`). `null`/חסר (שירות לא עונה או ישן): "לא זמין". |
+| קובץ ההגדרות | `hard.stateCorrupt`, `hard.configSealOk` (או ברמה העליונה) | נחשפים (בוליאנים; `null` = לא ידוע). |
+| קוד שחזור | `hard.hasRecovery`, ובגיבוי `recoverySaved` מ-`/kiosk/status` | שניהם קיימים. |
 | קודי גיבוי | `POST /kiosk/recovery/backup/status` ← `left` (גיבוי: `hard.backupLeft`) | קיים |
 | הקשחת אתחול (Safe Mode / WinRE) | `POST /bios/status` ← `boot.enforcement.active/incomplete`, `boot.error` | קיים |
-| תקינות עדכון אחרון | `hard.updateHealth` (`ok`/`rollback`/`state`) | **לא נחשף**. `health.ok` ו-rollback נשמרים רק בקבצים. "לא זמין". |
+| תקינות עדכון אחרון | `hard.updateHealth` (`ok`/`rollback`/`state`) | נחשף: `{state, ok, pending, rollback}`. |
 | גרסת הגשר | `hard.version` או `GET /health` ← `version` | קיים |
 
 הוספת השדות החסרים ל-`HardLock.Status()`/`/kiosk/status` בצד הגשר תדליק את השורות האלה אוטומטית, בלי שינוי בממשק.
@@ -47,3 +47,5 @@
 - הפלת הגשר באמצע טעינה: הודעת "הגשר לא זמין" עם "נסה שוב".
 - ניגודיות וניווט מקלדת (Tab על כותרות מתקפלות) בערכת נושא כהה ובהירה; חלון צר (עד 42em); אנגלית.
 - בדיקה שהכפתורים במרכז חירום פועלים (העתקה ללוח, יצירת קודי גיבוי עם סיסמה).
+
+`ui.errText` (ui.js) מציגה כעת הודעות ידידותיות בכל הטאבים; `ui.rawErrText` מחזירה את הטקסט הגולמי.

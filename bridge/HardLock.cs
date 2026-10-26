@@ -311,7 +311,37 @@ public static class HardLock
             version = sv,
             needsUpdate = sv != null && sv != Program.Version,
             sessions = s?["sessions"]?.GetValue<int>() ?? 0,
+            // שדות בריאות (אופציונליים; בוליאנים/קודים קצרים בלבד, בלי נתיבים/SID/טקסט חופשי). null = לא ידוע (שירות לא עונה/ישן)
+            enforcementIssues = IssueCodes(s?["enforcementIssues"] as JsonArray),
+            stateCorrupt = s?["stateCorrupt"]?.GetValue<bool>(),
+            hasRecovery = s?["hasRecovery"]?.GetValue<bool>(),
+            configSealOk = SealOkSafe(),
+            updateHealth = UpdateHealthSafe(),
         };
+    }
+
+    /// <summary>ממפה את ממצאי האכיפה של השירות ("sid: סיבה") לקודים קצרים בלבד: unverified / error. null = השירות לא דיווח</summary>
+    internal static string[] IssueCodes(JsonArray issues)
+    {
+        if (issues == null) return null;
+        var l = new List<string>();
+        foreach (var n in issues) l.Add((n?.ToString() ?? "").Contains("לא אומת") ? "unverified" : "error");
+        return l.ToArray();
+    }
+
+    private static bool? SealOkSafe() { try { return Kiosk.SecurityIntact(); } catch { return null; } }
+
+    private static object UpdateHealthSafe() { try { return UpdateHealthFor(UpdateRollback.DefaultRoot, DateTime.UtcNow); } catch { return null; } }
+
+    /// <summary>מצב בדיקת התקינות אחרי עדכון: none (אין עדכון תלוי), healthy, waiting, rollback. בלי hash/נתיבים</summary>
+    internal static object UpdateHealthFor(string root, DateTime nowUtc)
+    {
+        var st = UpdateRollback.Load(root);
+        string text = null;
+        try { text = File.ReadAllText(Path.Combine(root, UpdateRollback.HealthName)); } catch { }
+        var v = UpdateRollback.Evaluate(st, text, nowUtc, UpdateRollback.DefaultTimeoutSec);
+        string state = v switch { UpdateRollback.Verdict.Healthy => "healthy", UpdateRollback.Verdict.Waiting => "waiting", UpdateRollback.Verdict.Rollback => "rollback", _ => "none" };
+        return new { state, ok = state == "healthy" || state == "none", rollback = state == "rollback", pending = state == "waiting" };
     }
 
     /// <summary>
