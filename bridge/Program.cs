@@ -160,17 +160,24 @@ public static class Config
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OtzariaBridge");
     public static string FilePath => Path.Combine(Dir, "config.json");
 
+    /// <summary>true כש-config.json וגם הגיבוי לא נקראו (הגדרות ריקות בפועל). מי שנשען על "ריק = לא נעול" צריך לדעת (ר' StatusNode)</summary>
+    public static volatile bool CorruptNoBackup;
+
     private static JsonObject Data
     {
         get
         {
             if (_data != null) return _data;
-            try
+            // WHY (qa-final-a #11): קובץ חתוך/ריק (הפסקת חשמל) לא מפורש יותר בשקט כ"הגדרות ריקות" (kiosk.active=false, בלי סיסמה). קודם גיבוי (.bak),
+            // ואם גם הוא פגום: דגל CorruptNoBackup, והעותק הפגום נשמר ל-.corrupt לפני שה-Save הבא דורס אותו
+            _data = StateStore.Read(FilePath, out var st, out bool restored);
+            if (restored) Log("config: config.json פגום/חסר; שוחזר מ-config.json.bak");
+            if (st == StateLoad.Corrupt)
             {
-                if (File.Exists(FilePath))
-                    _data = JsonNode.Parse(File.ReadAllText(FilePath)) as JsonObject;
+                CorruptNoBackup = true;
+                try { File.Copy(FilePath, FilePath + ".corrupt", true); } catch { }
+                Log("config: config.json וגם הגיבוי פגומים — מתחילים מהגדרות ריקות, העותק הפגום נשמר ב-config.json.corrupt");
             }
-            catch { }
             return _data ??= new JsonObject();
         }
     }
@@ -247,10 +254,9 @@ public static class Config
     {
         lock (Gate)
         {
-            Directory.CreateDirectory(Dir);
-            string tmp = FilePath + ".tmp";
-            File.WriteAllText(tmp, Data.ToJsonString(SaveOptions));
-            File.Move(tmp, FilePath, true);
+            // אטומי: זמני + Flush(true) + גיבוי של התקין האחרון + החלפה (כמו hardlock.json)
+            StateStore.WriteAtomic(FilePath, Data.ToJsonString(SaveOptions));
+            CorruptNoBackup = false;
         }
     }
 

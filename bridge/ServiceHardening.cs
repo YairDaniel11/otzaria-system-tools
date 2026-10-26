@@ -610,6 +610,21 @@ internal static class InstallTrust
     internal static string CopyVerified(string src, string dst, string expectedSha256, bool allowDowngrade = false)
     {
         if (BridgeProcs.SamePath(src, dst)) return null;
+        return CopyCore(src, dst, expectedSha256, allowDowngrade, copy: true);
+    }
+
+    /// <summary>
+    /// WHY (qa-final-a #3): אותן בדיקות כמו CopyVerified (downgrade, hash, מיקום כתיב-משתמש) בלי לכתוב דבר. נקרא לפני שעוצרים שירות/גשרים,
+    /// כך שסירוב לא משאיר מערכת בלי נעילה. null = מותר להמשיך
+    /// </summary>
+    internal static string Preflight(string src, string dst, string expectedSha256, bool allowDowngrade = false)
+    {
+        if (BridgeProcs.SamePath(src, dst)) return null;
+        return CopyCore(src, dst, expectedSha256, allowDowngrade, copy: false);
+    }
+
+    private static string CopyCore(string src, string dst, string expectedSha256, bool allowDowngrade, bool copy)
+    {
         // WHY (S4): בלי מונוטוניות, מי שמחזיק ב-exe ישן (חתום-hash תקף/נתיב מערכת) היה מחזיר את שירות SYSTEM לגרסה פגיעה.
         // allowDowngrade דורש אישור מפורש של הקורא (אף קורא קיים לא מעביר אותו).
         if (!allowDowngrade && IsDowngrade(src, dst)) return "ה-exe המותקן חדש יותר מזה שהתבקש להתקנה — לא מורידים גרסה בשירות (נדרש אישור מפורש)";
@@ -622,6 +637,7 @@ internal static class InstallTrust
             return "ה-exe השתנה מאז שהבקשה נשלחה (גיבוב לא תואם) — ההתקנה נעצרה";
         if (IsUserWritableLocation(src) && !expectedOk)
             return "ה-exe נמצא בנתיב שמשתמש רגיל כותב אליו ולא התקבל גיבוב לאימות — ההתקנה נעצרה";
+        if (!copy) return null;
         string tmp = dst + ".new";
         try
         {
@@ -672,6 +688,31 @@ internal enum StateLoad { Missing, Ok, Corrupt }
 /// שמירה/טעינה אטומית של hardlock.json. WHY (S1 ממצא 6): Save בלי Flush ובלי גיבוי, ו-Load שבולע חריגה והופך קובץ פגום ל"לא מוגדר" (= פתוח).
 /// עכשיו: כתיבה לקובץ זמני + Flush(true) + גיבוי של הקובץ התקין האחרון (.bak) + החלפה; קובץ קיים ופגום ללא גיבוי = Corrupt (נשארים נעולים).
 /// </summary>
+/// <summary>
+/// qa-final-a #12: עותק נפרד של hash קוד השחזור (קובץ שני ב-DataDir המוגן), כדי שמצב פגום ב-hardlock.json לא ינעל לצמיתות מי שאין לו מנהל מורם.
+/// הקובץ מכיל רק hash+salt (כמו hardlock.json), באותו ACL. משמש רק להסרה בחירום במצב פגום, ולא לשום פעולה אחרת
+/// </summary>
+internal static class RecoveryCopy
+{
+    internal static string PathIn(string dir) => System.IO.Path.Combine(dir, "recovery-copy.json");
+
+    /// <summary>כותב כשהערכים שונים מהעותק הקיים (לא כותב ערך ריק)</summary>
+    internal static void Sync(string dir, string hash, string salt)
+    {
+        if (string.IsNullOrEmpty(hash) || string.IsNullOrEmpty(salt)) return;
+        var cur = StateStore.Read(PathIn(dir), out _, out _);
+        if (cur != null && cur["hash"]?.ToString() == hash && cur["salt"]?.ToString() == salt) return;
+        StateStore.WriteAtomic(PathIn(dir), new JsonObject { ["hash"] = hash, ["salt"] = salt }.ToJsonString());
+    }
+
+    internal static bool Matches(string dir, string normalizedCode)
+    {
+        var o = StateStore.Read(PathIn(dir), out _, out _);
+        if (o == null || string.IsNullOrEmpty(normalizedCode)) return false;
+        return Secret.Matches(normalizedCode, o["hash"]?.ToString(), o["salt"]?.ToString());
+    }
+}
+
 internal static class StateStore
 {
     internal static string BackupPath(string path) => path + ".bak";

@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Nodes;
 
 namespace OtzariaBridge;
 
@@ -30,6 +31,25 @@ internal static class ConfigSealKey
     /// </summary>
     public static bool CounterAccepts(long current, long? presented) =>
         presented == null ? current == 0 : (presented.Value > 0 && presented.Value == current);
+
+    /// <summary>
+    /// qa-final-a #8: מונה לכל זהות (SID של הלקוח מהצינור): config.json הוא לכל פרופיל, ומונה גלובלי יחיד גרם לחתימה של חשבון אחד לפסול את זו של האחר.
+    /// ללא מונה פר-SID קיים: נופלים למונה הגלובלי הישן (חתימות שהונפקו לפני העדכון נשארות תקפות)
+    /// </summary>
+    public static long CounterFor(JsonObject state, string sid)
+    {
+        if (!string.IsNullOrEmpty(sid) && state?["sealCounters"] is JsonObject per && per[sid] is JsonValue pv && pv.TryGetValue<long>(out long pl)) return pl;
+        return state?["sealCounter"] is JsonValue gv && gv.TryGetValue<long>(out long gl) ? gl : 0;
+    }
+
+    /// <summary>מקדם את המונה של הזהות ורושם אותו במצב (השמירה לדיסק באחריות הקורא). sid ריק: המונה הגלובלי</summary>
+    public static long Advance(JsonObject state, string sid)
+    {
+        long next = CounterFor(state, sid) + 1;
+        if (string.IsNullOrEmpty(sid)) state["sealCounter"] = next;
+        else { var per = state["sealCounters"] as JsonObject ?? new JsonObject(); per[sid] = next; state["sealCounters"] = per; }
+        return next;
+    }
 
     /// <summary>
     /// טוען את המפתח. חסר/באורך שגוי: יוצר חדש (כתיבה אטומית: זמני + החלפה); מפתח חדש מבטל חתימות קיימות (fail-closed; חותמים מחדש בשמירת הגדרות).

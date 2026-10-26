@@ -62,6 +62,13 @@ public static class BootHardening
         ("bootmenupolicy", "Standard"),
     };
 
+    /// <summary>ברירות מחדל של Windows לשחזור כשרשומת המקור אבדה (בשחרור מלא בלבד). bootmenupolicy לא כאן: Standard היא ברירת המחדל</summary>
+    internal static readonly Dictionary<string, string> LostStateDefaults = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["recoveryenabled"] = "Yes",
+        ["bootstatuspolicy"] = "DisplayAllFailures",
+    };
+
     // ---------- פרסור (טהור) ----------
 
     /// <summary>ערך שדה מפלט `bcdedit /enum`: שורה "שם   ערך". null אם השדה לא מופיע (= ברירת מחדל של המערכת)</summary>
@@ -200,13 +207,13 @@ public static class BootHardening
                 res.Steps.Add(new Step { Id = id, Ok = ok, Changed = ok, Message = ok ? name + " הוגדר ל-" + desired + " (מקור: " + (cur ?? "ברירת מחדל") + ")" : name + " לא הוגדר (עכשיו: " + (now ?? "ברירת מחדל") + ")" });
                 if (!ok && !has) { recs.Remove(name); dirty = true; }
             }
-            else if (!has && full && name == "recoveryenabled" && string.Equals(cur, desired, StringComparison.OrdinalIgnoreCase))
+            else if (!has && full && LostStateDefaults.TryGetValue(name, out string dflt) && string.Equals(cur, desired, StringComparison.OrdinalIgnoreCase))
             {
-                // אין רשומת מקור (המצב אבד): ברירת המחדל של Windows היא Yes
-                host.Run("bcdedit.exe", "/set {current} recoveryenabled Yes");
+                // אין רשומת מקור (המצב אבד): חוזרים לברירת המחדל של Windows (recoveryenabled=Yes, bootstatuspolicy=DisplayAllFailures; bootmenupolicy=Standard כבר ברירת המחדל)
+                host.Run("bcdedit.exe", "/set {current} " + name + " " + dflt);
                 string now = ParseBcdValue(host.Run("bcdedit.exe", "/enum {current}"), name);
-                bool ok = string.Equals(now, "Yes", StringComparison.OrdinalIgnoreCase);
-                res.Steps.Add(new Step { Id = id, Ok = ok, Changed = ok, Message = ok ? name + " הוחזר ל-Yes" : name + " לא הוחזר (יחזור לנסות)" });
+                bool ok = string.Equals(now, dflt, StringComparison.OrdinalIgnoreCase);
+                res.Steps.Add(new Step { Id = id, Ok = ok, Changed = ok, Message = ok ? name + " הוחזר ל-" + dflt : name + " לא הוחזר (יחזור לנסות)" });
             }
             else if (has)
             {
@@ -254,17 +261,37 @@ public static class BootHardening
     {
         try
         {
-            bool changed = _lastActive != active || full;
-            if (!changed && ++_ticks < 60) return;
-            _ticks = 0;
-            _lastActive = active;
             var host = new RealHost();
-            var r = Enforce(host, active, full);
-            if (full) { _lastResult = r; }
+            var r = EnforceLatched(host, active, full);
+            if (r == null) return;
             if (r.Incomplete) host.Log("boot-hardening: הקשחה לא הושלמה: " + string.Join("; ", r.Steps.Where(s => !s.Ok).Select(s => s.Id)));
             WritePosture(host);
         }
         catch (Exception ex) { Config.Log("boot-hardening: " + ex.Message); }
+    }
+
+    // WHY (qa-final-a #7): Tick (כל 5ש') ו-SelfUninstall רצו במקביל על אותם שדות סטטיים ואותו קובץ מצב; Tick שכבר החליט "להקשיח" יכול היה להחיל
+    // recoveryenabled=No/SafeBoot מחדש אחרי השחרור, והשירות נמחק בלי שמישהו ישחרר. עכשיו נעילה אחת סביב כל הרצה, ו"תפס" שחרור-מלא שחוסם הקשחה מחדש
+    private static readonly object _enforceLock = new();
+    private static bool _releasedFull;
+
+    /// <summary>אחרי כשל הסרה (השירות נשאר): מאפשר הקשחה מחדש</summary>
+    internal static void AllowReharden() { lock (_enforceLock) { _releasedFull = false; _lastActive = null; } }
+
+    /// <summary>null = לא הורצה (דילוג). נעילה + תפס שחרור. host ניתן להזרקה לבדיקות</summary>
+    internal static Result EnforceLatched(IBootHost host, bool active, bool full)
+    {
+        lock (_enforceLock)
+        {
+            if (active && _releasedFull) return null; // ההסרה שחררה והשירות עומד להימחק: לא מחזירים הקשחה
+            bool changed = _lastActive != active || full;
+            if (!changed && ++_ticks < 60) return null;
+            _ticks = 0;
+            _lastActive = active;
+            var r = Enforce(host, active, full);
+            if (full) { _lastResult = r; if (!active && !r.Incomplete) _releasedFull = true; }
+            return r;
+        }
     }
 
     // ---------- מצב אבטחה (BitLocker / TPM / Secure Boot) ----------
@@ -457,15 +484,11 @@ public static class BootHardening
             catch (Exception ex) { Config.Log("safeboot delete: " + ex.Message); return false; }
         }
 
-        public string ReadState() => File.Exists(StateFile) ? File.ReadAllText(StateFile) : null;
+        // כתיבה אטומית עם Flush(true) וגיבוי (.bak) של התקין האחרון, וקריאה שחוזרת לגיבוי כשהראשי פגום (qa-final-a #7): אחרת הפסקת חשמל
+        // מחקה את רשומות ה-orig ("פגום, מתחילים נקי") ושחזור bcd אבד
+        public string ReadState() => StateStore.Read(StateFile, out _, out _)?.ToJsonString();
 
-        public void WriteState(string json)
-        {
-            Directory.CreateDirectory(HardLock.DataDir);
-            string tmp = StateFile + ".tmp";
-            File.WriteAllText(tmp, json);
-            File.Move(tmp, StateFile, true);
-        }
+        public void WriteState(string json) => StateStore.WriteAtomic(StateFile, json);
 
         public void Log(string line) => HardLock.SvcLog(line); // רץ בשירות (SYSTEM): היומן של השירות
     }

@@ -343,10 +343,10 @@ public static class Installer
     {
         HandleLock.Release(); // X3: אחרת תיקיית הנתונים/ה-exe נעולים למחיקה (ר' HandleLock)
         // רכיב ההקשחה (אם מותקן) מוסר קודם, עם אותה סיסמה
-        bool hadService = HardLock.ServiceInstalled();
-        string herr = HardLock.UninstallWithPassword(password);
+        string herr = HardLock.UninstallWithPassword(password, out bool svcAccepted);
         if (herr != null) return herr;
-        string err = Kiosk.ReleaseForUninstall(password, alreadyVerified: hadService);
+        // alreadyVerified רק כשהשירות באמת ענה ok (לא רק "היה מותקן"): אחרת אימות הסיסמה לא דולג (qa-final-a #4)
+        string err = Kiosk.ReleaseForUninstall(password, alreadyVerified: svcAccepted);
         if (err != null) return err;
 
         // WHY: ההסרה בשירות אסינכרונית; ממתינים שתסתיים (ומאמתים) במקום להכריז הצלחה לפני הזמן

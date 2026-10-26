@@ -19,7 +19,18 @@ internal static class UpdateRollback
     internal const string HealthName = "health.ok";
     internal const int DefaultTimeoutSec = 90;
 
-    internal sealed record State(string PrevSha, string PrevVersion, string NewSha, string NewVersion, DateTime StartedUtc);
+    internal const int MaxRestoreAttempts = 3;
+    internal static readonly TimeSpan StalePendingAfter = TimeSpan.FromHours(1);
+
+    /// <summary>Attempts: כמה ניסיונות שחזור כבר נכשלו (qa-final-a #14: שחזור שנכשל לא מוחק את המצב; ניסיון חוזר בעלייה הבאה)</summary>
+    internal sealed record State(string PrevSha, string PrevVersion, string NewSha, string NewVersion, DateTime StartedUtc, int Attempts = 0);
+
+    /// <summary>
+    /// מצב "ממתין" שנשאר מעדכון שלא הושלם (Prepare הצליח וההחלפה לא): ישן משעה, וה-exe הרץ אינו NewSha ואינו PrevSha-שמחכה לו.
+    /// WHY (qa-final-a #14): אחרת הסטטוס מציג rollback לצמיתות
+    /// </summary>
+    internal static bool IsStale(State s, string selfSha, DateTime nowUtc) =>
+        s != null && nowUtc - s.StartedUtc > StalePendingAfter && !string.Equals(selfSha, s.NewSha, StringComparison.OrdinalIgnoreCase);
     internal enum Verdict { None, Healthy, Waiting, Rollback }
 
     internal static string DefaultRoot => Path.Combine(Config.Dir, "rollback");
@@ -119,6 +130,13 @@ internal static class UpdateRollback
         Config.Log("update: הגרסה החדשה לא דיווחה תקינות תוך " + timeoutSec + " שניות; משחזר " + s.PrevVersion);
         try { stopNew(); } catch { }
         string err = Restore(root, installedExe);
+        if (err != null && s.Attempts + 1 < MaxRestoreAttempts)
+        {
+            // שחזור נכשל (למשל exe נעול): שומרים את המצב עם מונה, והעלייה הבאה של הגשר החדש תנסה שוב
+            try { File.Delete(P(root, HealthName)); File.WriteAllText(P(root, StateName), JsonSerializer.Serialize(s with { Attempts = s.Attempts + 1 })); } catch { }
+            Config.Log("update: שחזור נכשל (ניסיון " + (s.Attempts + 1) + " מתוך " + MaxRestoreAttempts + "), המצב נשמר לניסיון חוזר: " + err);
+            return Verdict.Rollback;
+        }
         Clear(root);
         if (err != null) Config.Log("update: שחזור נכשל: " + err);
         else { try { startOld(); } catch (Exception ex) { Config.Log("update: הפעלת הגרסה המשוחזרת נכשלה: " + ex.Message); } }

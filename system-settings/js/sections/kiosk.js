@@ -526,8 +526,8 @@
         '<p class="muted">יצירה מחדש מבטלת את הקודים הקודמים. קוד השחזור הראשי ממשיך לעבוד כרגיל.</p>',
       fields: [
         { name: 'pw', label: 'סיסמת נעילה או קוד שחזור', type: 'password', dir: 'ltr' },
-        { name: 'mode', type: 'select', label: 'מה לעשות עם הקודים', value: 'file',
-          options: [{ value: 'file', label: 'שמירה לקובץ במסמכים' }, { value: 'print', label: 'הדפסה (וגם שמירה לקובץ)' }] }
+        { name: 'mode', type: 'select', label: 'מה לעשות עם הקודים', value: 'none',
+          options: [{ value: 'none', label: 'הצגה במסך בלבד (מומלץ: לכתוב/להדפיס ולשמור הרחק מהמחשב)' }, { value: 'print', label: 'הדפסה (קובץ זמני שנמחק)' }] }
       ],
       actions: [{ label: 'ביטול', value: false }, { label: 'יצירה', value: true, kind: 'primary' }],
       validate: function (x) { return x.pw ? '' : 'יש להקליד סיסמה'; },

@@ -86,11 +86,30 @@ public static class HardLock
     private static DateTime _installedAt = DateTime.MinValue;
     private static DateTime _cacheAt = DateTime.MinValue;
 
+    private static bool? _lastKnownInstalled;
+
+    /// <summary>
+    /// WHY (qa-final-a #9): בעבר חריגה מ-SCM (עומס/כשל) הפכה "מותקן" ל-false ל-30 שניות: המדיניות נקראה מ-config.json (כתיב למשתמש) ו-ConfigSeal ויתר. עכשיו רק
+    /// "השירות לא קיים" (שגיאה 1060) נחשב לא-מותקן. כל כשל אחר = לא ידוע, ואז הערך הידוע האחרון (ואם לא היה ערך: מותקן, fail-closed).
+    /// </summary>
     public static bool ServiceInstalled()
     {
-        try { return ServiceController.GetServices().Any(s => s.ServiceName.Equals(ServiceName, StringComparison.OrdinalIgnoreCase)); }
-        catch { return false; }
+        bool? probe;
+        try { using var sc = new ServiceController(ServiceName); _ = sc.Status; probe = true; }
+        catch (Exception ex) { probe = ProbeFromException(ex); }
+        if (probe != null) _lastKnownInstalled = probe;
+        return DecideInstalled(probe, _lastKnownInstalled);
     }
+
+    /// <summary>false רק כשהחריגה היא "השירות לא קיים" (ERROR_SERVICE_DOES_NOT_EXIST = 1060); אחרת null (לא ידוע)</summary>
+    internal static bool? ProbeFromException(Exception ex)
+    {
+        for (var e = ex; e != null; e = e.InnerException)
+            if (e is System.ComponentModel.Win32Exception w && w.NativeErrorCode == 1060) return false;
+        return null;
+    }
+
+    internal static bool DecideInstalled(bool? probe, bool? lastKnown) => probe ?? lastKnown ?? true;
 
     private static JsonObject ServiceStatus(bool fresh = false)
     {
@@ -337,6 +356,7 @@ public static class HardLock
     internal static object UpdateHealthFor(string root, DateTime nowUtc)
     {
         var st = UpdateRollback.Load(root);
+        if (UpdateRollback.IsStale(st, InstallTrust.SelfSha256(), nowUtc)) st = null; // ממתין ישן שלא רלוונטי לגרסה הרצה (qa-final-a #14)
         string text = null;
         try { text = File.ReadAllText(Path.Combine(root, UpdateRollback.HealthName)); } catch { }
         var v = UpdateRollback.Evaluate(st, text, nowUtc, UpdateRollback.DefaultTimeoutSec);
@@ -357,14 +377,29 @@ public static class HardLock
             string nonce = RunHello(password);
             req["hello"] = nonce;
             // #32 ממצא 1: אם לשירות אין עדיין מפתח HMAC (התקנה ישנה) — מצמידים אותו עכשיו, עם אותו אישור Hello טרי
-            if (res["macPaired"]?.GetValue<bool>() == false)
+            // qa-final-a #10: גם כשהמפתח המקומי אבד (DPAPI: איפוס סיסמה/העברת פרופיל) והשירות מחזיק מפתח — יוצרים חדש ומצמידים מחדש
+            if (NeedsMacPairing(res, PipeMac.LoadKey() != null))
                 Must(Call(new JsonObject { ["op"] = "set-mac-key", ["password"] = password ?? "", ["hello"] = nonce,
                                            ["key"] = Convert.ToBase64String(PipeMac.EnsureKey()) }, timeoutMs));
             PipeMac.Sign(req);
             res = Call(req, timeoutMs);
+            // השירות דחה את החתימה (מפתח לא תואם): הצמדה מחדש עם Hello טרי נוסף, ניסיון אחד נוסף
+            if (res?["code"]?.ToString() == "two_factor" && res["macMismatch"]?.GetValue<bool>() == true)
+            {
+                string nonce2 = RunHello(password);
+                Must(Call(new JsonObject { ["op"] = "set-mac-key", ["password"] = password ?? "", ["hello"] = nonce2,
+                                           ["key"] = Convert.ToBase64String(PipeMac.EnsureKey()) }, timeoutMs));
+                req["hello"] = nonce2;
+                PipeMac.Sign(req);
+                res = Call(req, timeoutMs);
+            }
         }
         return res;
     }
+
+    /// <summary>האם צריך להצמיד מפתח לפני הניסיון: לשירות אין מפתח, או שלגשר אין מפתח מקומי (אבד)</summary>
+    internal static bool NeedsMacPairing(JsonObject twoFactorRes, bool localKeyLoaded) =>
+        twoFactorRes?["macPaired"]?.GetValue<bool>() == false || !localKeyLoaded;
 
     private static string RunHello(string password)
     {
@@ -492,14 +527,24 @@ public static class HardLock
         catch { return false; } // fail-closed
     }
 
-    public static string UninstallWithPassword(string password)
+    /// <summary>
+    /// accepted = השירות עצמו ענה ok:true (אימת סיסמה). WHY (qa-final-a #4): pipe שלא עונה בשירות שמותקן בפועל (תקוע/עמוס) כבר לא נחשב "אין שירות":
+    /// זה היה מדלג על אימות הסיסמה ומשחרר את הנעילה המקומית. עכשיו fail-closed, אלא אם SCM אומר שהשירות לא מותקן
+    /// </summary>
+    public static string UninstallWithPassword(string password, out bool accepted)
     {
+        accepted = false;
         JsonObject r;
         try { r = CallSensitive(new JsonObject { ["op"] = "uninstall", ["password"] = password ?? "" }, password, 5000); }
         catch (BridgeException ex) { return ex.Message; }
-        if (r == null) return null; // אין שירות
-        return r["ok"]?.GetValue<bool>() == true ? null : r["message"]?.ToString() ?? "סיסמה שגויה";
+        if (r == null) return UninstallNoReply(ServiceInstalled());
+        accepted = r["ok"]?.GetValue<bool>() == true;
+        return accepted ? null : r["message"]?.ToString() ?? "סיסמה שגויה";
     }
+
+    /// <summary>הודעת שגיאה כשה-pipe לא ענה בהסרה; null רק כשהשירות באמת לא מותקן (אין מה לאמת מולו)</summary>
+    internal static string UninstallNoReply(bool serviceInstalled) =>
+        serviceInstalled ? "רכיב ההקשחה לא מגיב ולכן אי אפשר לאמת סיסמה (ההסרה נעצרה, הנעילה לא שוחררה). נסו שוב בעוד רגע, או קוד שחזור: --unlock" : null;
 
     private static object Install(JsonElement b)
     {
@@ -685,12 +730,19 @@ public static class HardLock
             string mine = FileVersionInfo.GetVersionInfo(Environment.ProcessPath!).FileVersion ?? "";
             if (cur == mine && new FileInfo(ServiceExe).Length == new FileInfo(Environment.ProcessPath!).Length) return;
             // E2: קודם מבקשים מהשירות לעדכן את עצמו מההוצאה הרשמית (בלי UAC על קובץ ניתן-לכתיבה)
-            var su = Call(new JsonObject { ["op"] = "self-update", ["version"] = Program.Version }, 120_000);
-            if (su?["ok"]?.GetValue<bool>() == true) { Config.Log("service-update: השירות עודכן מההוצאה הרשמית"); return; }
-            Config.Log("service-update: עדכון עצמי לא זמין (" + (su?["message"]?.ToString() ?? "שירות ישן") + ") — חוזרים ל-UAC");
-            using var p = Process.Start(new ProcessStartInfo(Installer.InstalledExe, "--install-service") { UseShellExecute = true, Verb = "runas" });
+            // השירות עונה מיד "התחיל" ומוריד ברקע (qa-final-a #1), לכן timeout קצר; כשל/אי-הרשאה = חוזרים ל-UAC
+            var su = Call(new JsonObject { ["op"] = "self-update", ["version"] = Program.Version }, 5000);
+            if (su?["ok"]?.GetValue<bool>() == true) { Config.Log("service-update: השירות מעדכן את עצמו ברקע מההוצאה הרשמית"); return; }
+            string suCode = su?["code"]?.ToString();
+            if (su == null) { Config.Log("service-update: אין תשובה מהשירות — לא פותחים UAC (ייתכן שהוא עסוק)"); return; }
+            if (suCode == "too_many") { Config.Log("service-update: עדכון כבר רץ — מדלגים"); return; }
+            Config.Log("service-update: עדכון עצמי לא זמין (" + (su["message"]?.ToString() ?? "שירות ישן") + ") — חוזרים ל-UAC");
+            // qa-final-a #13: בלי --src-sha256 ההעתקה נדחתה תמיד (נתיב כתיב-משתמש); הגיבוב נלקח מהקובץ שמורם
+            string uacHash = InstallTrust.Sha256File(Installer.InstalledExe);
+            using var p = Process.Start(new ProcessStartInfo(Installer.InstalledExe, "--install-service --src-sha256 " + uacHash) { UseShellExecute = true, Verb = "runas" });
             p?.WaitForExit(180_000);
-            Config.Log("service-update: הסתיים, קוד " + (p?.HasExited == true ? p.ExitCode : -1));
+            int uacCode = p?.HasExited == true ? p.ExitCode : -1;
+            Config.Log("service-update: הסתיים, קוד " + uacCode + (uacCode == 0 ? "" : " (נכשל; פרטים ב-service.log)"));
         }
         catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223) { Config.Log("service-update: המשתמש ביטל את UAC"); }
         catch (Exception ex) { Config.Log("service-update: " + ex.Message); }
@@ -722,15 +774,28 @@ public static class HardLock
 
     public static int InstallService()
     {
+        bool exists = false, wasRunning = false;
         try
         {
             SecureDir(DataDir); // יוצר ומאבטח אטומית (בלי CreateDirectory קודם)
             SvcLog("install: מתחיל, גרסה " + Program.Version);
             RepairUserPoliciesKeyAcl();
 
-            bool exists = ServiceInstalled();
+            // WHY (qa-final-a #3): אימות המקור (hash/downgrade/מיקום) לפני כל עצירה. סירוב כבר לא משאיר שירות מופסק וגשרים הרוגים
+            string[] cmd = Environment.GetCommandLineArgs();
+            int hi = Array.IndexOf(cmd, "--src-sha256");
+            string expectedHash = hi >= 0 && hi + 1 < cmd.Length ? cmd[hi + 1] : null;
+            string preErr = InstallTrust.Preflight(Environment.ProcessPath!, ServiceExe, expectedHash);
+            if (preErr != null)
+            {
+                SvcLog("install: " + preErr);
+                return 4;
+            }
+
+            exists = ServiceInstalled();
             if (exists)
             {
+                try { using var sc0 = new ServiceController(ServiceName); wasRunning = sc0.Status != ServiceControllerStatus.Stopped; } catch { wasRunning = true; }
                 StopService();
                 // הגשר שהפעיל אותנו (אם רץ מ-Program Files) לא נהרג — ה-exe שלו מוחלף בהעברה-הצידה (CopyVerified)
                 string[] a0 = Environment.GetCommandLineArgs();
@@ -741,14 +806,12 @@ public static class HardLock
 
             Directory.CreateDirectory(ProgDir);
             // לא מעתיקים exe מנתיב שמשתמש רגיל כותב אליו בלי אימות גיבוב (ר' InstallTrust): אחרת החלפת הקובץ ב-LOCALAPPDATA
-            // לפני ההעתקה הייתה מריצה קוד כ-SYSTEM. הבדיקה לפני עצירת השירות/שינוי כלשהו נוסף — כשל משאיר את המצב הקיים
-            string[] cmd = Environment.GetCommandLineArgs();
-            int hi = Array.IndexOf(cmd, "--src-sha256");
-            string expectedHash = hi >= 0 && hi + 1 < cmd.Length ? cmd[hi + 1] : null;
+            // לפני ההעתקה הייתה מריצה קוד כ-SYSTEM. (הבדיקה כבר נעשתה ב-Preflight; כאן נבדקת שוב על הבייטים שנקראים בפועל)
             string copyErr = InstallTrust.CopyVerified(Environment.ProcessPath!, ServiceExe, expectedHash);
             if (copyErr != null)
             {
                 SvcLog("install: " + copyErr);
+                RestartIfWasRunning(exists && wasRunning);
                 return 4;
             }
             RegisterMachineRun();
@@ -793,6 +856,7 @@ public static class HardLock
         catch (Exception ex)
         {
             SvcLog("install failed: " + ex);
+            RestartIfWasRunning(exists && wasRunning); // כשל באמצע: מחזירים את השירות לרוץ (הוא מרים גשרים ואוכף מחדש)
             return 3;
         }
     }
@@ -828,6 +892,19 @@ public static class HardLock
                 try { using var pr = Process.GetProcessById(p.Pid); pr.Kill(); pr.WaitForExit(3000); } catch { }
         }
         catch (Exception ex) { SvcLog("stop bridges: " + ex.Message); }
+    }
+
+    /// <summary>qa-final-a #3: אחרי כשל התקנה/עדכון מנסים להחזיר את השירות לרוץ אם הוא רץ לפני כן (בלי חריגה)</summary>
+    private static void RestartIfWasRunning(bool wasRunning)
+    {
+        if (!wasRunning) return;
+        try
+        {
+            using var sc = new ServiceController(ServiceName);
+            if (sc.Status == ServiceControllerStatus.Stopped) { sc.Start(); sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(20)); }
+            SvcLog("install: השירות הוחזר לרוץ אחרי כשל");
+        }
+        catch (Exception ex) { SvcLog("install: החזרת השירות לרוץ נכשלה: " + ex.Message); }
     }
 
     private static void StopService()
@@ -1091,8 +1168,20 @@ public class HardLockService : ServiceBase
         catch (Exception ex) { HardLock.SvcLog("session change: " + ex.Message); }
     }
 
+    private System.Threading.Timer _confirmTimer;
+
     protected override void OnStart(string[] args)
     {
+        // qa-final-a #2: עדכון עצמי שלא התייצב (קריסות חוזרות בעלייה) מחזיר את ה-exe הקודם; יציאה בכשל גורמת ל-SCM להפעיל מחדש עם הקודם
+        try
+        {
+            var g = SvcUpdateGuard.OnStart(HardLock.DataDir, HardLock.ServiceExe, HardLock.ServiceExe + ".old");
+            if (g == SvcUpdateGuard.Outcome.RolledBack) { HardLock.SvcLog("service: הגרסה המעודכנת לא התייצבה — שוחזר ה-exe הקודם, יוצאים להפעלה מחדש"); Environment.Exit(1); }
+            if (g == SvcUpdateGuard.Outcome.RollbackFailed) HardLock.SvcLog("service: עדכון ממתין לא התייצב, ושחזור ה-exe הקודם נכשל (ידני: svc-update-pending / .old)");
+            if (g == SvcUpdateGuard.Outcome.Counted)
+                _confirmTimer = new System.Threading.Timer(_ => { SvcUpdateGuard.Confirm(HardLock.DataDir); HardLock.SvcLog("service: העדכון אושר (התייצב)"); }, null, SvcUpdateGuard.ConfirmAfterSeconds * 1000, System.Threading.Timeout.Infinite);
+        }
+        catch (Exception ex) { HardLock.SvcLog("update guard: " + ex.Message); }
         Load();
         HardLock.MarkBundleReady();
         // פתיחה זמנית לא שורדת אתחול/הפעלה מחדש: אין לנו נקודת סיום מונוטונית אמינה מעבר לתהליך הזה, ושעון הקיר ניתן להזזה
@@ -1254,6 +1343,8 @@ public class HardLockService : ServiceBase
         if (_corrupt) return;
         // אטומי: זמני + Flush(true) + גיבוי של התקין האחרון + החלפה (ר' StateStore)
         StateStore.WriteAtomic(StateFile, _state.ToJsonString(SaveOptions));
+        try { RecoveryCopy.Sync(HardLock.DataDir, _state["recoveryHash"]?.ToString(), _state["recoverySalt"]?.ToString()); }
+        catch (Exception ex) { HardLock.SvcLog("recovery-copy: " + ex.Message); }
     }
 
     // החישוב הקריפטוגרפי הטהור (Hash/Matches/נורמליזציה) משותף עם Kiosk דרך Secret.cs
@@ -1291,6 +1382,20 @@ public class HardLockService : ServiceBase
         if (ok) { _limiter.Success(_clientKey); return null; }
         _limiter.Fail(_clientKey, NowMs);
         return Err("wrong_password", "סיסמה שגויה");
+    }
+
+    /// <summary>
+    /// qa-final-a #12: במצב פגום (hardlock.json + .bak) שום סיסמה לא עבדה והמכשיר נשאר נעול עד מנהל מורם. כאן קוד השחזור מאומת מול עותק
+    /// נפרד של ה-hash (recovery-copy.json, נכתב בכל Save, באותה תיקיה מוגנת), בדלי ניסיונות משלו. err = שגיאת too_many/wrong_password
+    /// </summary>
+    private bool CorruptRecoveryOk(string code, out JsonObject err)
+    {
+        err = null;
+        string rk = _clientKey + "|rec";
+        if (!_limiter.CanTry(rk, NowMs, out int w)) { err = Err("too_many", $"יותר מדי ניסיונות. נסו שוב בעוד {w} שניות"); return false; }
+        if (RecoveryCopy.Matches(HardLock.DataDir, Secret.NormalizeRecovery(code))) { _limiter.Success(rk); return true; }
+        _limiter.Fail(rk, NowMs);
+        return false;
     }
 
     /// <summary>#69: קוד גיבוי חד-פעמי — אם תואם, נשרף מיד (נשמר לדיסק) ומחזיר true. תחת אותה השהיה של ניסיונות שגויים</summary>
@@ -1537,6 +1642,7 @@ public class HardLockService : ServiceBase
     [ThreadStatic] private static int _clientPid;
     [ThreadStatic] private static int _clientSession;
     [ThreadStatic] private static bool _clientOwnBridge;
+    [ThreadStatic] private static string _clientSid;
 
     [DllImport("kernel32.dll")] private static extern bool GetNamedPipeClientProcessId(IntPtr pipe, out uint pid);
     [DllImport("kernel32.dll")] private static extern bool ProcessIdToSessionId(uint pid, out uint session);
@@ -1583,7 +1689,9 @@ public class HardLockService : ServiceBase
                 {
                     _hello.Remove(nonce); // ניסיון עם חתימה פגומה שורף את האישור
                     HardLock.SvcLog("service: נדחתה פקודה רגישה עם חתימה לא תקינה (" + q["op"] + ")");
-                    return Err("two_factor", Lang.T("אישור Windows Hello אינו חתום כראוי — נסו שוב", "The Windows Hello approval is not properly signed — please try again"));
+                    var bad = Err("two_factor", Lang.T("אישור Windows Hello אינו חתום כראוי — נסו שוב", "The Windows Hello approval is not properly signed — please try again"));
+                    bad["macPaired"] = true; bad["macMismatch"] = true; // qa-final-a #10: הגשר מצמיד מחדש מפתח (סיסמה + Hello טרי) ומנסה שוב
+                    return bad;
                 }
                 if (consume) _hello.Remove(nonce); // חד-פעמי
                 return null;
@@ -1640,6 +1748,7 @@ public class HardLockService : ServiceBase
                 }
                 catch { }
                 _clientKey = ClientBuckets.Key(sidText, admin, ownBridge);
+                _clientSid = sidText;
                 _clientOwnBridge = ownBridge;
                 _clientPid = 0; _clientSession = 0;
                 try
@@ -1736,7 +1845,7 @@ public class HardLockService : ServiceBase
                     byte[] expected;
                     if (q["kind"]?.ToString() == "seal")
                     {
-                        long cur = _state["sealCounter"] is JsonValue scv && scv.TryGetValue<long>(out long scl) ? scl : 0;
+                        long cur = ConfigSealKey.CounterFor(_state, _clientSid);
                         long? presented = q["counter"] is JsonValue pcv && pcv.TryGetValue<long>(out long pcl) ? pcl : null;
                         if (!ConfigSealKey.CounterAccepts(cur, presented)) return new JsonObject { ["ok"] = true, ["valid"] = false };
                         expected = presented == null ? ConfigSealKey.Mac(_sealKey, vdata) : ConfigSealKey.MacWithCounter(_sealKey, vdata, presented.Value);
@@ -1772,8 +1881,7 @@ public class HardLockService : ServiceBase
                     if (q["kind"]?.ToString() == "seal")
                     {
                         // מונה מונוטוני: נשמר בדיסק לפני שהחתימה יוצאת, כך שחתימה שיצאה תמיד עם מונה שכבר נרשם (כשל שמירה = שגיאה, לא חתימה)
-                        long next = (_state["sealCounter"] is JsonValue ov && ov.TryGetValue<long>(out long ol) ? ol : 0) + 1;
-                        _state["sealCounter"] = next;
+                        long next = ConfigSealKey.Advance(_state, _clientSid);
                         try { Save(); } catch (Exception ex) { HardLock.SvcLog("config-sign counter: " + ex.Message); return Err("internal", "שמירת מונה החתימה נכשלה"); }
                         return new JsonObject { ["ok"] = true, ["counter"] = next, ["mac"] = Convert.ToBase64String(ConfigSealKey.MacWithCounter(_sealKey, cdata, next)) };
                     }
@@ -1782,7 +1890,14 @@ public class HardLockService : ServiceBase
 
 
                 case "self-update": // E2/#30 ממצא 8 — ר' SvcUpdate.cs
-                    return SvcUpdate.Run(q["version"]?.ToString(), Enforced);
+                {
+                    // qa-final-a #1: לא חוסם את _gate (ההורדה ברקע); מנהל / גשר של השירות / סיסמת נעילה בלבד (הדלי הרגיל של Check)
+                    bool suPw = false;
+                    if (!_clientAdmin && !_clientOwnBridge && !string.IsNullOrEmpty(pw)) suPw = Check(pw, false) == null;
+                    if (!SvcUpdate.Authorized(_clientAdmin, _clientOwnBridge, suPw))
+                        return Err("forbidden", "עדכון עצמי של השירות דורש הרשאות מנהל, גשר שהשירות הפעיל או סיסמת נעילה");
+                    return SvcUpdate.Start(q["version"]?.ToString(), Enforced, () => { lock (_gate) return !Enforced; });
+                }
 
                 case "setup":
                     if (Configured && !_corrupt) return Err("bad_request", "כבר הוגדר");
@@ -1852,7 +1967,8 @@ public class HardLockService : ServiceBase
                 {
                     string np = q["new"]?.ToString() ?? "";
                     // #69: קוד גיבוי חד-פעמי (שכחתי סיסמה) — נשרף רק אחרי שהסיסמה החדשה עברה את הבדיקות
-                    bool bk = PasswordPolicy.IsValid(np) && !Matches(np, "tempUnlockHash", "tempUnlockSalt") && UseBackup(q["old"]?.ToString());
+                    // qa-final-a #15: בדיקת קוד הגיבוי בלי לשרוף (תחת דלי הניסיונות שלו); ההשוואה לסיסמת הפתיחה הזמנית (PBKDF2) רק אחרי אימות
+                    bool bk = PasswordPolicy.IsValid(np) && UseBackup(q["old"]?.ToString(), burn: false);
                     if (!bk)
                     {
                         if ((e = Check(q["old"]?.ToString(), true)) != null) return e;
@@ -1860,6 +1976,7 @@ public class HardLockService : ServiceBase
                     }
                     if (!PasswordPolicy.IsValid(np)) return Err("bad_request", $"הסיסמה חייבת להכיל לפחות {PasswordPolicy.MinLength} תווים"); // S1 ממצא 8: זהה לגשר
                     if (Matches(np, "tempUnlockHash", "tempUnlockSalt")) return Err("bad_request", "סיסמת הנעילה חייבת להיות שונה מסיסמת הפתיחה הזמנית");
+                    if (bk && !UseBackup(q["old"]?.ToString())) return Err("wrong_password", "קוד הגיבוי אינו תקף"); // השריפה רק אחרי שהסיסמה החדשה עברה את הבדיקות
                     byte[] salt = RandomNumberGenerator.GetBytes(16);
                     _state["salt"] = Convert.ToBase64String(salt);
                     _state["passwordHash"] = Secret.Hash(np, salt);
@@ -2037,7 +2154,10 @@ public class HardLockService : ServiceBase
                     // S1 ממצא 6: מצב לא מוגדר/פגום כבר לא פותח בלי אימות: נדרש מנהל מורם (מסלול חירום: cmd מורם עם --uninstall, או sc delete)
                     if (_corrupt || !Configured)
                     {
-                        if (!_clientAdmin) return Err("forbidden", "הסרה כשהרכיב לא מוגדר/פגום דורשת הרשאות מנהל מורם");
+                        // qa-final-a #12: מצב פגום: מסלול חירום גם בלי מנהל מורם, בקוד השחזור מול העותק הנפרד (recovery-copy.json)
+                        JsonObject ce = null;
+                        if (!_clientAdmin && !(_corrupt && CorruptRecoveryOk(pw, out ce)))
+                            return ce ?? Err("forbidden", "הסרה כשהרכיב לא מוגדר/פגום דורשת הרשאות מנהל מורם (או קוד שחזור כשהמצב פגום)");
                     }
                     else
                     {
@@ -2519,6 +2639,7 @@ public class HardLockService : ServiceBase
             {
                 HardLock.SvcLog("uninstall: שחרור הקשחת האתחול לא הושלם - ההסרה נעצרה (להריץ שוב --uninstall)");
                 RestoreRecovery();
+                BootHardening.AllowReharden();
                 lock (_gate) { _uninstalling = false; _state["uninstalling"] = false; Save(); } // חוזרים לאכיפה רגילה; ניסיון חוזר אפשרי
                 return;
             }
