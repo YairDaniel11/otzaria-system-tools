@@ -274,6 +274,40 @@ body {
 @keyframes m-blink { 50% { opacity: 0; } }
 .is-busy { opacity: .65; pointer-events: none; transition: opacity var(--m-fast) var(--m-ease); }
 
+/* ---------- פלטת פקודות (palette.js) ---------- */
+.pal-trigger { display: inline-flex; align-items: center; gap: 0.5em; height: 2.25em; padding: 0 0.75em; margin-inline-end: 0.5em;
+  border-radius: var(--radius-pill); border: 1px solid var(--color-outline-variant); background: var(--color-surface-container-low);
+  color: var(--color-on-surface-variant); font: inherit; font-size: 0.875em; cursor: pointer;
+  transition: border-color var(--m-fast) var(--m-ease), background var(--m-fast) var(--m-ease), box-shadow var(--m-med) var(--m-ease); }
+.pal-trigger:hover { border-color: var(--color-primary); background: var(--color-surface-container-lowest); box-shadow: var(--m-elev-1); }
+.pal-trigger .ic, .pal-trigger svg { width: 1.1em; height: 1.1em; }
+@media (max-width: 40em) { .pal-trigger span, .pal-trigger kbd { display: none; } }
+kbd { font: 0.75em var(--font-mono); padding: 0.1em 0.45em; border-radius: 0.35em; border: 1px solid var(--color-outline-variant);
+  border-bottom-width: 2px; background: var(--color-surface-container-lowest); color: var(--color-on-surface-variant); }
+.pal-scrim { position: fixed; inset: 0; z-index: 1000; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh;
+  background: color-mix(in srgb, var(--color-inverse-surface) 35%, transparent); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  opacity: 0; transition: opacity 180ms var(--m-ease); }
+.pal-scrim.open { opacity: 1; }
+.pal { width: min(36em, 92vw); max-height: 70vh; display: flex; flex-direction: column; overflow: hidden;
+  border-radius: 1.25em; background: var(--color-surface-container-lowest); box-shadow: var(--m-elev-3);
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 60%, transparent);
+  transform: translateY(-0.75em) scale(.97); transition: transform var(--m-med) var(--m-ease-spring); }
+.pal-scrim.open .pal { transform: none; }
+.pal-head { display: flex; align-items: center; gap: 0.75em; padding: 0.875em 1.125em; border-bottom: 1px solid var(--color-outline-variant); }
+.pal-head > .ic, .pal-head > svg { width: 1.35em; height: 1.35em; color: var(--color-primary); flex: none; }
+.pal-in { flex: 1; border: 0; outline: 0; background: none; font: inherit; font-size: 1.1em; color: var(--color-on-surface); min-width: 0; }
+.pal-in:focus { box-shadow: none; }
+.pal-list { overflow-y: auto; padding: 0.375em; }
+.pal-item { display: flex; align-items: center; gap: 0.75em; width: 100%; padding: 0.625em 0.75em; border: 0; border-radius: 0.75em;
+  background: none; font: inherit; color: var(--color-on-surface); text-align: start; cursor: pointer; }
+.pal-item .ic, .pal-item svg { width: 1.25em; height: 1.25em; flex: none; color: var(--color-on-surface-variant); }
+.pal-item.on { background: color-mix(in srgb, var(--color-primary) 12%, transparent); }
+.pal-item.on .ic, .pal-item.on svg { color: var(--color-primary); }
+.pal-t { flex: 1; }
+.pal-k { font-size: 0.75em; color: var(--color-on-surface-variant); padding: 0.1em 0.6em; border-radius: var(--radius-pill); background: var(--color-surface-container); }
+.pal-empty { padding: 1.5em; text-align: center; }
+.pal-foot { display: flex; gap: 1.25em; padding: 0.5em 1.125em; border-top: 1px solid var(--color-outline-variant); background: var(--color-surface-container-low); }
+
 /* ---------- נגישות: ביטול תנועה ---------- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
