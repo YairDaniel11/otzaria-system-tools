@@ -216,6 +216,45 @@ body {
                             border: 2px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--color-primary) 45%, transparent); }
 
+/* ---------- לשוניות פנימיות בטאב "מצב נעילה" (kiosk-tabs.js) ---------- */
+.k-off { display: none !important; }
+.k-tabs {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; gap: 0.25em; padding: 0.3125em; margin: 0.75em 0 1em;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-surface-container) 85%, transparent);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 55%, transparent);
+  box-shadow: var(--m-elev-1);
+  overflow-x: auto; scrollbar-width: none;
+}
+.k-tabs::-webkit-scrollbar { display: none; }
+.k-ind {
+  position: absolute; top: 0.3125em; bottom: 0.3125em; left: 0;
+  width: var(--k-w, 0); transform: translateX(var(--k-x, 0));
+  border-radius: var(--radius-pill); background: var(--color-surface-container-lowest);
+  box-shadow: var(--m-elev-1), inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 20%, transparent);
+  transition: transform var(--m-med) var(--m-ease-spring), width var(--m-med) var(--m-ease);
+}
+.k-tab {
+  position: relative; z-index: 1; flex: 1 0 auto;
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.4em;
+  min-height: 2.5em; padding: 0 1em; border: 0; background: none; cursor: pointer;
+  border-radius: var(--radius-pill); font: inherit; color: var(--color-on-surface-variant);
+  transition: color var(--m-fast) var(--m-ease);
+}
+.k-tab .ic, .k-tab svg { width: 1.15em; height: 1.15em; }
+.k-tab:hover { color: var(--color-on-surface); }
+.k-tab.on { color: var(--color-primary); font-weight: 600; }
+.k-tabs ~ .card:not(.k-off), .k-tabs ~ section:not(.k-off) { animation: m-rise var(--m-med) var(--m-ease) both; }
+@media (max-width: 34em) { .k-tab span { display: none; } }
+
+/* כרטיס סטטוס הנעילה — מודגש יותר */
+.status-card { border-radius: 1.25em; box-shadow: var(--m-elev-2); position: relative; overflow: hidden; }
+.status-card.active { background: var(--m-accent-grad); color: var(--color-on-primary); }
+.status-card .status-ic { transition: transform var(--m-slow) var(--m-ease-spring); }
+.status-card:hover .status-ic { transform: rotate(-8deg) scale(1.06); }
+
 /* ---------- נגישות: ביטול תנועה ---------- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
