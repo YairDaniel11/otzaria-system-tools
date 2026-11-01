@@ -1,0 +1,226 @@
+/* modern.css — שכבת עיצוב מודרנית משותפת (סייר קבצים + הגדרות מערכת).
+   קובץ זהה פיזית בשני התוספים (כמו base.css) — בכל שינוי יש לעדכן את שני העותקים.
+   נטען אחרון, רק דורס מראה: אין שינוי במבנה, ב-JS או בצבעי המארח — כל הצבעים נגזרים
+   מטוקני אוצריא (--color-*) דרך color-mix, כך שערכת הנושא (בהיר/כהה) נשמרת.
+   כל ההנפשות מכובות ב-prefers-reduced-motion. */
+
+:root {
+  --m-ease: cubic-bezier(.2, .8, .2, 1);
+  --m-ease-spring: cubic-bezier(.34, 1.4, .64, 1);
+  --m-fast: 140ms;
+  --m-med: 260ms;
+  --m-slow: 420ms;
+  --m-elev-1: 0 1px 2px color-mix(in srgb, var(--color-on-surface) 8%, transparent),
+              0 1px 3px color-mix(in srgb, var(--color-on-surface) 6%, transparent);
+  --m-elev-2: 0 2px 6px color-mix(in srgb, var(--color-on-surface) 9%, transparent),
+              0 8px 24px color-mix(in srgb, var(--color-on-surface) 7%, transparent);
+  --m-elev-3: 0 12px 40px color-mix(in srgb, var(--color-on-surface) 18%, transparent);
+  --m-glow: 0 0 0 0.25em color-mix(in srgb, var(--color-primary) 22%, transparent);
+  --m-accent-grad: linear-gradient(135deg,
+      var(--color-primary),
+      color-mix(in srgb, var(--color-primary) 55%, var(--color-tertiary)));
+  --m-radius-card: 1.125em;
+}
+
+/* ---------- הנפשות ---------- */
+@keyframes m-rise { from { opacity: 0; transform: translateY(0.5em); } to { opacity: 1; transform: none; } }
+@keyframes m-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes m-pop { 0% { opacity: 0; transform: scale(.94) translateY(0.5em); } 100% { opacity: 1; transform: none; } }
+@keyframes m-pulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 45%, transparent); }
+                     50% { box-shadow: 0 0 0 0.35em transparent; } }
+@keyframes m-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes m-slide-in { from { opacity: 0; transform: translateX(-0.75em); } to { opacity: 1; transform: none; } }
+
+/* ---------- רקע ומעטפת ---------- */
+body {
+  background:
+    radial-gradient(60em 30em at 100% -10%, color-mix(in srgb, var(--color-primary) 7%, transparent), transparent 70%),
+    radial-gradient(50em 30em at -10% 110%, color-mix(in srgb, var(--color-tertiary) 6%, transparent), transparent 70%),
+    var(--color-surface);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* סרגל עליון "זכוכית" צף */
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--color-surface) 78%, transparent);
+  backdrop-filter: saturate(1.6) blur(14px);
+  -webkit-backdrop-filter: saturate(1.6) blur(14px);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-outline-variant) 55%, transparent);
+  box-shadow: var(--m-elev-1);
+}
+.topbar h1 {
+  background: var(--m-accent-grad);
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+  font-weight: 700; letter-spacing: -0.01em;
+}
+
+/* צ'יפ חיבור עם נקודה פועמת */
+.topbar-chip { transition: background var(--m-med) var(--m-ease), color var(--m-med) var(--m-ease); border-radius: var(--radius-pill); }
+.topbar-chip .dot { animation: m-pulse 2.2s ease-in-out infinite; color: currentColor; }
+
+/* ---------- כפתורים ---------- */
+.btn, .icon-btn, .topbar-btn, .fx-cmd, .fx-seg-btn, .fx-tab, .nav-item, .power-btn, .chip, .fx-crumb {
+  transition: background-color var(--m-fast) var(--m-ease), color var(--m-fast) var(--m-ease),
+              box-shadow var(--m-med) var(--m-ease), transform var(--m-fast) var(--m-ease),
+              border-color var(--m-fast) var(--m-ease);
+}
+.btn:not(:disabled):active, .icon-btn:not(:disabled):active, .topbar-btn:not(:disabled):active,
+.fx-cmd:not(:disabled):active, .power-btn:active, .chip:active { transform: scale(.96); }
+.icon-btn:hover, .topbar-btn:hover { background: color-mix(in srgb, var(--color-primary) 10%, transparent); }
+
+.btn-primary, .btn.btn-primary {
+  background: var(--m-accent-grad);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--color-primary) 30%, transparent);
+}
+.btn-primary:not(:disabled):hover {
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--color-primary) 40%, transparent);
+  transform: translateY(-1px);
+}
+.btn-tonal:not(:disabled):hover { box-shadow: var(--m-elev-1); }
+
+/* טבעת מיקוד רכה ועקבית */
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--m-glow);
+}
+
+/* ---------- ניווט צד (הגדרות + סייר) ---------- */
+.sidenav, .fx-side {
+  background: color-mix(in srgb, var(--color-surface-container-low) 70%, transparent);
+}
+.nav-item { position: relative; border-radius: var(--radius-pill); }
+.nav-item:hover { transform: translateX(-2px); }
+[dir="ltr"] .nav-item:hover { transform: translateX(2px); }
+.nav-item.active {
+  background: color-mix(in srgb, var(--color-primary) 14%, var(--color-surface-container-lowest));
+  color: var(--color-primary);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 18%, transparent);
+}
+.nav-item.active::before {
+  content: ""; position: absolute; inset-inline-start: 0.25em; top: 25%; bottom: 25%;
+  width: 0.25em; border-radius: 1em; background: var(--m-accent-grad);
+  animation: m-fade var(--m-med) var(--m-ease);
+}
+.nav-item .ic { transition: transform var(--m-med) var(--m-ease-spring); }
+.nav-item:hover .ic, .nav-item.active .ic { transform: scale(1.12); }
+
+/* ---------- כרטיסים ---------- */
+.card, .fx-set-card, .status-card, .fx-lock-card, .offline-card, .about-hero, .fx-set-hero {
+  border-radius: var(--m-radius-card);
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 55%, transparent);
+  box-shadow: var(--m-elev-1);
+  transition: box-shadow var(--m-med) var(--m-ease), transform var(--m-med) var(--m-ease), border-color var(--m-med) var(--m-ease);
+}
+.card:hover, .fx-set-card:hover, .status-card:hover {
+  box-shadow: var(--m-elev-2);
+  border-color: color-mix(in srgb, var(--color-primary) 25%, var(--color-outline-variant));
+}
+.about-hero, .fx-set-hero, .clock-hero {
+  background:
+    radial-gradient(30em 12em at 85% 0%, color-mix(in srgb, var(--color-primary) 16%, transparent), transparent 70%),
+    radial-gradient(25em 12em at 10% 100%, color-mix(in srgb, var(--color-tertiary) 12%, transparent), transparent 70%),
+    var(--color-surface-container-lowest);
+}
+.clock-big {
+  background: var(--m-accent-grad);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  font-variant-numeric: tabular-nums;
+}
+
+/* כניסה מדורגת של תוכן מקטע/עמוד */
+.app-content > *, .fx-set-content > *, .fx-setpage > * { animation: m-rise var(--m-slow) var(--m-ease) both; }
+.section > .card, .section > .field-group, .fx-set-content .fx-set-card { animation: m-rise var(--m-slow) var(--m-ease) both; }
+.section > :nth-child(2) { animation-delay: 40ms; }
+.section > :nth-child(3) { animation-delay: 80ms; }
+.section > :nth-child(4) { animation-delay: 120ms; }
+.section > :nth-child(5) { animation-delay: 160ms; }
+.section > :nth-child(n+6) { animation-delay: 200ms; }
+.section-title { letter-spacing: -0.01em; }
+
+/* שורות הגדרה */
+.setting-row, .switch-row, .list-item, .fx-set-row, .health-row, .prog-item {
+  border-radius: var(--radius-md);
+  transition: background var(--m-fast) var(--m-ease);
+}
+.setting-row:hover, .switch-row:hover, .list-item:hover, .fx-set-row:hover, .prog-item:hover {
+  background: color-mix(in srgb, var(--color-primary) 5%, transparent);
+}
+
+/* ---------- מתג ---------- */
+.switch { transition: background var(--m-med) var(--m-ease), border-color var(--m-med) var(--m-ease), box-shadow var(--m-med) var(--m-ease); }
+.switch .knob { transition: right var(--m-med) var(--m-ease-spring), left var(--m-med) var(--m-ease-spring),
+                            width var(--m-med) var(--m-ease), height var(--m-med) var(--m-ease), background var(--m-med) var(--m-ease); }
+.switch.on { background: var(--m-accent-grad); box-shadow: 0 2px 8px color-mix(in srgb, var(--color-primary) 30%, transparent); }
+.switch:not(:disabled):active .knob { width: 1.75em; }
+
+/* מחוון */
+.range { accent-color: var(--color-primary); }
+
+/* שדות קלט */
+.input, .fx-select, .kb-select, .time-select, select, textarea {
+  transition: border-color var(--m-fast) var(--m-ease), box-shadow var(--m-med) var(--m-ease), background var(--m-fast) var(--m-ease);
+}
+.input:focus, select:focus, textarea:focus { border-color: var(--color-primary); box-shadow: var(--m-glow); }
+
+/* ---------- דיאלוגים וטוסטים ---------- */
+.dlg-scrim { backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.dlg { border-radius: 1.5em; box-shadow: var(--m-elev-3); }
+.dlg-scrim.open .dlg { animation: m-pop var(--m-med) var(--m-ease-spring); }
+.dlg-icon { animation: m-pop var(--m-slow) var(--m-ease-spring) both; animation-delay: 60ms; }
+.toast { border-radius: var(--radius-pill); box-shadow: var(--m-elev-3);
+         backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+         transition: opacity var(--m-med) var(--m-ease), transform var(--m-med) var(--m-ease-spring); }
+.fx-menu { border-radius: 0.875em; box-shadow: var(--m-elev-3); animation: m-pop var(--m-fast) var(--m-ease) both;
+           backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.fx-menu-item { border-radius: 0.5em; transition: background var(--m-fast) var(--m-ease); }
+
+/* מצבי טעינה */
+.loading, .ss-load-step { animation: m-fade var(--m-med) var(--m-ease) both; }
+.spinner { border-top-color: var(--color-primary) !important; }
+
+/* ---------- סייר קבצים ---------- */
+.fx-tabs { gap: 0.25em; }
+.fx-tab { border-radius: 0.75em 0.75em 0 0; }
+.fx-tab.on { box-shadow: 0 -2px 0 0 var(--color-primary) inset; }
+.fx-tab-new:hover, .fx-tab-x:hover { transform: rotate(90deg); transition: transform var(--m-med) var(--m-ease-spring); }
+
+.fx-crumbs, .topbar .fx-search .input { border-radius: var(--radius-pill); }
+.fx-crumb { border-radius: 0.5em; }
+.fx-crumb:hover { background: color-mix(in srgb, var(--color-primary) 10%, transparent); color: var(--color-primary); }
+.fx-search:focus-within .fx-search-ic { color: var(--color-primary); transform: scale(1.1); transition: transform var(--m-med) var(--m-ease-spring); }
+
+.fx-cmds { gap: 0.25em; }
+.fx-cmd { border-radius: var(--radius-pill); }
+.fx-cmd:not(:disabled):hover { background: color-mix(in srgb, var(--color-primary) 10%, transparent); color: var(--color-primary); }
+
+.fx-row { border-radius: 0.625em; transition: background var(--m-fast) var(--m-ease), box-shadow var(--m-fast) var(--m-ease); }
+.fx-row.sel { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 30%, transparent); }
+.fx-row .fx-ic, .fx-row svg { transition: transform var(--m-med) var(--m-ease-spring); }
+.fx-row:hover .fx-ic { transform: scale(1.08); }
+
+.fx-preview, .fx-viewer { animation: m-slide-in var(--m-med) var(--m-ease) both; }
+.fx-banner { border-radius: var(--m-radius-card); animation: m-rise var(--m-med) var(--m-ease) both; box-shadow: var(--m-elev-1); }
+.fx-empty { animation: m-fade var(--m-slow) var(--m-ease) both; }
+.fx-split { transition: background var(--m-fast) var(--m-ease); }
+.fx-split:hover { background: color-mix(in srgb, var(--color-primary) 30%, transparent); }
+.fx-libhit { border-radius: var(--radius-md); transition: background var(--m-fast) var(--m-ease), transform var(--m-fast) var(--m-ease); }
+.fx-libhit:hover { transform: translateY(-1px); }
+
+/* פס גלילה דק ועדין */
+* { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--color-on-surface) 22%, transparent) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--color-on-surface) 20%, transparent); border-radius: 10px;
+                            border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--color-primary) 45%, transparent); }
+
+/* ---------- נגישות: ביטול תנועה ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+/* דפדפן ישן ללא color-mix — נשארים עם עיצוב base.css */
+@supports not (color: color-mix(in srgb, red 50%, blue)) {
+  .topbar { background: var(--color-surface); }
+}
