@@ -255,6 +255,25 @@ body {
 .status-card .status-ic { transition: transform var(--m-slow) var(--m-ease-spring); }
 .status-card:hover .status-ic { transform: rotate(-8deg) scale(1.06); }
 
+/* ---------- כרטיס מצביע וסמן (cursor.js) ---------- */
+.cur-preview { display: flex; align-items: center; gap: 1em; padding: 1em; margin-bottom: 0.75em; border-radius: var(--radius-md);
+  background: repeating-conic-gradient(color-mix(in srgb, var(--color-on-surface) 6%, transparent) 0 25%, transparent 0 50%) 0 0 / 1em 1em; }
+.cur-arrow { width: calc(1.1em + var(--cur-s, 1) * 0.35em); aspect-ratio: 16 / 26; background: var(--cur-c, #fff);
+  clip-path: polygon(0 0, 0 81%, 33% 63%, 57% 94%, 80% 88%, 57% 60%, 100% 60%);
+  filter: drop-shadow(0 0 1px #000) drop-shadow(1px 2px 2px rgba(0,0,0,.35));
+  transition: width var(--m-med) var(--m-ease-spring), background var(--m-med) var(--m-ease); }
+.cur-swatches { display: flex; flex-wrap: wrap; gap: 0.5em; margin: 0.5em 0 1em; }
+.cur-sw { width: 2.25em; height: 2.25em; border-radius: 50%; border: 2px solid var(--color-outline-variant); background: var(--sw);
+  cursor: pointer; position: relative; overflow: hidden; transition: transform var(--m-fast) var(--m-ease-spring), box-shadow var(--m-med) var(--m-ease); }
+.cur-sw:hover { transform: scale(1.12); }
+.cur-sw.on { box-shadow: 0 0 0 3px var(--color-surface), 0 0 0 5px var(--color-primary); }
+.cur-sw-pick { background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red); }
+.cur-sw-pick input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.cur-caret { display: inline-block; width: calc(var(--cw, 1) * 1px); height: 1em; background: currentColor; margin-inline-end: 0.4em;
+  vertical-align: -0.15em; animation: m-blink 1s steps(1) infinite; }
+@keyframes m-blink { 50% { opacity: 0; } }
+.is-busy { opacity: .65; pointer-events: none; transition: opacity var(--m-fast) var(--m-ease); }
+
 /* ---------- נגישות: ביטול תנועה ---------- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
