@@ -87,25 +87,39 @@ body {
   box-shadow: var(--m-glow);
 }
 
-/* ---------- ניווט צד (הגדרות + סייר) ---------- */
+/* ---------- ניווט צד (הגדרות + סייר) — בסגנון סרגל הצד של אוצריא ----------
+   אייקוני קו דקים; פריט נבחר: רקע בז' מעוגל ופס סימון בצד ההתחלה. */
+:root {
+  /* נגזר ממשטח המארח, כך שמתאים אוטומטית לבהיר ולכהה של אוצריא */
+  --m-nav-beige: #C9A86A;
+  --m-nav-sel-bg: color-mix(in srgb, var(--m-nav-beige) 24%, var(--color-surface-container-lowest, #fff));
+  --m-nav-sel-fg: var(--color-on-surface, #1A1B20);
+  --m-nav-sel-bar: color-mix(in srgb, var(--m-nav-beige) 80%, var(--color-on-surface, #1A1B20));
+  --m-nav-hover-bg: color-mix(in srgb, var(--m-nav-beige) 11%, transparent);
+}
 .sidenav, .fx-side {
   background: color-mix(in srgb, var(--color-surface-container-low) 70%, transparent);
 }
-.nav-item { position: relative; border-radius: var(--radius-pill); }
-.nav-item:hover { transform: translateX(-2px); }
-[dir="ltr"] .nav-item:hover { transform: translateX(2px); }
+.nav-item { position: relative; border-radius: 0.75em; }
+.nav-item .ic { stroke-width: 1.35; }
+.nav-item:hover { background: var(--m-nav-hover-bg); }
 .nav-item.active {
-  background: color-mix(in srgb, var(--color-primary) 14%, var(--color-surface-container-lowest));
-  color: var(--color-primary);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 18%, transparent);
+  background: var(--m-nav-sel-bg);
+  color: var(--m-nav-sel-fg);
+  font-weight: 600;
+  box-shadow: none;
 }
+.nav-item.active .ic { stroke-width: 1.6; }
 .nav-item.active::before {
-  content: ""; position: absolute; inset-inline-start: 0.25em; top: 25%; bottom: 25%;
-  width: 0.25em; border-radius: 1em; background: var(--m-accent-grad);
+  content: ""; position: absolute; inset-inline-start: 0; top: 22%; bottom: 22%;
+  width: 0.22em; border-radius: 0 1em 1em 0; background: var(--m-nav-sel-bar);
   animation: m-fade var(--m-med) var(--m-ease);
 }
-.nav-item .ic { transition: transform var(--m-med) var(--m-ease-spring); }
-.nav-item:hover .ic, .nav-item.active .ic { transform: scale(1.12); }
+[dir="rtl"] .nav-item.active::before { border-radius: 1em 0 0 1em; }
+@media (forced-colors: active) {
+  .nav-item.active { outline: 2px solid Highlight; }
+  .nav-item.active::before { background: Highlight; }
+}
 
 /* ---------- כרטיסים ---------- */
 .card, .fx-set-card, .status-card, .fx-lock-card, .offline-card, .about-hero, .fx-set-hero {
