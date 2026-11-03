@@ -104,7 +104,23 @@
     var b = document.getElementById('top-compact');
     if (b) b.addEventListener('click', function () { SS.prefs.set('compact', !SS.prefs.get('compact', false)); applyCompact(); });
     applyCompact();
+    var w = document.getElementById('top-style');
+    if (w) w.addEventListener('click', function () { SS.prefs.set('winStyle', !SS.prefs.get('winStyle', false)); applyWinStyle(); });
+    applyWinStyle();
   });
+
+  /* משוב 03.11: סגנון "הגדרות Windows 11" לבחירה (ברירת מחדל: סגנון אוצריא). css/win11.css פעיל רק עם body.ss-win11 */
+  function applyWinStyle() {
+    var on = !!SS.prefs.get('winStyle', false);
+    document.body.classList.toggle('ss-win11', on);
+    var b = document.getElementById('top-style');
+    if (b) {
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      b.title = on ? 'מעבר לסגנון אוצריא' : 'מעבר לסגנון הגדרות Windows';
+      b.innerHTML = '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="7.5" height="7.5" rx="1"/><rect x="13" y="3.5" width="7.5" height="7.5" rx="1"/><rect x="3.5" y="13" width="7.5" height="7.5" rx="1"/><rect x="13" y="13" width="7.5" height="7.5" rx="1"/></svg>';
+    }
+  }
+  SS.applyWinStyle = applyWinStyle;
   setTimeout(applyCompact, 0);
   SS._offline = false;
   SS.isOfflineMode = function () { return !!SS._offline; };
