@@ -409,7 +409,8 @@
     var details = ('דיווח תקלות אוטומטי מהגשר (' + r.items.length + ')\nתוסף: הגדרות מערכת ' + SS.VERSION + '\n\n' +
       r.items.map(function (x) { return x.text; }).join('\n\n=====\n\n') + (tail ? '\n\n===== יומן מקוצר =====\n' + tail : '')).slice(0, 5000);
     var res = null;
-    try { res = await window.Otzaria.call('feedback.report', { details: details, reportType: 'bug' }); } catch (e) { res = null; }
+    var kind = r.items.some(function (x) { return /crash|קריסה/i.test(String(x.text || '')); }) ? 'crash' : 'bug';
+    try { res = await window.Otzaria.call('feedback.report', { details: details, reportType: kind }); } catch (e) { res = null; }
     var val = res && (res.data !== undefined ? res.data : res);
     if (val === 'sent' || val === 'queued') {
       var ids = r.items.map(function (x) { return x.id; });
@@ -484,6 +485,7 @@
       });
     });
     if (payload && payload.plugin && payload.plugin.version) SS.VERSION = payload.plugin.version;
+    setTimeout(function () { window.Feedback.reportCrashes({ plugin: 'הגדרות מערכת', version: SS.VERSION, restore: payload && payload.restore }); }, 6000);
     buildNav();
     publishSettingsBooks();
     document.getElementById('top-refresh').addEventListener('click', function () {
