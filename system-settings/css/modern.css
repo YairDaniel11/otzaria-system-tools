@@ -238,3 +238,19 @@ body {
 @supports not (color: color-mix(in srgb, red 50%, blue)) {
   .topbar { background: var(--color-surface); }
 }
+
+/* ---------- תצוגה בלבד כשהגשר לא פועל (app.js: enterViewOnly) ---------- */
+.ro-banner {
+  display: flex; align-items: center; gap: 0.875em; flex-wrap: wrap;
+  margin: 0.625em 0.75em 0; padding: 0.75em 1em;
+  border-radius: 0.875em;
+  background: var(--color-error-container, #FFDAD6);
+  color: var(--color-on-error-container, #410002);
+  border: 1px solid color-mix(in srgb, var(--color-error, #BA1A1A) 35%, transparent);
+}
+.ro-banner[hidden] { display: none; }
+.ro-banner .ro-ic .ic { width: 1.6em; height: 1.6em; }
+.ro-banner .ro-text { flex: 1 1 18em; display: flex; flex-direction: column; gap: 0.125em; }
+.ro-banner .ro-text span { font-size: 0.9em; opacity: 0.9; }
+.app-content.ro { opacity: 0.72; filter: saturate(0.6); cursor: not-allowed; user-select: text; }
+.app-content.ro * { cursor: not-allowed !important; }

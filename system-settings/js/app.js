@@ -265,7 +265,11 @@
     if (state.connected && window.SdkX) SdkX.notify('גשר אוצריא אינו מחובר', 'הגדרות המערכת ומצב הנעילה אינם זמינים עד שהגשר יחזור');
     state.connected = false;
     setStatus(false);
+    /* משוב 03.11: כשהגשר לא פועל מציגים את ההגדרות בתצוגה בלבד, עם אזהרה — ולא מסך חסום.
+       מסך ההסבר המלא נפתח מכפתור באזהרה. */
+    if (window.Otzaria && !state.helpOpen) { enterViewOnly(); scheduleProbe(); return; }
     document.getElementById('shell-body').hidden = true;
+    setBanner(false);
     var off = document.getElementById('offline');
     off.hidden = false;
     if (!off.dataset.built) {
@@ -283,7 +287,10 @@
         '<button class="btn btn-primary btn-lg" id="off-dl">' + ui.icon('download') + 'פתח בדפדפן</button>' +
         '<button class="btn btn-tonal btn-lg" id="off-copy">' + ui.icon('link') + 'העתק קישור</button>' +
         '<button class="btn btn-tonal btn-lg" id="off-retry">' + ui.icon('refresh') + 'נסה שוב</button></div>' +
+        (window.Otzaria ? '<p><button class="btn btn-text" id="off-view">חזרה להגדרות (תצוגה בלבד)</button></p>' : '') +
         '<p class="muted small" id="off-note">בודק שוב אוטומטית כל 10 שניות…</p></div>';
+      var bv = off.querySelector('#off-view');
+      if (bv) bv.addEventListener('click', function () { state.helpOpen = false; showOffline(); });
       off.querySelector('#off-dl').addEventListener('click', function () { SS.openUrl(SS.BRIDGE_URL); });
       off.querySelector('#off-copy').addEventListener('click', function () {
         SS.copyText(SS.BRIDGE_URL).then(function (ok) {
@@ -302,6 +309,56 @@
     scheduleProbe();
   }
 
+  /* ---------- תצוגה בלבד (בלי גשר) ---------- */
+  function setBanner(on) {
+    var b = document.getElementById('ro-banner');
+    if (!on) { if (b) b.hidden = true; return; }
+    if (!b) {
+      b = ui.el('<div class="ro-banner" id="ro-banner" role="status">' +
+        '<span class="ro-ic">' + ui.icon('bridge') + '</span>' +
+        '<div class="ro-text"><b>תצוגה בלבד — התוכנה "אחת שאלתי" אינה פועלת</b>' +
+        '<span>אפשר לעיין בהגדרות, אבל הערכים כאן לדוגמה ואי אפשר לשנות דבר עד שהתוכנה תופעל.</span></div>' +
+        '<button class="btn btn-tonal" id="ro-help">' + ui.icon('download') + 'איך מפעילים?</button></div>');
+      var sb = document.getElementById('shell-body');
+      sb.parentNode.insertBefore(b, sb);
+      b.querySelector('#ro-help').addEventListener('click', function () { state.helpOpen = true; showOffline(); });
+    }
+    b.hidden = false;
+  }
+  function setReadOnly(on) {
+    var main = document.getElementById('content');
+    main.classList.toggle('ro', on);
+    if (on) main.setAttribute('inert', ''); else main.removeAttribute('inert');
+    main.setAttribute('aria-disabled', on ? 'true' : 'false');
+  }
+  function resetViews() {
+    views = {};
+    var main = document.getElementById('content');
+    while (main.firstChild) main.removeChild(main.firstChild);
+  }
+  function enterViewOnly() {
+    document.getElementById('offline').hidden = true;
+    setBanner(true);
+    setReadOnly(true);
+    if (!SS.bridge.isDemo) {
+      SS.bridge.useDemo(true);
+      resetViews();
+      var start = null;
+      try { start = localStorage.getItem('ss.section'); } catch (e) { start = null; }
+      document.getElementById('shell-body').hidden = false;
+      show((location.hash || '').replace('#', '') || start || 'audio');
+    } else document.getElementById('shell-body').hidden = false;
+  }
+  function leaveViewOnly() {
+    if (!SS.bridge.isDemo) return false;
+    SS.bridge.useDemo(false);
+    state.helpOpen = false;
+    setBanner(false);
+    setReadOnly(false);
+    resetViews();
+    return true;
+  }
+
   function scheduleProbe() {
     clearTimeout(state.probeTimer);
     if (state.suspended) return;
@@ -313,9 +370,10 @@
   async function connect() {
     var h = null;
     try { h = await SS.bridge.probe(); } catch (e) { h = null; }
-    if (!h) { if (state.connected || !document.getElementById('offline').dataset.built) showOffline(); return false; }
+    if (!h) { if (state.connected || (!SS.bridge.isDemo && !document.getElementById('offline').dataset.built)) showOffline(); return false; }
     clearTimeout(state.probeTimer);
-    var wasConnected = state.connected;
+    var leftDemo = leaveViewOnly();
+    var wasConnected = state.connected && !leftDemo;
     state.connected = true;
     setStatus(true);
     document.getElementById('offline').hidden = true;

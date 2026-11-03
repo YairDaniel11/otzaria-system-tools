@@ -601,14 +601,19 @@
 
   var impl = window.Otzaria ? real : mock;
 
+  /* תצוגה בלבד כשהגשר לא פועל: הקריאות הולכות לנתוני הדוגמה, אבל החיפוש אחרי הגשר (probe)
+     ממשיך לגשר האמיתי, כדי שברגע שיעלה נחזור אליו. */
+  var demo = false;
   SS.bridge = {
-    isMock: !window.Otzaria,
+    get isMock() { return !window.Otzaria || demo; },
+    get isDemo() { return demo; },
+    useDemo: function (on) { demo = !!on && !!window.Otzaria; impl = demo ? mock : real; },
     health: null,
     onLost: null,
     onPairing: null,
     get port() { return impl.port; },
     async probe() {
-      var h = await impl.probe();
+      var h = await (demo ? real : impl).probe();
       SS.bridge.health = h;
       return h;
     },
