@@ -290,3 +290,9 @@ Win / Alt+Tab / Alt+Esc / Ctrl+Esc / Alt+F4 על חלון אוצריא, מעקב
 
 ## משימות רקע (#134–#135)
 כל משימת "שגר ושכח" בגשר עוברת דרך `SafeTask.Run(...)` או `.Observe(where)` (bridge/SafeTask.cs): חריגה נרשמת ליומן ונצפית, ולא מגיעה ל-`UnobservedTaskException` כדיווח task-error. קוד חדש: לא להשאיר `Task.Run`/`ReadToEndAsync` בלי await — להשתמש ב-SafeTask.
+
+## מצביע וסמן טקסט (CursorApi.cs)
+
+- `POST /sys/mouse/cursor/get` → `{ size 1-15, style default|black|inverted|custom, color #RRGGBB, sonar, trails 0|2-7, vanish, caretWidth 1-20, blackAvailable, invertedAvailable }`
+- `POST /sys/mouse/cursor/set` עם כל תת-קבוצה של השדות; מחזיר את המצב החדש. צבע מותאם = קובץ .cur שהגשר מצייר ב-%LOCALAPPDATA%\\OtzariaBridge\\cursors.
+- תחת `/sys/mouse/` ולכן כפוף להרשאות מקטע "עכבר" במצב נעילה.

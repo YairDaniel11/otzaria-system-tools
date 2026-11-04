@@ -60,6 +60,7 @@ public static class Server
         OfflineMode.Register();
         DeviceApi.Register();
         MoreApi.Register();
+        CursorApi.Register();
         BiosHardening.Register();
         Kiosk.Register();
         PackG.Register();
