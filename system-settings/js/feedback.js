@@ -44,5 +44,47 @@
     else if (val === 'cancelled') ui.toast('השליחה בוטלה', 'info');
     else ui.toast('השליחה נכשלה. אפשר לנסות שוב מאוחר יותר.', 'error');
   };
+  /* ---------- דיווח קריסות אוטומטי דרך מערכת הדיווח של אוצריא (feedback.report, reportType: 'crash') ----------
+     שגיאות JS שלא נתפסו נאספות לתור מקומי (עד 5, בלי כפילויות). באתחול הבא, או כשאוצריא טוענת את הדף
+     מחדש אחרי נפילה (restore.reason === 'crashed'), נשלח דיווח אחד. אוצריא מציגה דיאלוג אישור משלה
+     (אי אפשר לעקוף אותו), ובמצב מנותק הדיווח נשמר בתור שלה ונשלח כשיחזור חיבור. */
+  var QKEY = 'fb.crashQueue';
+  function qGet() { try { return JSON.parse(localStorage.getItem(QKEY) || '[]') || []; } catch (e) { return []; } }
+  function qSet(a) { try { localStorage.setItem(QKEY, JSON.stringify(a.slice(-5))); } catch (e) { /* כלום */ } }
+  function scrub(s) {
+    return String(s || '')
+      .replace(/[A-Za-z]:\\Users\\[^\\\s]+/gi, 'C:\\Users\\<user>')
+      .replace(/\/Users\/[^\/\s]+/g, '/Users/<user>')
+      .slice(0, 1200);
+  }
+  function push(msg, stack) {
+    var q = qGet(), key = String(msg).slice(0, 160);
+    if (q.some(function (x) { return x.key === key; })) return;
+    q.push({ key: key, at: new Date().toISOString(), text: scrub(msg + (stack ? '\n' + stack : '')) });
+    qSet(q);
+  }
+  FB.watchErrors = function () {
+    if (FB._watching) return;
+    FB._watching = true;
+    window.addEventListener('error', function (e) { push(e.message || 'error', e.error && e.error.stack); });
+    window.addEventListener('unhandledrejection', function (e) { var r = e.reason; push((r && r.message) || String(r), r && r.stack); });
+  };
+  /* opts: { plugin, version, restore } — לקרוא מתוך plugin.boot */
+  FB.reportCrashes = async function (opts) {
+    if (!window.Otzaria || FB._crashAsked) return;
+    var crashed = !!(opts && opts.restore && opts.restore.reason === 'crashed');
+    var q = qGet();
+    if (!crashed && !q.length) return;
+    FB._crashAsked = true;
+    var lines = ['דיווח קריסה אוטומטי: ' + opts.plugin + ' ' + (opts.version || '')];
+    if (crashed) lines.push('אוצריא טענה את דף התוסף מחדש אחרי נפילה (restore: crashed).');
+    q.forEach(function (x) { lines.push('', '[' + x.at + ']', x.text); });
+    lines.push('', 'שפה: ' + (window.I18N ? window.I18N.lang() : 'he'));
+    var res = null;
+    try { res = await window.Otzaria.call('feedback.report', { details: lines.join('\n').slice(0, 5000), reportType: 'crash' }); } catch (e) { res = null; }
+    var val = res && (res.data !== undefined ? res.data : res);
+    if (val === 'sent' || val === 'queued' || val === 'cancelled') qSet([]);
+  };
+  FB.watchErrors();
   FB.t = t;
 })();

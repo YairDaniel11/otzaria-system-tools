@@ -4,6 +4,13 @@
   var I = window.I18N;
   var t = function (s) { return I.t(s); };
   I.add({
+    'מעבר לסגנון הגדרות Windows': 'Switch to Windows Settings style',
+    'מעבר לסגנון אוצריא': 'Switch to Otzaria style',
+    'סגנון הגדרות Windows': 'Windows Settings style',
+    'תצוגה בלבד — התוכנה "אחת שאלתי" אינה פועלת': 'View only: the "Achat Sha\'alti" app is not running',
+    'אפשר לעיין בהגדרות, אבל הערכים כאן לדוגמה ואי אפשר לשנות דבר עד שהתוכנה תופעל.': 'You can browse the settings, but the values here are examples and nothing can be changed until the app is running.',
+    'איך מפעילים?': 'How to start it?',
+    'חזרה להגדרות (תצוגה בלבד)': 'Back to settings (view only)',
     'תיקיות מותרות במצב מוגבל (סמנו את התיקיות שמותר לפתוח):': 'Allowed folders in restricted mode (check the folders that may be opened):',
     'דקות פתוח אחרי הזנת סיסמה (מצב נעול, בין 1 ל-1440)': 'Minutes open after entering the password (locked mode, 1 to 1440)',
     'סיסמת מנהל (נדרשת לשמירה)': 'Admin password (required to save)',

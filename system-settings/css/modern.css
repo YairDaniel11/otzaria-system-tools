@@ -230,6 +230,98 @@ body {
                             border: 2px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--color-primary) 45%, transparent); }
 
+/* ---------- לשוניות פנימיות בטאב "מצב נעילה" (kiosk-tabs.js) ---------- */
+.k-off { display: none !important; }
+.k-tabs {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; gap: 0.25em; padding: 0.3125em; margin: 0.75em 0 1em;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-surface-container) 85%, transparent);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 55%, transparent);
+  box-shadow: var(--m-elev-1);
+  overflow-x: auto; scrollbar-width: none;
+}
+.k-tabs::-webkit-scrollbar { display: none; }
+.k-ind {
+  position: absolute; top: 0.3125em; bottom: 0.3125em; left: 0;
+  width: var(--k-w, 0); transform: translateX(var(--k-x, 0));
+  border-radius: var(--radius-pill); background: var(--color-surface-container-lowest);
+  box-shadow: var(--m-elev-1), inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 20%, transparent);
+  transition: transform var(--m-med) var(--m-ease-spring), width var(--m-med) var(--m-ease);
+}
+.k-tab {
+  position: relative; z-index: 1; flex: 1 0 auto;
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.4em;
+  min-height: 2.5em; padding: 0 1em; border: 0; background: none; cursor: pointer;
+  border-radius: var(--radius-pill); font: inherit; color: var(--color-on-surface-variant);
+  transition: color var(--m-fast) var(--m-ease);
+}
+.k-tab .ic, .k-tab svg { width: 1.15em; height: 1.15em; }
+.k-tab:hover { color: var(--color-on-surface); }
+.k-tab.on { color: var(--color-primary); font-weight: 600; }
+.k-tabs ~ .card:not(.k-off), .k-tabs ~ section:not(.k-off) { animation: m-rise var(--m-med) var(--m-ease) both; }
+@media (max-width: 34em) { .k-tab span { display: none; } }
+
+/* כרטיס סטטוס הנעילה — מודגש יותר */
+.status-card { border-radius: 1.25em; box-shadow: var(--m-elev-2); position: relative; overflow: hidden; }
+.status-card.active { background: var(--m-accent-grad); color: var(--color-on-primary); }
+.status-card .status-ic { transition: transform var(--m-slow) var(--m-ease-spring); }
+.status-card:hover .status-ic { transform: rotate(-8deg) scale(1.06); }
+
+/* ---------- כרטיס מצביע וסמן (cursor.js) ---------- */
+.cur-preview { display: flex; align-items: center; gap: 1em; padding: 1em; margin-bottom: 0.75em; border-radius: var(--radius-md);
+  background: repeating-conic-gradient(color-mix(in srgb, var(--color-on-surface) 6%, transparent) 0 25%, transparent 0 50%) 0 0 / 1em 1em; }
+.cur-arrow { width: calc(1.1em + var(--cur-s, 1) * 0.35em); aspect-ratio: 16 / 26; background: var(--cur-c, #fff);
+  clip-path: polygon(0 0, 0 81%, 33% 63%, 57% 94%, 80% 88%, 57% 60%, 100% 60%);
+  filter: drop-shadow(0 0 1px #000) drop-shadow(1px 2px 2px rgba(0,0,0,.35));
+  transition: width var(--m-med) var(--m-ease-spring), background var(--m-med) var(--m-ease); }
+.cur-swatches { display: flex; flex-wrap: wrap; gap: 0.5em; margin: 0.5em 0 1em; }
+.cur-sw { width: 2.25em; height: 2.25em; border-radius: 50%; border: 2px solid var(--color-outline-variant); background: var(--sw);
+  cursor: pointer; position: relative; overflow: hidden; transition: transform var(--m-fast) var(--m-ease-spring), box-shadow var(--m-med) var(--m-ease); }
+.cur-sw:hover { transform: scale(1.12); }
+.cur-sw.on { box-shadow: 0 0 0 3px var(--color-surface), 0 0 0 5px var(--color-primary); }
+.cur-sw-pick { background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red); }
+.cur-sw-pick input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.cur-caret { display: inline-block; width: calc(var(--cw, 1) * 1px); height: 1em; background: currentColor; margin-inline-end: 0.4em;
+  vertical-align: -0.15em; animation: m-blink 1s steps(1) infinite; }
+@keyframes m-blink { 50% { opacity: 0; } }
+.is-busy { opacity: .65; pointer-events: none; transition: opacity var(--m-fast) var(--m-ease); }
+
+/* ---------- פלטת פקודות (palette.js) ---------- */
+.pal-trigger { display: inline-flex; align-items: center; gap: 0.5em; height: 2.25em; padding: 0 0.75em; margin-inline-end: 0.5em;
+  border-radius: var(--radius-pill); border: 1px solid var(--color-outline-variant); background: var(--color-surface-container-low);
+  color: var(--color-on-surface-variant); font: inherit; font-size: 0.875em; cursor: pointer;
+  transition: border-color var(--m-fast) var(--m-ease), background var(--m-fast) var(--m-ease), box-shadow var(--m-med) var(--m-ease); }
+.pal-trigger:hover { border-color: var(--color-primary); background: var(--color-surface-container-lowest); box-shadow: var(--m-elev-1); }
+.pal-trigger .ic, .pal-trigger svg { width: 1.1em; height: 1.1em; }
+@media (max-width: 40em) { .pal-trigger span, .pal-trigger kbd { display: none; } }
+kbd { font: 0.75em var(--font-mono); padding: 0.1em 0.45em; border-radius: 0.35em; border: 1px solid var(--color-outline-variant);
+  border-bottom-width: 2px; background: var(--color-surface-container-lowest); color: var(--color-on-surface-variant); }
+.pal-scrim { position: fixed; inset: 0; z-index: 1000; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh;
+  background: color-mix(in srgb, var(--color-inverse-surface) 35%, transparent); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  opacity: 0; transition: opacity 180ms var(--m-ease); }
+.pal-scrim.open { opacity: 1; }
+.pal { width: min(36em, 92vw); max-height: 70vh; display: flex; flex-direction: column; overflow: hidden;
+  border-radius: 1.25em; background: var(--color-surface-container-lowest); box-shadow: var(--m-elev-3);
+  border: 1px solid color-mix(in srgb, var(--color-outline-variant) 60%, transparent);
+  transform: translateY(-0.75em) scale(.97); transition: transform var(--m-med) var(--m-ease-spring); }
+.pal-scrim.open .pal { transform: none; }
+.pal-head { display: flex; align-items: center; gap: 0.75em; padding: 0.875em 1.125em; border-bottom: 1px solid var(--color-outline-variant); }
+.pal-head > .ic, .pal-head > svg { width: 1.35em; height: 1.35em; color: var(--color-primary); flex: none; }
+.pal-in { flex: 1; border: 0; outline: 0; background: none; font: inherit; font-size: 1.1em; color: var(--color-on-surface); min-width: 0; }
+.pal-in:focus { box-shadow: none; }
+.pal-list { overflow-y: auto; padding: 0.375em; }
+.pal-item { display: flex; align-items: center; gap: 0.75em; width: 100%; padding: 0.625em 0.75em; border: 0; border-radius: 0.75em;
+  background: none; font: inherit; color: var(--color-on-surface); text-align: start; cursor: pointer; }
+.pal-item .ic, .pal-item svg { width: 1.25em; height: 1.25em; flex: none; color: var(--color-on-surface-variant); }
+.pal-item.on { background: color-mix(in srgb, var(--color-primary) 12%, transparent); }
+.pal-item.on .ic, .pal-item.on svg { color: var(--color-primary); }
+.pal-t { flex: 1; }
+.pal-k { font-size: 0.75em; color: var(--color-on-surface-variant); padding: 0.1em 0.6em; border-radius: var(--radius-pill); background: var(--color-surface-container); }
+.pal-empty { padding: 1.5em; text-align: center; }
+.pal-foot { display: flex; gap: 1.25em; padding: 0.5em 1.125em; border-top: 1px solid var(--color-outline-variant); background: var(--color-surface-container-low); }
+
 /* ---------- נגישות: ביטול תנועה ---------- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
@@ -238,3 +330,19 @@ body {
 @supports not (color: color-mix(in srgb, red 50%, blue)) {
   .topbar { background: var(--color-surface); }
 }
+
+/* ---------- תצוגה בלבד כשהגשר לא פועל (app.js: enterViewOnly) ---------- */
+.ro-banner {
+  display: flex; align-items: center; gap: 0.875em; flex-wrap: wrap;
+  margin: 0.625em 0.75em 0; padding: 0.75em 1em;
+  border-radius: 0.875em;
+  background: var(--color-error-container, #FFDAD6);
+  color: var(--color-on-error-container, #410002);
+  border: 1px solid color-mix(in srgb, var(--color-error, #BA1A1A) 35%, transparent);
+}
+.ro-banner[hidden] { display: none; }
+.ro-banner .ro-ic .ic { width: 1.6em; height: 1.6em; }
+.ro-banner .ro-text { flex: 1 1 18em; display: flex; flex-direction: column; gap: 0.125em; }
+.ro-banner .ro-text span { font-size: 0.9em; opacity: 0.9; }
+.app-content.ro { opacity: 0.72; filter: saturate(0.6); cursor: not-allowed; user-select: text; }
+.app-content.ro * { cursor: not-allowed !important; }

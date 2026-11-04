@@ -500,11 +500,24 @@ internal sealed class RestScreen : Form
         g.InterpolationMode = InterpolationMode.HighQualityBicubic;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
 
-        // רקע: לילה עמוק וחם, משתנה לאט מאוד
+        // רקע (עיצוב KioskLock-השראה, docs/mockups/lock-and-saver.html): כחול-לילה עמוק בהדרגה אלכסונית,
+        // הילה כחולה בפינה העליונה והילה זהובה עדינה בפינה התחתונה הנגדית. משתנה לאט מאוד.
         float k = (float)(Math.Sin(t / 22.0) * 0.5 + 0.5);
-        Color c1 = Mix(Color.FromArgb(22, 26, 44), Color.FromArgb(30, 24, 40), k);
-        Color c2 = Mix(Color.FromArgb(8, 9, 16), Color.FromArgb(12, 10, 14), k);
-        using (var bg = new LinearGradientBrush(r, c1, c2, 90f)) g.FillRectangle(bg, r);
+        Color c1 = Mix(Color.FromArgb(14, 24, 48), Color.FromArgb(18, 26, 50), k);
+        Color c2 = Mix(Color.FromArgb(7, 12, 23), Color.FromArgb(9, 12, 22), k);
+        using (var bg = new LinearGradientBrush(r, c1, c2, 70f)) g.FillRectangle(bg, r);
+        SafePart("glow", () =>
+        {
+            void Glow(RectangleF e, Color c)
+            {
+                using var gp = new GraphicsPath();
+                gp.AddEllipse(e);
+                using var pb = new PathGradientBrush(gp) { CenterColor = c, SurroundColors = new[] { Color.FromArgb(0, c) } };
+                g.FillPath(pb, gp);
+            }
+            Glow(new RectangleF(r.Width * 0.45f, -r.Height * 0.55f, r.Width * 0.95f, r.Height * 1.1f), Color.FromArgb(120, 58, 95, 148));
+            Glow(new RectangleF(-r.Width * 0.35f, r.Height * 0.45f, r.Width * 0.75f, r.Height * 0.9f), Color.FromArgb(38, 216, 180, 106));
+        });
 
         // כוכבים עדינים בלבד (בלי אותיות), מנצנצים ועולים לאט מאוד
         for (int i = 0; i < _parts.Length; i++)
@@ -565,38 +578,18 @@ internal sealed class RestScreen : Form
         float W = hasSideColumn ? Math.Max(r.Width * 0.4f, r.Width - 2 * (colW + colMargin * 2) - 2 * Math.Abs(dx)) : r.Width;
         RectangleF Line(float y, float h) => new(cx - W / 2f, y, W, h);
 
-        float y = r.Height * 0.09f + dy;
-        g.DrawString(Lang.T("לימוד ללא הפרעות", "Learning without distractions"), headF, goldB, Line(y, 70 * s), rtl);
-        y += 70 * s;
-        // קו מעוטר דק
-        using (var pen = new Pen(Color.FromArgb(120, gold), 1.2f * s))
-        {
-            g.DrawLine(pen, cx - 150 * s, y, cx - 12 * s, y);
-            g.DrawLine(pen, cx + 12 * s, y, cx + 150 * s, y);
-            g.FillEllipse(goldB, cx - 4 * s, y - 4 * s, 8 * s, 8 * s);
-        }
-        y += 14 * s;
-        SafePart("verse", () =>
-        {
-        // סבב B: הפסוק של "אחת שאלתי" (תהלים כז, ד)
-        if (shVerse)
-        {
-            /* משוב 3.9: השורה הייתה רחבה מהמלבן ו"אבקש" נחתך — מקטינים את הגופן עד שהשורה נכנסת */
-            const string v1 = "אַחַת שָׁאַלְתִּי מֵאֵת ה' אוֹתָהּ אֲבַקֵּשׁ";
-            var vf = verseF;
-            for (int k = 0; k < 12 && g.MeasureString(v1, vf).Width > W * 0.96f; k++) vf = new Font(vf.FontFamily, vf.Size * 0.92f, vf.Style, vf.Unit);
-            var noWrap = (StringFormat)rtl.Clone(); noWrap.FormatFlags |= StringFormatFlags.NoWrap;
-            g.DrawString(v1, vf, goldB, Line(y, 56 * s), noWrap);
-            g.DrawString(Overlay.VerseText(), verseF, goldB, Line(y + 54 * s, 56 * s), rtl);
-            y += 54 * s;
-        }
-        y += 72 * s;
-
-        });
+        // עיצוב חדש (docs/mockups/lock-and-saver.html): עמודת מרכז אחת, ממורכזת אנכית —
+        // חותמת מרחפת, שעה גדולה, תאריך, פסוק בזהב. "לימוד ללא הפרעות" עבר לשורה קטנה מעל החותמת.
+        float icoPre = shLogo ? Math.Min(r.Height * 0.2f, 200 * s) + 20 * s : 0;
+        float blockH = 34 * s + icoPre + (shClock ? 108 * s + 40 * s : 0) + (shVerse ? 126 * s : 0);
+        float y = Math.Max(r.Height * 0.06f, (r.Height - blockH) / 2f - 20 * s) + dy;
+        using (var tagF = new Font(UiFamily, 13f, GraphicsUnit.Point))
+            g.DrawString(Lang.T("לימוד ללא הפרעות", "Learning without distractions"), tagF, dim, Line(y, 30 * s), rtl);
+        y += 34 * s;
         SafePart("logo", () =>
         {
         // B2 (סבב B, 3.7.1): סמל "אחת שאלתי" גדול במרכז, מרחף ומסתובב לאט (חסכוני — ציור מטמון אחד, בלי אנימציה כבדה)
-        float icoSize = Math.Min(r.Height * 0.26f, 260 * s);
+        float icoSize = Math.Min(r.Height * 0.2f, 200 * s);
         float bob = (float)Math.Sin(t * 0.5) * 8 * s;
         float tilt = (float)Math.Sin(t * 0.25) * 6f;
         if (shLogo)
@@ -626,11 +619,26 @@ internal sealed class RestScreen : Form
             y += 36 * s;
         }
         // #2: התאריך הלועזי באותה שורה עם העברי (לא בשורה נפרדת שנופלת מתחת להקדשה)
-        if (shClock) g.DrawString(Overlay.HebrewDate(now) + "   ·   " + now.ToString("d/M/yyyy"), dateF, Brushes.White, Line(y, 40 * s), rtl);
+        if (shClock) { g.DrawString(Overlay.HebrewDate(now) + "   ·   " + now.ToString("d/M/yyyy"), dateF, dim, Line(y, 40 * s), rtl); y += 52 * s; }
         if (Target == IntPtr.Zero && Idle)
         {
-            y += 34 * s;
             g.DrawString(Lang.T("אוצריא לא נמצאה במחשב. לביטול הנעילה: Ctrl+Alt+Shift+F12", "Otzaria was not found. To unlock: Ctrl+Alt+Shift+F12"), hintF, dim, Line(y, 30 * s), rtl);
+            y += 34 * s;
+        }
+        });
+        SafePart("verse", () =>
+        {
+        // סבב B: הפסוק של "אחת שאלתי" (תהלים כז, ד) — עכשיו מתחת לשעה, כמו בהדמיה
+        if (shVerse)
+        {
+            /* משוב 3.9: השורה הייתה רחבה מהמלבן ו"אבקש" נחתך — מקטינים את הגופן עד שהשורה נכנסת */
+            const string v1 = "אַחַת שָׁאַלְתִּי מֵאֵת ה' אוֹתָהּ אֲבַקֵּשׁ";
+            var vf = verseF;
+            for (int k = 0; k < 12 && g.MeasureString(v1, vf).Width > W * 0.96f; k++) vf = new Font(vf.FontFamily, vf.Size * 0.92f, vf.Style, vf.Unit);
+            var noWrap = (StringFormat)rtl.Clone(); noWrap.FormatFlags |= StringFormatFlags.NoWrap;
+            g.DrawString(v1, vf, goldB, Line(y, 56 * s), noWrap);
+            g.DrawString(Overlay.VerseText(), verseF, goldB, Line(y + 54 * s, 56 * s), rtl);
+            y += 126 * s;
         }
         });
         SafePart("zmanim", () =>
@@ -703,6 +711,11 @@ internal sealed class RestScreen : Form
             dl = split.Take(5).ToArray();
             float totalH = 0; foreach (var _ in dl) totalH += 34 * s;
             float dyy = ded.Bottom - Math.Max(totalH, 0) + 4 * s;
+            // עיצוב חדש: ההקדשה בכרטיס "זכוכית" (כמו בהדמיה), באותם גבולות קבועים
+            using (var cardPath = Overlay.Round(new Rectangle((int)(ded.X - 10 * s), (int)(dyy - 18 * s), (int)(ded.Width + 20 * s), (int)(totalH + 28 * s)), (int)(22 * s)))
+            using (var cardBg = new SolidBrush(Color.FromArgb(20, 255, 255, 255)))
+            using (var cardPen = new Pen(Color.FromArgb(38, 255, 255, 255), 1.2f * s))
+            { g.FillPath(cardBg, cardPath); g.DrawPath(cardPen, cardPath); }
             g.SetClip(new RectangleF(ded.X - 4 * s, dyy - 6 * s, ded.Width + 8 * s, totalH + 8 * s));
             for (int i = 0; i < dl.Length; i++)
             {
@@ -805,11 +818,13 @@ internal sealed class RestScreen : Form
             }
         }
         if (!chosen) cols = 2;
+        float areaH = maxH;
         maxH = Math.Min(maxH, Need(cols, lineH));
+        y += Math.Max(0, (areaH - maxH) / 2f); // עיצוב חדש: כרטיס הזמנים ממורכז אנכית בצד המסך
         using (f)
-        using (var bg = new SolidBrush(Color.FromArgb(70, 10, 12, 22)))
-        using (var border = new Pen(Color.FromArgb(150, gold), 1.4f * s)) // משוב 15.10: מסגרת דקה ברורה
-        using (var path = Overlay.Round(new Rectangle((int)x, (int)y, (int)w, (int)maxH), (int)(14 * s)))
+        using (var bg = new SolidBrush(Color.FromArgb(20, 255, 255, 255)))  // כרטיס "זכוכית" כמו בהדמיה
+        using (var border = new Pen(Color.FromArgb(38, 255, 255, 255), 1.2f * s))
+        using (var path = Overlay.Round(new Rectangle((int)x, (int)y, (int)w, (int)maxH), (int)(22 * s)))
         using (var goldB = new SolidBrush(gold))
         {
             g.FillPath(bg, path);
@@ -841,9 +856,9 @@ internal sealed class RestScreen : Form
     /// </summary>
     private static void DrawDedicationColumn(Graphics g, string text, float x, float y, float w, float maxH, float s, Color gold, float t)
     {
-        using var bg = new SolidBrush(Color.FromArgb(70, 10, 12, 22));
-        using var border = new Pen(Color.FromArgb(70, gold), 1f * s);
-        using var path = Overlay.Round(new Rectangle((int)x, (int)y, (int)w, (int)maxH), (int)(14 * s));
+        using var bg = new SolidBrush(Color.FromArgb(20, 255, 255, 255));   // כרטיס "זכוכית", זהה לכרטיס הזמנים
+        using var border = new Pen(Color.FromArgb(38, 255, 255, 255), 1.2f * s);
+        using var path = Overlay.Round(new Rectangle((int)x, (int)y, (int)w, (int)maxH), (int)(22 * s));
         g.FillPath(bg, path);
         g.DrawPath(border, path);
 

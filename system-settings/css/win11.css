@@ -1,0 +1,148 @@
+/* win11.css - סגנון "הגדרות Windows 11" לבחירה (כפתור בסרגל העליון; app.js: applyWinStyle).
+   פעיל רק כש-body.ss-win11. משנה מראה בלבד — אותם רכיבים, אותה התנהגות.
+   מקור ההשראה: אפליקציית ההגדרות של Windows 11 (Fluent): רקע Mica אפור-בהיר, כרטיסים לבנים
+   בפינות 8px עם מסגרת דקה, פריט נבחר ברקע אפור עם פס כחול קצר בצד, מתגים ובקרים בכחול Windows. */
+
+body.ss-win11 {
+  --w-bg: #F3F3F3;
+  --w-side: transparent;
+  --w-card: #FBFBFB;
+  --w-card-hover: #F6F6F6;
+  --w-stroke: #E5E5E5;
+  --w-text: #1A1A1A;
+  --w-sub: #5F5F5F;
+  --w-accent: #005FB8;
+  --w-accent-hover: #0067C0;
+  --w-on-accent: #FFFFFF;
+  --w-sel: rgba(0, 0, 0, 0.055);
+  --w-hover: rgba(0, 0, 0, 0.037);
+  --w-ctl: rgba(255, 255, 255, 0.7);
+  --w-ctl-stroke: #D1D1D1;
+  font-family: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  background: var(--w-bg);
+  color: var(--w-text);
+}
+body.ss-win11.dark-mode {
+  --w-bg: #202020;
+  --w-card: #2B2B2B;
+  --w-card-hover: #323232;
+  --w-stroke: #1D1D1D;
+  --w-text: #FFFFFF;
+  --w-sub: #C5C5C5;
+  --w-accent: #4CC2FF;
+  --w-accent-hover: #47B1E8;
+  --w-on-accent: #000000;
+  --w-sel: rgba(255, 255, 255, 0.06);
+  --w-hover: rgba(255, 255, 255, 0.045);
+  --w-ctl: rgba(255, 255, 255, 0.06);
+  --w-ctl-stroke: #3A3A3A;
+}
+
+/* מבנה */
+body.ss-win11 .app-shell, body.ss-win11 .shell-body, body.ss-win11 .app-content { background: var(--w-bg); }
+body.ss-win11 .topbar {
+  background: var(--w-bg); border-bottom: 0; box-shadow: none; backdrop-filter: none;
+}
+body.ss-win11 .topbar h1 { font-size: 0.8125em; font-weight: 400; color: var(--w-text); }
+body.ss-win11 .topbar-btn { border-radius: 4px; color: var(--w-text); }
+body.ss-win11 .topbar-btn:hover { background: var(--w-hover); }
+body.ss-win11 .topbar-btn[aria-pressed="true"] { color: var(--w-accent); }
+
+/* סרגל צד */
+body.ss-win11 .sidenav {
+  background: var(--w-side); border: 0; width: 17.5em; padding: 0.5em 0.75em; gap: 0.125em;
+}
+body.ss-win11 .nav-search {
+  border-radius: 4px; background: var(--w-ctl); min-height: 2.25em; color: var(--w-sub);
+  border: 1px solid var(--w-ctl-stroke); border-bottom-color: color-mix(in srgb, var(--w-text) 45%, transparent);
+}
+body.ss-win11 .nav-search:focus-within { box-shadow: none; border-bottom: 2px solid var(--w-accent); }
+body.ss-win11 .nav-search input { border: 0 !important; background: transparent !important; box-shadow: none !important; }
+body.ss-win11 .nav-item {
+  border-radius: 4px; min-height: 2.25em; padding: 0 0.75em; gap: 0.875em;
+  color: var(--w-text); font-weight: 400; transform: none !important;
+}
+body.ss-win11 .nav-item .ic { width: 1.15em; height: 1.15em; stroke-width: 1.5; transform: none !important; }
+body.ss-win11 .nav-item:hover { background: var(--w-hover); }
+body.ss-win11 .nav-item.active { background: var(--w-sel); color: var(--w-text); font-weight: 400; box-shadow: none; }
+body.ss-win11 .nav-item.active::before {
+  content: ""; position: absolute; inset-inline-start: 0; top: 50%; height: 1em; margin-top: -0.5em;
+  width: 3px; border-radius: 3px; background: var(--w-accent); animation: none;
+}
+body.ss-win11 .nav-group, body.ss-win11 .nav-label { color: var(--w-sub); font-weight: 600; font-size: 0.8125em; }
+
+/* כותרת עמוד: גדולה ונקייה כמו "System > Sound" */
+body.ss-win11 .section { max-width: 62em; }
+body.ss-win11 .section-title .ic { display: none; }
+body.ss-win11 .section-title h2 { font-size: 1.75em; font-weight: 600; letter-spacing: -0.01em; }
+body.ss-win11 .section-head .btn { border-radius: 4px; }
+
+/* כרטיסים: שורות הגדרה צמודות זו לזו */
+body.ss-win11 .card, body.ss-win11 .status-card, body.ss-win11 .about-hero {
+  background: var(--w-card); border: 1px solid var(--w-stroke); border-radius: 8px;
+  box-shadow: none; padding: 1em 1.25em; margin-bottom: 0.25em;
+  backdrop-filter: none; animation: none;
+}
+body.ss-win11 .card:hover { background: var(--w-card-hover); transform: none; box-shadow: none; }
+body.ss-win11 .card-title { color: var(--w-text); font-weight: 600; font-size: 0.9375em; }
+body.ss-win11 .card-title { border-inline-start: 0; padding-inline-start: 0; }
+body.ss-win11 .card-title::before { display: none; }
+body.ss-win11 .muted, body.ss-win11 .card p, body.ss-win11 .small { color: var(--w-sub); }
+body.ss-win11 .card.subtle { background: var(--w-card); }
+
+/* כפתורים */
+body.ss-win11 .btn {
+  border-radius: 4px; min-height: 2em; padding: 0 0.875em; font-weight: 400;
+  background: var(--w-ctl); color: var(--w-text);
+  border: 1px solid var(--w-ctl-stroke); border-bottom-color: color-mix(in srgb, var(--w-ctl-stroke) 70%, #000);
+  box-shadow: none; transform: none !important;
+}
+body.ss-win11 .btn:hover:not(:disabled) { background: var(--w-card-hover); box-shadow: none; }
+body.ss-win11 .btn-primary { background: var(--w-accent); color: var(--w-on-accent); border-color: var(--w-accent); }
+body.ss-win11 .btn-primary:hover:not(:disabled) { background: var(--w-accent-hover); }
+body.ss-win11 .btn-text { background: transparent; border-color: transparent; color: var(--w-accent); }
+body.ss-win11 .btn-danger { background: #C42B1C; color: #fff; border-color: #C42B1C; }
+
+/* מתג בסגנון Windows 11 */
+body.ss-win11 .switch {
+  width: 2.5em; height: 1.25em; border-radius: 1em; background: transparent;
+  border: 1px solid var(--w-sub); box-shadow: none;
+}
+body.ss-win11 .switch .knob {
+  width: 0.75em; height: 0.75em; top: 50%; transform: translateY(-50%); margin: 0; right: 0.1875em;
+  background: var(--w-sub); box-shadow: none;
+}
+body.ss-win11 .switch.on { background: var(--w-accent); border-color: var(--w-accent); }
+body.ss-win11 .switch.on .knob { right: 1.4375em; width: 0.75em; height: 0.75em; background: var(--w-on-accent); }
+
+/* פס גלילה / טווח */
+body.ss-win11 .range {
+  height: 0.25em; accent-color: var(--w-accent);
+  background: linear-gradient(to left, var(--w-accent) var(--p), color-mix(in srgb, var(--w-sub) 55%, transparent) var(--p));
+}
+body.ss-win11 .range::-webkit-slider-thumb {
+  width: 0.75em; height: 0.75em; border-radius: 50%; background: var(--w-accent);
+  border: 0.3125em solid var(--w-card); box-shadow: 0 0 0 1px var(--w-ctl-stroke);
+}
+body.ss-win11 .range::-moz-range-thumb { width: 0.75em; height: 0.75em; border-radius: 50%; background: var(--w-accent); border: 0.3125em solid var(--w-card); }
+body.ss-win11 .range-val { font-size: 1em; font-weight: 400; }
+body.ss-win11 .icon-btn.big { width: 2.5em; height: 2.5em; border-radius: 4px; background: transparent; }
+
+/* רשימות ושורות: כמו שורות ההגדרה של Windows — רקע כרטיס, מפריד דק */
+body.ss-win11 .list-item, body.ss-win11 .setting-row, body.ss-win11 .switch-row, body.ss-win11 .prog-item, body.ss-win11 .health-row {
+  border-radius: 4px; background: transparent; min-height: 3.25em; transform: none !important; box-shadow: none !important;
+}
+body.ss-win11 .list-item:hover, body.ss-win11 .setting-row:hover, body.ss-win11 .switch-row:hover { background: var(--w-hover); }
+body.ss-win11 .list-item.selected { background: var(--w-sel); }
+body.ss-win11 .li-icon { background: transparent; color: var(--w-text); width: 2em; height: 2em; border-radius: 4px; }
+body.ss-win11 .list-item.selected .li-icon { background: transparent; color: var(--w-accent); }
+body.ss-win11 .chip { border-radius: 4px; }
+body.ss-win11 .input, body.ss-win11 select.input, body.ss-win11 textarea.input {
+  border-radius: 4px; background: var(--w-ctl); border: 1px solid var(--w-ctl-stroke);
+  border-bottom: 1px solid color-mix(in srgb, var(--w-text) 45%, transparent);
+}
+body.ss-win11 .input:focus { border-bottom: 2px solid var(--w-accent); outline: none; box-shadow: none; }
+
+/* תגיות ומצבים */
+body.ss-win11 .topbar-chip { border-radius: 4px; }
+body.ss-win11 .ro-banner { border-radius: 8px; }

@@ -1868,6 +1868,7 @@
     S.booted = true;
     if (payload && payload.theme) ui.applyTheme(payload.theme);
     if (payload && payload.plugin && payload.plugin.version) FX.VERSION = payload.plugin.version;
+    setTimeout(function () { window.Feedback.reportCrashes({ plugin: 'סייר קבצים', version: FX.VERSION, restore: payload && payload.restore }); }, 6000);
     try { await window.I18N.init(payload); } catch (e) { /* נשארים בעברית */ }
     var lb = $('fx-lang');
     lb.textContent = window.I18N.toggleLabel();

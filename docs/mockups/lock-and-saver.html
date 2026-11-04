@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>הדמיה – מסך נעילה ושומר מסך</title>
+<!--
+  הדמיה לאישור (docs/COMPARE-KIOSKLOCK.md, סעיף 4, שלב 1) – לא קוד מוצר.
+  מסך מחולק לאזורים ברורים בהשראת KioskLock, בשפת אוצריא (טוקני M3, אייקוני קו דקים)
+  וחותמת הזהב של "אחת שאלתי". מעבר בין המסכים: ?screen=lock או ?screen=saver, או הכפתורים למעלה.
+-->
+<style>
+:root{
+  --primary:#3A5F94; --primary-hi:#A8C8FF; --gold:#D8B46A; --gold-soft:#F1DDB0;
+  --ink:#F3F4F9; --ink-dim:#C4C9D6; --glass:rgba(255,255,255,.07); --glass-b:rgba(255,255,255,.14);
+  --r-card:22px; --r-chip:999px;
+}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{
+  font-family:"Segoe UI","Noto Sans Hebrew","Rubik",system-ui,sans-serif; color:var(--ink);
+  background:#0B1220;
+  background:
+    radial-gradient(1200px 700px at 85% -10%, rgba(58,95,148,.55), transparent 60%),
+    radial-gradient(900px 600px at 5% 110%, rgba(216,180,106,.16), transparent 60%),
+    linear-gradient(160deg,#0E1830 0%,#0A1120 60%,#070C17 100%);
+  overflow:hidden;
+}
+.switch{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:9;display:flex;gap:4px;
+  padding:4px;border-radius:var(--r-chip);background:rgba(0,0,0,.45);border:1px solid var(--glass-b);font-size:12px}
+.switch button{border:0;background:none;color:var(--ink-dim);padding:5px 12px;border-radius:var(--r-chip);cursor:pointer;font:inherit}
+.switch button.on{background:var(--glass-b);color:#fff}
+.screen{position:absolute;inset:0;padding:40px 48px;display:none}
+.screen.on{display:grid}
+.card{background:var(--glass);border:1px solid var(--glass-b);border-radius:var(--r-card);
+  backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);padding:22px 24px}
+.card h3{font-size:13px;font-weight:600;letter-spacing:.02em;color:var(--gold-soft);display:flex;align-items:center;gap:8px;margin-bottom:14px}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.seal{width:118px;height:118px;filter:drop-shadow(0 6px 24px rgba(216,180,106,.35));animation:float 9s ease-in-out infinite}
+@keyframes float{50%{transform:translateY(-8px)}}
+@media (prefers-reduced-motion:reduce){.seal{animation:none}}
+.clock{font-size:96px;font-weight:300;letter-spacing:-2px;line-height:1}
+.date{font-size:20px;color:var(--ink-dim);margin-top:6px}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:var(--r-chip);background:var(--glass);border:1px solid var(--glass-b);font-size:13px;color:var(--ink)}
+.zman{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.06);font-size:15px}
+.zman:last-child{border:0}
+.zman b{font-weight:600;font-variant-numeric:tabular-nums}
+.zman.next{color:var(--gold-soft)}
+.zman.next b::after{content:" · הבא";font-weight:400;font-size:12px;color:var(--gold)}
+.verse{font-family:"Frank Ruhl Libre","David","Times New Roman",serif;color:var(--gold-soft);text-align:center;line-height:1.5}
+.dedication{text-align:center;font-size:14px;color:var(--ink-dim);line-height:1.7}
+.dedication .name{color:var(--ink);font-size:16px}
+
+/* ---------- שומר מסך ---------- */
+#saver{grid-template-columns:300px 1fr 300px;gap:32px;align-items:center}
+#saver .center{display:flex;flex-direction:column;align-items:center;gap:26px;text-align:center}
+#saver .verse{font-size:40px;max-width:720px}
+#saver .hint{position:absolute;bottom:22px;left:0;right:0;text-align:center;font-size:12px;color:rgba(255,255,255,.4)}
+
+/* ---------- מסך נעילה ---------- */
+#lock{grid-template-columns:1fr 340px;grid-template-rows:auto 1fr auto;gap:24px}
+#lock header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between}
+.brand{display:flex;align-items:center;gap:14px}
+.brand .seal{width:56px;height:56px;animation:none}
+.brand b{display:block;font-size:20px}
+.brand span{font-size:13px;color:var(--ink-dim)}
+.status{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:var(--r-chip);background:rgba(216,180,106,.14);border:1px solid rgba(216,180,106,.35);color:var(--gold-soft);font-size:14px}
+.apps h3{margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
+.app{display:flex;flex-direction:column;align-items:center;gap:12px;padding:22px 12px;border-radius:18px;background:rgba(255,255,255,.05);border:1px solid var(--glass-b);color:var(--ink);font:inherit;font-size:15px;cursor:pointer;transition:background .15s,transform .15s}
+.app:hover{background:rgba(255,255,255,.1);transform:translateY(-2px)}
+.app .tile{width:54px;height:54px;border-radius:16px;display:grid;place-items:center;background:linear-gradient(145deg,rgba(168,200,255,.25),rgba(58,95,148,.35))}
+.app .tile .ic{width:26px;height:26px;stroke-width:1.3}
+.side{display:flex;flex-direction:column;gap:18px}
+.sched .row{display:flex;gap:10px;align-items:center;padding:8px 0;font-size:14px}
+.sched .bar{flex:1;height:6px;border-radius:6px;background:rgba(255,255,255,.08);position:relative;overflow:hidden}
+.sched .bar i{position:absolute;inset-block:0;border-radius:6px;background:var(--gold)}
+#lock footer{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;font-size:13px;color:var(--ink-dim)}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 18px;border-radius:var(--r-chip);border:1px solid var(--glass-b);background:var(--glass);color:var(--ink);font:inherit;font-size:14px;cursor:pointer}
+.btn.primary{background:var(--gold);border-color:var(--gold);color:#2A2010;font-weight:600}
+</style>
+</head>
+<body>
+<div class="switch" role="tablist" aria-label="בחירת מסך">
+  <button data-s="lock">מסך נעילה</button><button data-s="saver">שומר מסך</button>
+</div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="seal" viewBox="0 0 120 120">
+    <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F6E3B4"/><stop offset=".5" stop-color="#D8B46A"/><stop offset="1" stop-color="#A9823D"/></linearGradient></defs>
+    <circle cx="60" cy="60" r="56" fill="none" stroke="url(#g)" stroke-width="3"/>
+    <circle cx="60" cy="60" r="47" fill="none" stroke="url(#g)" stroke-width="1" stroke-dasharray="2 4"/>
+    <text x="60" y="58" text-anchor="middle" font-size="22" font-family="Frank Ruhl Libre,David,serif" fill="url(#g)">אחת</text>
+    <text x="60" y="82" text-anchor="middle" font-size="22" font-family="Frank Ruhl Libre,David,serif" fill="url(#g)">שאלתי</text>
+  </symbol>
+</svg>
+
+<!-- ===================== מסך נעילה ===================== -->
+<section class="screen" id="lock" aria-label="מסך נעילה">
+  <header>
+    <div class="brand"><svg class="seal"><use href="#seal"/></svg><div><b>אחת שאלתי</b><span>לימוד ללא הפרעות</span></div></div>
+    <div style="text-align:center"><div class="clock" style="font-size:56px">21:47</div><div class="date" style="font-size:15px">ב׳ בחשון תשפ״ז · יום שני</div></div>
+    <span class="status"><svg class="ic"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>המחשב נעול עד 23:00</span>
+  </header>
+
+  <div class="card apps">
+    <h3><svg class="ic"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg>תוכנות מותרות</h3>
+    <div class="grid">
+      <button class="app"><span class="tile"><svg class="ic"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19V5"/><path d="M9 7h6"/></svg></span>אוצריא</button>
+      <button class="app"><span class="tile"><svg class="ic"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M8 13l1.5 5 2.5-4 2.5 4 1.5-5"/></svg></span>Word</button>
+      <button class="app"><span class="tile"><svg class="ic"><circle cx="12" cy="12" r="8"/><path d="M9 10h.01M15 10h.01M8.5 14.5a4.5 4.5 0 0 0 7 0"/></svg></span>חבורתא</button>
+      <button class="app"><span class="tile"><svg class="ic"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>סייר קבצים</button>
+      <button class="app"><span class="tile"><svg class="ic"><path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="9"/></svg></span>הנקדן</button>
+      <button class="app"><span class="tile"><svg class="ic"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/></svg></span>אוצר החכמה</button>
+    </div>
+  </div>
+
+  <aside class="side">
+    <div class="card sched">
+      <h3><svg class="ic"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>סדר היום</h3>
+      <div class="row"><span style="width:76px">שחרית</span><span class="bar"><i style="inset-inline-start:0;width:22%"></i></span><span>8:00</span></div>
+      <div class="row"><span style="width:76px">סדר א׳</span><span class="bar"><i style="inset-inline-start:22%;width:38%"></i></span><span>9:30</span></div>
+      <div class="row"><span style="width:76px">סדר ב׳</span><span class="bar"><i style="inset-inline-start:60%;width:30%"></i></span><span>16:00</span></div>
+    </div>
+    <div class="card">
+      <h3><svg class="ic"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M5 19l1.5-1.5M17.5 6.5 19 5"/></svg>זמני היום</h3>
+      <div class="zman"><span>שקיעה</span><b>16:49</b></div>
+      <div class="zman"><span>צאת הכוכבים</span><b>17:12</b></div>
+      <div class="zman next"><span>חצות הלילה</span><b>23:31</b></div>
+    </div>
+  </aside>
+
+  <footer>
+    <span>הנצחה: לע״נ אסתר גיטה דינר ע״ה</span>
+    <span style="display:flex;gap:10px"><button class="btn">בקשת פתיחה זמנית</button><button class="btn primary">ביטול הנעילה</button></span>
+  </footer>
+</section>
+
+<!-- ===================== שומר מסך ===================== -->
+<section class="screen" id="saver" aria-label="שומר מסך">
+  <div class="card">
+    <h3><svg class="ic"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/></svg>זמני היום · ירושלים</h3>
+    <div class="zman"><span>עלות השחר</span><b>5:01</b></div>
+    <div class="zman"><span>הנץ החמה</span><b>6:10</b></div>
+    <div class="zman"><span>סוף זמן ק״ש גר״א</span><b>8:56</b></div>
+    <div class="zman"><span>חצות</span><b>11:30</b></div>
+    <div class="zman"><span>שקיעה</span><b>16:49</b></div>
+    <div class="zman next"><span>צאת הכוכבים</span><b>17:12</b></div>
+  </div>
+
+  <div class="center">
+    <svg class="seal"><use href="#seal"/></svg>
+    <div><div class="clock">21:47</div><div class="date">ב׳ בחשון תשפ״ז · 2.11.2026</div></div>
+    <p class="verse">אַחַת שָׁאַלְתִּי מֵאֵת ה׳ אוֹתָהּ אֲבַקֵּשׁ</p>
+    <div class="chips"><span class="chip">פרשת לך לך</span><span class="chip">דף יומי: בבא בתרא קמא</span></div>
+  </div>
+
+  <div class="card dedication">
+    <h3 style="justify-content:center">🕯 לעילוי נשמת</h3>
+    <div>הנערה הצדקנית</div>
+    <div class="name">אסתר גיטה דינר ע״ה</div>
+    <div>בת רבי מיכאל שלום הלוי שיבדלט״א</div>
+    <div style="margin-top:6px">תנצב״ה</div>
+  </div>
+  <div class="hint">הזיזו את העכבר או הקישו על מקש כדי לחזור</div>
+</section>
+
+<script>
+(function(){
+  var btns=document.querySelectorAll('.switch button');
+  function show(s){
+    document.querySelectorAll('.screen').forEach(function(e){e.classList.toggle('on',e.id===s)});
+    btns.forEach(function(b){b.classList.toggle('on',b.dataset.s===s)});
+  }
+  btns.forEach(function(b){b.onclick=function(){show(b.dataset.s)}});
+  show(new URLSearchParams(location.search).get('screen')==='saver'?'saver':'lock');
+})();
+</script>
+</body>
+</html>
