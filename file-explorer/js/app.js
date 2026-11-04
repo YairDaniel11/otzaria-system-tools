@@ -1191,7 +1191,7 @@
       var act = t.dataset.act;
       if (act === 'close') { close(); return; }
       if (act === 'fb') { sendFeedback(); return; }
-      if (act === 'changelog') { openUrl(FX.CHANGELOG_URL); return; }
+      if (act === 'changelog') { if (window.renderChangelog && ui.dialog) { ui.dialog({ title: 'יומן שינויים — סייר קבצים', body: window.renderChangelog(), actions: [{ label: 'סגירה', value: true, kind: 'primary' }] }); } else openUrl(FX.CHANGELOG_URL); return; }
       if (act === 'releases') { openUrl('https://github.com/Hadabadra/achat-shaalti/releases/latest'); return; }
       if (act === 'reset') {
         if (!(await ui.confirm('איפוס הגדרות', '<p>להחזיר את הגדרות הסייר לברירת המחדל?</p>', 'איפוס'))) return;
@@ -1868,7 +1868,7 @@
     S.booted = true;
     if (payload && payload.theme) ui.applyTheme(payload.theme);
     if (payload && payload.plugin && payload.plugin.version) FX.VERSION = payload.plugin.version;
-    setTimeout(function () { window.Feedback.reportCrashes({ plugin: 'סייר קבצים', version: FX.VERSION, restore: payload && payload.restore }); }, 6000);
+    setTimeout(function () { window.Feedback.reportCrashes({ plugin: 'סייר קבצים', version: FX.VERSION, bridge: FX.Bridge, restore: payload && payload.restore }); }, 6000);
     try { await window.I18N.init(payload); } catch (e) { /* נשארים בעברית */ }
     var lb = $('fx-lang');
     lb.textContent = window.I18N.toggleLabel();

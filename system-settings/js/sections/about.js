@@ -18,6 +18,7 @@
         '<div class="card about-memorial"><p>לעילוי נשמת הנערה הצדקנית</p><h3>אסתר גיטה דינר בת רבי מיכאל שלום הלוי שיבדלט"א</h3><p>תהא נשמתה צרורה בצרור החיים. תנצב"ה</p></div>' +
         '<div class="card"><div class="card-title">אחת שאלתי</div><div data-slot="bridge">' + ui.loading() + '</div>' +
         '</div>' +
+        '<div class="card"><div class="card-title">יומן שינויים</div>' + (window.renderChangelog ? window.renderChangelog(ui.esc) : '') + '</div>' +
         '<div class="card"><div class="card-title">התקנת הגשר</div><ol class="steps">' +
         '<li>מורידים את <b dir="ltr">OtzariaBridge.exe</b> מהקישור.</li>' +
         '<li>מפעילים פעם אחת. הגשר מעתיק את עצמו ל-<span dir="ltr">%LOCALAPPDATA%\\OtzariaBridge</span>, נרשם להפעלה אוטומטית ומופיע כאייקון ליד השעון.</li>' +
@@ -37,7 +38,7 @@
       try { h = await SS.bridge.probe(); } catch (e) { h = null; }
       SS.setStatus(!!h);
       if (!h) {
-        slot.innerHTML = '<div class="state-box error">' + ui.icon('warning') + '<div><b>הגשר אינו מחובר</b></div></div>';
+        slot.innerHTML = '<div class="state-box">' + ui.icon('info') + '<div><b>זמין כשאחת שאלתי פועלת</b></div></div>';
         return;
       }
       slot.innerHTML = '<dl class="info-grid">' +
@@ -74,7 +75,11 @@
         var on = sw.getAttribute('aria-checked') !== 'true';
         SS.bridge.call('/diag/ack', { ids: [], enabled: on }, { timeoutMs: 15000 })
           .then(function (x) { ui.setSwitch(sw, !!(x && x.enabled)); })
-          .catch(function () { ui.toast('נדרש גשר בגרסה חדשה יותר', 'info'); });
+          .catch(function (e) {
+            /* 04.11: ההודעה הקודמת ("נדרש גשר בגרסה חדשה יותר") הוצגה בכל כישלון, גם כשהתוסף לא מצומד */
+            var c = e && e.code;
+            ui.toast(c === 'not_found' ? 'הגשר המותקן ישן ואינו תומך בזה — יש לעדכן את אחת שאלתי' : ui.errText(e), 'info');
+          });
       });
     }
   });

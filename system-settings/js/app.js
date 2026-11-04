@@ -501,7 +501,7 @@
       });
     });
     if (payload && payload.plugin && payload.plugin.version) SS.VERSION = payload.plugin.version;
-    setTimeout(function () { window.Feedback.reportCrashes({ plugin: 'הגדרות מערכת', version: SS.VERSION, restore: payload && payload.restore }); }, 6000);
+    setTimeout(function () { window.Feedback.reportCrashes({ plugin: 'הגדרות מערכת', version: SS.VERSION, bridge: SS.bridge, restore: payload && payload.restore }); }, 6000);
     buildNav();
     publishSettingsBooks();
     document.getElementById('top-refresh').addEventListener('click', function () {

@@ -9,7 +9,18 @@
   FB.ICON = '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M4.5 5.5h15a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H10l-4.5 3.5V16.5h-1a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z"/><path d="M8 10h8M8 13h5"/></svg>';
 
-  /* opts: { ui, plugin, version, extra: function () { return 'שורות סביבה' } } */
+  var REPO = 'achat-shaalti/achat-shaalti';
+  /* 04.11: גרסת הגשר בכל דיווח (בנוסף לגרסת התוסף) */
+  async function bridgeLine(b) {
+    if (!b || !b.probe) return 'גשר: לא ידוע';
+    try { var h = await b.probe(); return h && h.version ? 'גשר: ' + h.version + (b.isDemo ? ' (לא מחובר)' : '') : 'גשר: לא מחובר'; }
+    catch (e) { return 'גשר: לא מחובר'; }
+  }
+  async function toGithub(b, text, opts) {
+    if (!b || b.isDemo) return;
+    try { await b.call('/sys/feedback', { text: text, plugin: opts.plugin, version: opts.version || '', repo: opts.repo || REPO }, { timeoutMs: 8000 }); } catch (e) { /* גשר לא זמין */ }
+  }
+  /* opts: { ui, plugin, version, bridge, extra: function () { return 'שורות סביבה' } } */
   FB.open = async function (opts) {
     var ui = opts.ui;
     if (!window.Otzaria) { ui.toast('שליחת הערות זמינה רק בתוך אוצריא', 'info'); return; }
@@ -30,6 +41,7 @@
     if (!text) { ui.toast('לא נכתב תוכן — ההערה לא נשלחה', 'info'); return; }
     var type = TYPES[+form.querySelector('select').value] || TYPES[0];
     var env = ['תוסף: ' + opts.plugin + ' ' + (opts.version || ''), 'סוג: ' + type[1], 'שפה: ' + (window.I18N ? window.I18N.lang() : 'he')];
+    env.push(await bridgeLine(opts.bridge));
     try { if (opts.extra) env = env.concat(opts.extra() || []); } catch (e) { /* כלום */ }
     var details = (text + '\n\n---\n' + env.join('\n')).slice(0, 5000);
     var res = null;
@@ -37,9 +49,7 @@
     catch (e) { res = { success: false }; }
     var val = res && (res.data !== undefined ? res.data : res);
     /* #70: גם ל-GitHub (issue ציבורי) דרך הגשר והמתווך, בנוסף לאוצריא */
-    if (val !== 'cancelled' && opts.bridge) {
-      try { await opts.bridge.call('/sys/feedback', { text: details, plugin: opts.plugin, version: opts.version || '', repo: opts.repo || '' }, { timeoutMs: 8000 }); } catch (e) { /* גשר ישן */ }
-    }
+    if (val !== 'cancelled') await toGithub(opts.bridge, details, opts);
     if (val === 'sent' || val === 'queued') ui.toast(val === 'sent' ? 'ההערה נשלחה. תודה!' : 'ההערה תישלח כשיהיה חיבור. תודה!', 'success');
     else if (val === 'cancelled') ui.toast('השליחה בוטלה', 'info');
     else ui.toast('השליחה נכשלה. אפשר לנסות שוב מאוחר יותר.', 'error');
@@ -69,7 +79,7 @@
     window.addEventListener('error', function (e) { push(e.message || 'error', e.error && e.error.stack); });
     window.addEventListener('unhandledrejection', function (e) { var r = e.reason; push((r && r.message) || String(r), r && r.stack); });
   };
-  /* opts: { plugin, version, restore } — לקרוא מתוך plugin.boot */
+  /* opts: { plugin, version, restore, bridge } — לקרוא מתוך plugin.boot */
   FB.reportCrashes = async function (opts) {
     if (!window.Otzaria || FB._crashAsked) return;
     var crashed = !!(opts && opts.restore && opts.restore.reason === 'crashed');
@@ -79,7 +89,9 @@
     var lines = ['דיווח קריסה אוטומטי: ' + opts.plugin + ' ' + (opts.version || '')];
     if (crashed) lines.push('אוצריא טענה את דף התוסף מחדש אחרי נפילה (restore: crashed).');
     q.forEach(function (x) { lines.push('', '[' + x.at + ']', x.text); });
-    lines.push('', 'שפה: ' + (window.I18N ? window.I18N.lang() : 'he'));
+    lines.push('', 'שפה: ' + (window.I18N ? window.I18N.lang() : 'he'), await bridgeLine(opts.bridge));
+    /* 04.11: קריסה גם לגיטהאב (דרך הגשר), כי דיווחי אוצריא על גרסת בנייה לא מגיעים */
+    await toGithub(opts.bridge, lines.join('\n').slice(0, 5000), opts);
     var res = null;
     try { res = await window.Otzaria.call('feedback.report', { details: lines.join('\n').slice(0, 5000), reportType: 'crash' }); } catch (e) { res = null; }
     var val = res && (res.data !== undefined ? res.data : res);

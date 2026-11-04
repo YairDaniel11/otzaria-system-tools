@@ -425,6 +425,8 @@
     if (fn) fn();
   });
   ui.errorBox = function (e, onRetry) {
+    /* 04.11: בתצוגה בלבד (בלי גשר) — הודעה ניטרלית, לא תיבה אדומה בכל לשונית */
+    if (window.SS && SS.bridge && SS.bridge.isDemo) return '<div class="state-box">' + ui.icon('info') + '<div><b>זמין כשאחת שאלתי פועלת</b><span class="muted">בינתיים מוצגת תצוגה בלבד</span></div></div>';
     var id = '';
     if (onRetry) { id = 'r' + (++retrySeq); retryHandlers[id] = onRetry; }
     return '<div class="state-box error">' + ui.icon('warning') + '<div><b>' + ui.esc(ui.errText(e)) + '</b>' +

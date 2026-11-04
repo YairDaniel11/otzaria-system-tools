@@ -100,7 +100,8 @@ jobs:
       - name: אריזת התוספים כמשאב מוטמע
         shell: pwsh
         env:
-          PV: ${{ steps.pluginver.outputs.version }}
+          # 04.11: המקטע השלישי של גרסת התוספים עולה בכל בנייה (אותו מספר כמו קובץ ההתקנה), כדי שאוצריא תזהה עדכון
+          PV: ${{ steps.ver.outputs.version }}
         run: |
           $pv = $env:PV
           foreach ($f in @("file-explorer/manifest.json", "system-settings/manifest.json")) {

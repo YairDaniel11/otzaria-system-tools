@@ -16,7 +16,7 @@ export default {
     const { title, body, fingerprint, version, kind, plugin } = d || {};
     // #70: repo לפי רשימה סגורה (GH_REPOS, מופרד בפסיקים); ברירת מחדל GH_REPO
     const allowed = String(env.GH_REPOS || env.GH_REPO).split(',').map(x => x.trim()).filter(Boolean);
-    const want = typeof d.repo === 'string' && d.repo ? (d.repo.includes('/') ? d.repo : 'e0548433917-gif/' + d.repo) : env.GH_REPO;
+    const want = typeof d.repo === 'string' && d.repo ? (d.repo.includes('/') ? d.repo : 'achat-shaalti/' + d.repo) : env.GH_REPO;
     if (!allowed.includes(want)) return new Response('repo not allowed', { status: 400 });
     const manual = kind === 'manual';
     if (typeof title !== 'string' || typeof body !== 'string' || !/^[0-9a-f]{16}$/.test(fingerprint || '') ||
@@ -30,7 +30,10 @@ export default {
     if (ipHits.size > 5000) ipHits.clear();
 
     const repo = want;
+    // WHY (04.11): אחרי העברת הריפו לארגון, POST לשם הישן קיבל 301 ו-fetch המיר אותו ל-GET שהחזיר 200 —
+    // הדיווח "הצליח" בלי issue. לא עוקבים אחרי הפניות, והצלחה רק ב-201.
     const gh = (path, init = {}) => fetch('https://api.github.com' + path, {
+      redirect: 'manual',
       ...init,
       headers: { authorization: 'Bearer ' + env.GH_TOKEN, 'user-agent': 'achat-shaalti-relay', accept: 'application/vnd.github+json', ...(init.headers || {}) }
     });
@@ -63,7 +66,7 @@ export default {
         labels: [manual ? 'user-feedback' : 'auto-report']
       })
     });
-    if (!r.ok) return new Response('github ' + r.status, { status: 502 });
+    if (r.status !== 201) return new Response('github ' + r.status, { status: 502 });
     try {
       if (env.DEDUPE) await env.DEDUPE.put(fk, '1', { expirationTtl: 86400 });
       else { fpHits.set(fk, 1); if (fpHits.size > 5000) fpHits.clear(); }
