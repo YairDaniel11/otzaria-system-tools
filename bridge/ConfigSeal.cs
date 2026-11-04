@@ -119,7 +119,12 @@ public static class ConfigSeal
     public static string Sign(string canonical)
     {
         var (st, mac) = Provider(Encoding.UTF8.GetBytes(canonical ?? ""));
-        return st == SealState.Ok && mac != null ? Convert.ToBase64String(mac) : null;
+        if (st != SealState.Ok || mac == null) return null;
+        string b64 = Convert.ToBase64String(mac);
+        // WHY (באג צימוד חוזר 04.11): חתימה שהגשר עצמו יצר זה עתה תקפה בוודאות. בלי המטמון, האימות הראשון של הצימוד החדש
+        // הלך לשירות, וכשהשירות לא ענה בזמן (Down) הטוקן נדחה — והתוסף ביקש לאשר שוב ושוב
+        Good[(canonical ?? "") + "\n" + b64] = true;
+        return b64;
     }
 
     /// <summary>

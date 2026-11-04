@@ -110,6 +110,8 @@
         if (first) SS.bridge.onPairing && SS.bridge.onPairing(true);
         try { await real.pair(); } finally { if (first) SS.bridge.onPairing && SS.bridge.onPairing(false); }
         res = await real.callOnce(path, body, opts);
+        /* אחרי אישור מוצלח הגשר עדיין דוחה: לא פותחים חלון אישור נוסף (מונע לולאת "אשר שוב ושוב") */
+        if (res.unpaired) throw BridgeError('pair_failed', 'החיבור אושר אבל הגשר לא קיבל אותו. יש לסגור ולפתוח מחדש את אחת שאלתי ולנסות שוב', 401);
       }
       if (res.error) throw res.error;
       return res.data;

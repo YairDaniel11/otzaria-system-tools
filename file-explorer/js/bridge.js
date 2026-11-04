@@ -146,7 +146,12 @@
       catch (e) {
         if (!e || e.code !== 'unpaired') throw e;
         await Bridge.pair();
-        return request(Bridge.port, path, body, opts);
+        try { return await request(Bridge.port, path, body, opts); }
+        catch (e2) {
+          /* אחרי אישור מוצלח הגשר עדיין דוחה: לא פותחים חלון אישור נוסף (מונע לולאת "אשר שוב ושוב") */
+          if (e2 && e2.code === 'unpaired') throw FX.OpError('pair_failed', 'החיבור אושר אבל הגשר לא קיבל אותו. יש לסגור ולפתוח מחדש את אחת שאלתי ולנסות שוב');
+          throw e2;
+        }
       }
     },
 
