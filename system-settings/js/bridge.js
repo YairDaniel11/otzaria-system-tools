@@ -18,7 +18,7 @@
 
   /* ---------- צימוד לגשר (3.0.0, בעיה #2): מפתח אקראי שהגשר נותן אחרי אישור המשתמש ---------- */
   var TOKEN_KEY = 'bridgeToken';
-  var token = null, tokenLoaded = false, pairing = null;
+  var token = null, tokenLoaded = false, pairing = null, pairFail = null;
   async function hostCall(method, params) {
     var r = await window.Otzaria.call(method, params || {});
     if (r && r.success === false) throw new Error((r.error && r.error.message) || method);
@@ -90,13 +90,17 @@
     /* בקשת צימוד: הגשר מציג חלון אישור במחשב (עד 2 דקות) */
     async pair() {
       if (pairing) return pairing;
+      /* 04.11: אחרי צימוד שנכשל לא שולחים בקשה חדשה מכל קריאה (הציף "בקשות צימוד תכופות מדי") — 30 שניות המתנה */
+      if (pairFail && Date.now() - pairFail.at < 30000) throw pairFail.err;
       pairing = (async function () {
         var r = await rawRequest("http://127.0.0.1:" + real.port + "/pair/request", "POST",
           { client: 'system-settings', name: 'הגדרות מערכת' }, 120000);
         if (!r.json.ok) { var er = r.json.error || {}; throw BridgeError(er.code || 'forbidden', er.message || '', r.status); }
         await saveToken(r.json.data.token);
       })();
-      try { await pairing; } finally { pairing = null; }
+      try { await pairing; pairFail = null; }
+      catch (e) { if (e && typeof e === 'object') e.expected = true; pairFail = { at: Date.now(), err: e }; throw e; }
+      finally { pairing = null; }
     },
     async call(path, body, opts) {
       if (!real.port) throw BridgeError('offline', 'bridge not connected');

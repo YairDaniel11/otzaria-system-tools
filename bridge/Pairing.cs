@@ -242,6 +242,10 @@ public static class Pairing
             if (!AutoApproveOpen && DateTime.UtcNow < _nextDialogAt)
                 throw new BridgeException("too_many", "בקשות צימוד תכופות מדי. נסו שוב בעוד רגע", 429);
             _nextDialogAt = DateTime.UtcNow.AddSeconds(10);
+            // WHY (דיווח 04.11): כשהחתימה נאכפת ושירות ההקשחה לא עונה, המשתמש אישר — ורק אז הצימוד נכשל, והתוסף ניסה שוב ושוב.
+            // בודקים לפני החלון: אם אי אפשר לחתום, נכשלים מיד עם הסבר, בלי לבקש אישור לשווא (האכיפה עצמה לא נחלשת)
+            if (ConfigSeal.Enforced && ConfigSeal.Sign("pair-preflight") == null)
+                throw new BridgeException("unsupported", "רכיב הנעילה המוקשחת מותקן אבל אינו מגיב, ולכן אי אפשר לאשר חיבור חדש כרגע. הפעילו מחדש את אחת שאלתי או את המחשב ונסו שוב", 503);
             bool approved = AutoApproveOpen || await PairDialog.AskAsync(name, Kiosk.IsActive);
             if (!approved)
             {

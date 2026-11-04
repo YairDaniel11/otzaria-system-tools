@@ -24,7 +24,7 @@
 
   /* ---------- צימוד לגשר (3.0.0, בעיה #2): מפתח אקראי שהגשר נותן אחרי אישור המשתמש ---------- */
   var TOKEN_KEY = 'bridgeToken';
-  var token = null, tokenLoaded = false, pairing = null;
+  var token = null, tokenLoaded = false, pairing = null, pairFail = null;
   async function hostCall(method, params) {
     var r = await window.Otzaria.call(method, params || {});
     if (r && r.success === false) throw new Error((r.error && r.error.message) || method);
@@ -131,12 +131,16 @@
     /* בקשת צימוד: הגשר מציג חלון אישור במחשב (עד 2 דקות) */
     pair: async function () {
       if (pairing) return pairing;
+      /* 04.11: אחרי צימוד שנכשל לא שולחים בקשה חדשה מכל קריאה (הציף "בקשות צימוד תכופות מדי") — 30 שניות המתנה */
+      if (pairFail && Date.now() - pairFail.at < 30000) throw pairFail.err;
       pairing = (async function () {
         FX.ui && FX.ui.toast(window.I18N && window.I18N.isEn() ? 'Approve the connection in the window that opened on the computer' : 'יש לאשר את החיבור בחלון שנפתח במחשב', 'info');
         var d = await request(Bridge.port, '/pair/request', { client: 'file-explorer', name: 'סייר קבצים' }, { timeoutMs: 130000 });
         await saveToken(d.token);
       })();
-      try { await pairing; } finally { pairing = null; }
+      try { await pairing; pairFail = null; }
+      catch (e) { if (e && typeof e === 'object') e.expected = true; pairFail = { at: Date.now(), err: e }; throw e; }
+      finally { pairing = null; }
     },
 
     call: async function (path, body, opts) {

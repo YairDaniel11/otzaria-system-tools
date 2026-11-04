@@ -67,6 +67,9 @@
       .replace(/\/Users\/[^\/\s]+/g, '/Users/<user>')
       .slice(0, 1200);
   }
+  /* 04.11: שגיאות חיבור/צימוד צפויות (גשר לא זמין, צימוד נדחה או מוגבל) אינן קריסה — לא נאספות */
+  var EXPECTED = { too_many: 1, busy: 1, unsupported: 1, pair_failed: 1, forbidden: 1, unpaired: 1, unreachable: 1, offline: 1, timeout: 1, transport: 1 };
+  function expected(r) { return !!(r && typeof r === 'object' && (r.expected || EXPECTED[r.code])); }
   function push(msg, stack) {
     var q = qGet(), key = String(msg).slice(0, 160);
     if (q.some(function (x) { return x.key === key; })) return;
@@ -77,7 +80,7 @@
     if (FB._watching) return;
     FB._watching = true;
     window.addEventListener('error', function (e) { push(e.message || 'error', e.error && e.error.stack); });
-    window.addEventListener('unhandledrejection', function (e) { var r = e.reason; push((r && r.message) || String(r), r && r.stack); });
+    window.addEventListener('unhandledrejection', function (e) { var r = e.reason; if (expected(r)) return; push((r && r.message) || String(r), r && r.stack); });
   };
   /* opts: { plugin, version, restore, bridge } — לקרוא מתוך plugin.boot */
   FB.reportCrashes = async function (opts) {
