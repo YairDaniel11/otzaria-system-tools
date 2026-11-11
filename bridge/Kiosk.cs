@@ -2053,7 +2053,7 @@ public static partial class Kiosk
     private static void Watch()
     {
         PollEmergencyMarker(); // לפני ה-gate: Release ממתין לסבב שומר רץ, ואסור שנחסום את עצמנו
-        if (!IsActive || Interlocked.Exchange(ref _watchBusy, 1) == 1) return;
+        if (!IsActive || MaintenanceHolds() || Interlocked.Exchange(ref _watchBusy, 1) == 1) return; // מצב תחזוקה: השומר מושהה
         try
         {
             int session = Process.GetCurrentProcess().SessionId;

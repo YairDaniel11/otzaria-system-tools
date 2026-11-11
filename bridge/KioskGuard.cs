@@ -66,6 +66,7 @@ public static partial class Kiosk
             if (_taskbarHidden) SetTaskbars(true); // Release כבר רץ - לא משאירים את שורת המשימות מוסתרת
             return;
         }
+        if (MaintenanceHolds()) return; // מצב תחזוקה: השומר המהיר מושהה (ותפריט המגש נגיש)
         if (Interlocked.Exchange(ref _fastBusy, 1) == 1) return;
         try
         {
