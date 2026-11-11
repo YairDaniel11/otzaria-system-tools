@@ -403,7 +403,7 @@ public static partial class Kiosk
         restScreen = Config.Get("kiosk.restScreen", true),
         restIdleMinutes = Config.Get("kiosk.restIdleMinutes", 1),
         saverEnabled = Config.Get("kiosk.saverEnabled", true), // מתג ראשי לשומר המסך
-        saverWhenUnlocked = Config.Get("kiosk.saverWhenUnlocked", true), // D2
+        saverWhenUnlocked = Config.Get("kiosk.saverWhenUnlocked", false), // D2; ברירת מחדל כבוי: ההגדרות פר-משתמש ורק מי שבחר רואה שומר
         bootCover = Config.Get("kiosk.bootCover", true), // D3
         restZmanimSide = Config.Get("kiosk.restZmanimSide", "right"),
         zmanimLocation = Config.Get("kiosk.zmanimLocation", ""),
@@ -1452,6 +1452,7 @@ public static partial class Kiosk
     {
         lock (Gate)
         {
+            DesktopState.Backup(); // לפני שה-watchdog מתחיל להרוג את explorer: שומר סידור סמלים ורקע לשחזור בשחרור
             // חסימת מנהל המשימות דרך מדיניות. במחשבים רבים המפתח Policies\System נעול למשתמש רגיל
             // (נוצר על ידי מנהל/מדיניות קבוצתית), ולכן זו חסימה "במאמץ הטוב": אם אין הרשאה,
             // הנעילה ממשיכה, ומנהל המשימות נסגר על ידי שומר הנעילה ונחסם במקלדת (Ctrl+Shift+Esc).
@@ -1531,7 +1532,7 @@ public static partial class Kiosk
             Overlay.HideAll();
             RestoreWindowFrame(); UnblockClose();
             ClearRegistry();
-            StartExplorer();
+            RestoreDesktopAndStartExplorer();
             Tray.SetKioskState(false);
             // בדיקה שנייה אחרי כמה שניות: אם explorer עדיין לא עלה, מפעילים שוב
             System.Threading.Tasks.Task.Delay(4000).ContinueWith(_ => { if (!IsActive) StartExplorer(); });
@@ -1582,6 +1583,41 @@ public static partial class Kiosk
         SetToastPolicy(false);
         SetAccessibilityPolicy(false);   // [x2] מחזיר נגישות/NoWinKeys/AutoPlay (גם כשארית אחרי קריסה, דרך BootGuard)
         if (ShellPointsToBridge()) Config.Log("kiosk clear: אזהרה — המעטפת עדיין מפנה לגשר");
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern bool SpiWallpaper(uint action, uint param, string path, uint ini);
+
+    /// <summary>
+    /// שחרור: אם נשמר גיבוי של שולחן העבודה — מסיימים את explorer (שהרגנו ממילא כל כמה שניות), מחזירים את סידור הסמלים והרקע
+    /// ברישום, ורק אז מפעילים אותו, כדי שלא ידרוס את הערכים. בלי גיבוי — רק מפעילים explorer כמו קודם
+    /// </summary>
+    private static void RestoreDesktopAndStartExplorer()
+    {
+        try
+        {
+            if (DesktopState.HasBackup())
+            {
+                int session = Process.GetCurrentProcess().SessionId;
+                foreach (var p in Process.GetProcessesByName("explorer"))
+                    using (p) { try { if (p.SessionId == session) { p.Kill(); p.WaitForExit(3000); } } catch { } }
+                if (DesktopState.Restore())
+                {
+                    Config.Log("kiosk: סידור סמלי שולחן העבודה והרקע שוחזרו");
+                    StartExplorer();
+                    try
+                    {
+                        using var k = Registry.CurrentUser.OpenSubKey(DesktopState.WallpaperPath);
+                        string wp = k?.GetValue("Wallpaper") as string ?? "";
+                        if (wp.Length > 0) SpiWallpaper(0x14, 0, wp, 0x3);   // SPI_SETDESKWALLPAPER, UPDATEINIFILE|SENDCHANGE
+                    }
+                    catch { }
+                    return;
+                }
+            }
+        }
+        catch (Exception ex) { Config.Log("restore desktop: " + ex.Message); }
+        StartExplorer();
     }
 
     private static void StartExplorer()
@@ -1721,7 +1757,7 @@ public static partial class Kiosk
         Config.Set(KTuUntil, ""); // ביטול חירום: גם פתיחה זמנית ממתינה לא תחזיר את הנעילה
         Config.Save();
         ClearRegistry();
-        StartExplorer();
+        RestoreDesktopAndStartExplorer();
         return true;
     }
 
@@ -1866,7 +1902,7 @@ public static partial class Kiosk
         Config.Set("kiosk.active", false);
         Config.Set("kiosk.strict", false);
         ClearRegistry();
-        StartExplorer();
+        RestoreDesktopAndStartExplorer();
         return null;
     }
 

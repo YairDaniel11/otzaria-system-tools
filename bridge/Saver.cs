@@ -1,4 +1,4 @@
-// סבב D: D2 — שומר מסך גם בלי מצב נעילה (ברירת מחדל: מופעל); D3 — כיסוי מיידי בעלייה עד שאוצריא מוכנה.
+// סבב D: D2 — שומר מסך גם בלי מצב נעילה (ברירת מחדל: כבוי; ההגדרות פר-משתמש, ומשתמש Windows אחר לא יראה שומר אם לא בחר); D3 — כיסוי מיידי בעלייה עד שאוצריא מוכנה.
 // בנוי רק על מסך המנוחה הקיים (Overlay.ShowRest) — בלי החלפת shell ובלי לחסום קלט: לחיצה/מקש סוגרים,
 // Ctrl+Alt+Shift+F12 נשאר, והכיסוי בעלייה נסגר לבד אחרי 60 שניות גם אם אוצריא לא עלתה (זהירות מ-#8).
 using System;
@@ -28,7 +28,7 @@ public static class Saver
         {
             if (Kiosk.IsActive) { _shownByUs = false; return; } // בנעילה: Kiosk.Watch מנהל את המסך
             if (_shownByUs && !Overlay.RestVisible) _shownByUs = false;
-            if (!Config.Get("kiosk.saverEnabled", true) || !Config.Get("kiosk.saverWhenUnlocked", true)) return;
+            if (!Config.Get("kiosk.saverEnabled", true) || !Config.Get("kiosk.saverWhenUnlocked", false)) return;
             int min = Config.Get("kiosk.restIdleMinutes", 1);
             if (min <= 0 || Overlay.RestVisible) return;
             if (Kiosk.IdleMs() < min * 60000L) return;

@@ -1056,7 +1056,7 @@
       { name: 'rest', type: 'checkbox', label: 'מסך מנוחה כשאוצריא ממוזערת', value: st.restScreen !== false, hint: 'סמל אוצריא, שעה ותאריך במסך מלא. לחיצה בכל מקום מחזירה לאוצריא' },
       { name: 'saverOn', type: 'checkbox', label: 'שומר מסך', value: st.saverEnabled !== false, hint: 'מתג ראשי. כשהוא כבוי שומר המסך לא מופיע בכלל: לא בנעילה ולא בלעדיה. מסך המנוחה כשאוצריא ממוזערת נשלט בנפרד' },
       { name: 'idle', label: 'שומר מסך אחרי דקות ללא פעילות (ברירת מחדל: 1)', value: String(st.restIdleMinutes || 0), dir: 'ltr', placeholder: '0', hint: 'מסך המנוחה מופיע גם כשאוצריא פתוחה, אחרי הזמן הזה בלי מקלדת ועכבר. עד 240 דקות' },
-      { name: 'saverUnl', type: 'checkbox', label: 'שומר מסך גם כשהנעילה כבויה', value: st.saverWhenUnlocked !== false, hint: 'אחרי זמן ההמתנה שלמעלה, גם בלי מצב נעילה. לחיצה או מקש חוזרים לחלון הקודם' },
+      { name: 'saverUnl', type: 'checkbox', label: 'שומר מסך גם כשהנעילה כבויה', value: st.saverWhenUnlocked === true, hint: 'אחרי זמן ההמתנה שלמעלה, גם בלי מצב נעילה. לחיצה או מקש חוזרים לחלון הקודם' },
       { name: 'bootCover', type: 'checkbox', label: 'מסך מנוחה מיד בהדלקת המחשב (בנעילה), עד שאוצריא עולה', value: st.bootCover !== false, hint: 'נסגר לבד כשאוצריא מוכנה, או אחרי דקה. לחיצה סוגרת אותו מיד' }
     ];
     if (cityOptions.length > 1) {
