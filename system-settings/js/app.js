@@ -232,6 +232,8 @@
     main.scrollTop = 0;
     if (Date.now() - v.at > 5 * 60 * 1000) { v.at = Date.now(); s.load(v.body); }
     try { localStorage.setItem('ss.section', s.id); } catch (e) { /* ignore */ }
+    /* SDK 0.9.98.1: מצב לשחזור — אוצריא יכולה לפנות כרטיסייה ולטעון אותה מחדש באותו מסך */
+    try { if (window.Otzaria) window.Otzaria.call('plugin.setRestoreState', { state: { schemaVersion: 1, section: s.id } }).catch(function () {}); } catch (e) { /* מארח ישן */ }
   }
   SS.show = show;
 

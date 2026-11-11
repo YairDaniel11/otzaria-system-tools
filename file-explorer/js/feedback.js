@@ -20,6 +20,36 @@
     if (!b || b.isDemo) return;
     try { await b.call('/sys/feedback', { text: text, plugin: opts.plugin, version: opts.version || '', repo: opts.repo || REPO }, { timeoutMs: 8000 }); } catch (e) { /* גשר לא זמין */ }
   }
+  /* 11.2026: דיווחים מגרסה שהותקנה מקובץ (לא מהחנות) לא תמיד מגיעים — דרך גיבוי: issue בגיטהאב עם הטקסט (מועתק גם ללוח) */
+  async function openUrl(url) {
+    var names = ['app.openUrl', 'app.open_url'];
+    for (var i = 0; i < names.length; i++) {
+      try { var r = await window.Otzaria.call(names[i], { url: url }); if (!r || r.success !== false) return true; } catch (e) { /* הבא */ }
+    }
+    return false;
+  }
+  FB.githubFallback = async function (ui, details, title) {
+    var r = await ui.dialog({
+      title: 'לוודא שהדיווח יגיע', icon: 'info',
+      body: '<p>דיווחים מגרסה שהותקנה מקובץ (ולא מחנות אוצריא) לא תמיד מגיעים. אפשר לפתוח אותו גם בגיטהאב: הטקסט מועתק ללוח וממולא בדף שנפתח, ונשאר רק ללחוץ "Submit". דרך נוספת: פורום אוצריא.</p>',
+      actions: [{ label: 'סגירה', value: false }, { label: 'פתיחה בגיטהאב', value: true, kind: 'primary' }]
+    });
+    if (!r) return;
+    try { await navigator.clipboard.writeText(details); } catch (e) { /* לא חובה */ }
+    var url = 'https://github.com/' + REPO + '/issues/new?title=' + encodeURIComponent(title || 'דיווח') + '&body=' + encodeURIComponent(details.slice(0, 1800));
+    if (!(await openUrl(url))) ui.toast('לא ניתן לפתוח קישור. הטקסט הועתק ללוח — אפשר להדביק ב-github.com/' + REPO + '/issues', 'info');
+  };
+  /* מתג בהגדרות: דיווח קריסות אוטומטי (ברירת מחדל: פעיל; אוצריא תמיד מבקשת אישור לפני שליחה) */
+  FB.crashEnabled = function () { try { return localStorage.getItem('fb.crashOff') !== '1'; } catch (e) { return true; } };
+  FB.setCrashEnabled = function (on) { try { if (on) localStorage.removeItem('fb.crashOff'); else { localStorage.setItem('fb.crashOff', '1'); localStorage.removeItem(QKEY); } } catch (e) { /* כלום */ } };
+  FB.crashToggleHtml = function () {
+    return '<label class="fb-crash-toggle" style="display:flex;align-items:center;gap:0.5em;cursor:pointer"><input type="checkbox" data-fb-crash' + (FB.crashEnabled() ? ' checked' : '') + '>' +
+      '<span>דיווח קריסות אוטומטי (פעם אחת בהפעלה, באישורכם)</span></label>';
+  };
+  document.addEventListener('change', function (e) {
+    var c = e.target && e.target.closest && e.target.closest('[data-fb-crash]');
+    if (c) FB.setCrashEnabled(c.checked);
+  });
   /* opts: { ui, plugin, version, bridge, extra: function () { return 'שורות סביבה' } } */
   FB.open = async function (opts) {
     var ui = opts.ui;
@@ -51,8 +81,9 @@
     /* #70: גם ל-GitHub (issue ציבורי) דרך הגשר והמתווך, בנוסף לאוצריא */
     if (val !== 'cancelled') await toGithub(opts.bridge, details, opts);
     if (val === 'sent' || val === 'queued') ui.toast(val === 'sent' ? 'ההערה נשלחה. תודה!' : 'ההערה תישלח כשיהיה חיבור. תודה!', 'success');
-    else if (val === 'cancelled') ui.toast('השליחה בוטלה', 'info');
+    else if (val === 'cancelled') { ui.toast('השליחה בוטלה', 'info'); return; }
     else ui.toast('השליחה נכשלה. אפשר לנסות שוב מאוחר יותר.', 'error');
+    await FB.githubFallback(ui, details, type[1] + ': ' + opts.plugin + ' ' + (opts.version || ''));
   };
   /* ---------- דיווח קריסות אוטומטי דרך מערכת הדיווח של אוצריא (feedback.report, reportType: 'crash') ----------
      שגיאות JS שלא נתפסו נאספות לתור מקומי (עד 5, בלי כפילויות). באתחול הבא, או כשאוצריא טוענת את הדף
@@ -71,6 +102,7 @@
   var EXPECTED = { too_many: 1, busy: 1, unsupported: 1, pair_failed: 1, forbidden: 1, unpaired: 1, unreachable: 1, offline: 1, timeout: 1, transport: 1 };
   function expected(r) { return !!(r && typeof r === 'object' && (r.expected || EXPECTED[r.code])); }
   function push(msg, stack) {
+    if (!FB.crashEnabled()) return;
     var q = qGet(), key = String(msg).slice(0, 160);
     if (q.some(function (x) { return x.key === key; })) return;
     q.push({ key: key, at: new Date().toISOString(), text: scrub(msg + (stack ? '\n' + stack : '')) });
@@ -84,7 +116,7 @@
   };
   /* opts: { plugin, version, restore, bridge } — לקרוא מתוך plugin.boot */
   FB.reportCrashes = async function (opts) {
-    if (!window.Otzaria || FB._crashAsked) return;
+    if (!window.Otzaria || FB._crashAsked || !FB.crashEnabled()) return;
     var crashed = !!(opts && opts.restore && opts.restore.reason === 'crashed');
     var q = qGet();
     if (!crashed && !q.length) return;

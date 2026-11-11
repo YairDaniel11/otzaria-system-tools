@@ -43,6 +43,8 @@
       if (S.prov) v['last.' + S.prov.kind] = S.recycle ? '' : S.path;
       localStorage.setItem(LS, JSON.stringify(v));
     } catch (e) { /* אחסון לא זמין */ }
+    /* SDK 0.9.98.1: מצב קטן לשחזור — מאפשר לאוצריא לפנות כרטיסייה שלא בשימוש ולטעון אותה מחדש באותה תיקייה */
+    try { if (window.Otzaria && S.prov) window.Otzaria.call('plugin.setRestoreState', { state: { schemaVersion: 1, path: S.recycle ? '' : S.path } }).catch(function () {}); } catch (e) { /* מארח ישן */ }
   }
 
   /* ---------- פתיחת קישור והעתקה ללוח ---------- */
@@ -1124,6 +1126,7 @@
       '<img src="icon/brand.svg" alt="אחת שאלתי" width="144" height="144" style="display:block;margin:0 auto 12px">' +
       '<h3>סייר קבצים</h3><p class="muted">גרסה ' + FX.esc(FX.VERSION) + ' · חד בדרא, יאיר דניאל</p>' +
       '<p>עיון וניהול קבצים מתוך אוצריא: העתקה, העברה, מחיקה, שינוי שם, חיפוש, סל מיחזור, וצפייה ב-PDF, Word, טקסט ותמונות. עם אחת שאלתי — גישה לכל המחשב; בלעדיו — לתיקיות שאישרתם.</p></div></div>' +
+      '<div class="fx-set-card"><div class="fx-set-title">' + ic('info') + 'דיווחים</div>' + (window.Feedback && window.Feedback.crashToggleHtml ? window.Feedback.crashToggleHtml() : '') + '</div>' +
       '<div class="fx-set-card"><div class="fx-set-title">' + ic('info') + 'אחת שאלתי</div>' +
       setRow(b ? 'מחובר · גרסה ' + FX.esc(b.version || '?') : 'הגשר אינו מחובר', b ? '' : 'בלי הגשר הסייר עובד על תיקיות שאישרתם בלבד',
         '') + /* #59: בדיקת עדכונים רק בגשר */

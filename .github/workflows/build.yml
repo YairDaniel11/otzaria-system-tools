@@ -105,6 +105,10 @@ jobs:
           PV: ${{ steps.ver.outputs.version }}
         run: |
           $pv = $env:PV
+          # 11.2026 (עצירה): גרסה עגולה יציבה במניפסט (4.0.0) גוברת על גרסת הבנייה כשהיא גבוהה ממנה — אחרת אוצריא
+          # מסרבת להתקין מעל 3.x שבחנות. כשגרסת הבנייה תעלה מעליה, חוזרים אוטומטית למספור הבנייה.
+          $mv = (Get-Content file-explorer/manifest.json -Raw | ConvertFrom-Json).version
+          if ([version]$mv -gt [version]$pv) { $pv = $mv }
           foreach ($f in @("file-explorer/manifest.json", "system-settings/manifest.json")) {
             (Get-Content $f -Raw) -replace '"version":\s*"[^"]*"', ('"version": "' + $pv + '"') | Set-Content $f -Encoding utf8NoBOM -NoNewline
           }

@@ -4,6 +4,11 @@
   var I = window.I18N;
   var t = function (s) { return I.t(s); };
   I.add({
+    'דיווחים': 'Reports',
+    'דיווח קריסות אוטומטי (פעם אחת בהפעלה, באישורכם)': 'Automatic crash reports (once per run, with your approval)',
+    'לוודא שהדיווח יגיע': 'Make sure the report arrives',
+    'דיווחים מגרסה שהותקנה מקובץ (ולא מחנות אוצריא) לא תמיד מגיעים. אפשר לפתוח אותו גם בגיטהאב: הטקסט מועתק ללוח וממולא בדף שנפתח, ונשאר רק ללחוץ "Submit". דרך נוספת: פורום אוצריא.': 'Reports from a version installed from a file (not from the Otzaria store) do not always arrive. You can also open it on GitHub: the text is copied to the clipboard and filled in on the page that opens; just press "Submit". Another option: the Otzaria forum.',
+    'פתיחה בגיטהאב': 'Open on GitHub',
     'מעבר לסגנון הגדרות Windows': 'Switch to Windows Settings style',
     'מעבר לסגנון אוצריא': 'Switch to Otzaria style',
     'סגנון הגדרות Windows': 'Windows Settings style',
