@@ -19,7 +19,7 @@
     catch (e) { body.innerHTML = ui.errorBox(e, function () { load(body); }); return; }
     var built = await SS.screensaverFields(st);
     var fields = built.fields.concat([
-      { name: 'pw', label: 'סיסמת נעילה (אם הוגדרה)', type: 'password', dir: 'ltr' }
+      { name: 'pw', label: 'סיסמת נעילה (אם הוגדרה)', type: 'password', dir: 'ltr', hint: 'כשהנעילה כבויה אפשר לשמור (וגם לכבות את שומר המסך) בלי סיסמה' }
     ]);
     body.innerHTML =
       '<div class="card"><div class="card-title">שומר מסך ומסך מנוחה</div>' +

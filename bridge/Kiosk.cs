@@ -974,12 +974,24 @@ public static partial class Kiosk
         return new { active = false };
     }
 
+    private static readonly HashSet<string> SaverOnlyKeys = new(StringComparer.Ordinal)
+    {
+        "password", "saverEnabled", "saverWhenUnlocked", "restIdleMinutes", "restScreen", "restShowVerse", "restVerseText", "restShowClock",
+        "restShowZmanim", "restShowLogo", "restShowDedication", "restDedicationText", "restDedicationStyle", "restCandleFlicker", "restNoteText",
+        "restZmanimSide", "showParsha", "showDafYomi", "lockScreenImage", "yahrzeitDay", "yahrzeitMonth", "yahrzeitLabel", "zmanimShow",
+        "zmanimCity", "zmanimLocation", "zmanimDiaspora", "zmanimElevation", "zmanimFallbackEngine", "zmanimAlert", "zmanimAlertMinutes", "candleLightingMinutes"
+    };
+
     private static object Settings(JsonElement b)
     {
         // לפני שהוגדרה סיסמת נעילה בכלל (לא כאן ולא ברכיב ההקשחה) אין עדיין מה להגן עליו - Enable()
         // ממילא דורש HasPassword בנפרד, אז דחיית שמירת העדפות (שומר מסך וכו') עד שתוגדר סיסמה הייתה
         // חוסמת סתם הגדרה ראשונית, בלי לתרום לאבטחה בפועל
-        if (PasswordConfigured)
+        // #398: כשהנעילה כבויה, שינוי הגדרות תצוגה של שומר המסך בלבד (כולל כיבויו) לא דורש סיסמה — אחרת מי שביטל
+        // את הנעילה ושכח את הסיסמה לא יכול לכבות את השומר, והשמירה נכשלה והשומר המשיך להופיע
+        bool saverOnly = !IsActive && b.ValueKind == JsonValueKind.Object && string.IsNullOrEmpty(b.Str("password"))
+            && b.EnumerateObject().All(p => SaverOnlyKeys.Contains(p.Name));
+        if (PasswordConfigured && !saverOnly)
         {
             Verify(b.Str("password"), allowRecovery: false);
             AdminLog.Add("שינוי הגדרות נעילה");

@@ -162,11 +162,34 @@ public static class Config
     /// <summary>true כש-config.json וגם הגיבוי לא נקראו (הגדרות ריקות בפועל). מי שנשען על "ריק = לא נעול" צריך לדעת (ר' StatusNode)</summary>
     public static volatile bool CorruptNoBackup;
 
+    // #398: יותר מתהליך גשר אחד (למשל גשר שהשירות הפעיל + גשר המשתמש) — כל אחד החזיק עותק בזיכרון, ושינוי שנשמר
+    // באחד (כיבוי שומר המסך) לא הגיע לשני, שהמשיך להציג את השומר ואף דרס את הקובץ בשמירה הבאה שלו.
+    // עכשיו: אם הקובץ בדיסק חדש ממה שקראנו/שמרנו ואין שינויים שלא נשמרו — קוראים מחדש (בדיקה לכל היותר כל 2 שניות).
+    private static DateTime _diskStamp;
+    private static long _nextDiskCheck;
+    private static bool _dirty;
+
+    private static void RefreshIfChangedOnDisk()
+    {
+        if (_data == null || _dirty) return;
+        long now = Environment.TickCount64;
+        if (now < _nextDiskCheck) return;
+        _nextDiskCheck = now + 2000;
+        try
+        {
+            var w = File.GetLastWriteTimeUtc(FilePath);
+            if (w > _diskStamp) { _data = null; }
+        }
+        catch { }
+    }
+
     private static JsonObject Data
     {
         get
         {
+            RefreshIfChangedOnDisk();
             if (_data != null) return _data;
+            try { _diskStamp = File.GetLastWriteTimeUtc(FilePath); } catch { }
             // WHY (qa-final-a #11): קובץ חתוך/ריק (הפסקת חשמל) לא מפורש יותר בשקט כ"הגדרות ריקות" (kiosk.active=false, בלי סיסמה). קודם גיבוי (.bak),
             // ואם גם הוא פגום: דגל CorruptNoBackup, והעותק הפגום נשמר ל-.corrupt לפני שה-Save הבא דורס אותו
             _data = StateStore.Read(FilePath, out var st, out bool restored);
@@ -216,7 +239,7 @@ public static class Config
 
     public static void Set(string key, JsonNode value)
     {
-        lock (Gate) { Data[key] = value; }
+        lock (Gate) { Data[key] = value; _dirty = true; }
     }
 
     public static string[] Keys()
@@ -230,7 +253,7 @@ public static class Config
 
     public static void Remove(string key)
     {
-        lock (Gate) { Data.Remove(key); }
+        lock (Gate) { Data.Remove(key); _dirty = true; }
     }
 
     /// <summary>עותק עמוק של ההגדרות הנוכחיות (לחתימה/אימות ConfigSeal בלי לחשוף את האובייקט המשותף)</summary>
@@ -256,6 +279,8 @@ public static class Config
             // אטומי: זמני + Flush(true) + גיבוי של התקין האחרון + החלפה (כמו hardlock.json)
             StateStore.WriteAtomic(FilePath, Data.ToJsonString(SaveOptions));
             CorruptNoBackup = false;
+            _dirty = false;
+            try { _diskStamp = File.GetLastWriteTimeUtc(FilePath); } catch { }
         }
     }
 

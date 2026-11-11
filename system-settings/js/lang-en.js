@@ -144,6 +144,7 @@
     'הגדרות שומר המסך נשמרו': 'Screensaver settings saved',
     'עמודת זמני היום בשומר המסך': 'Zmanim column on the screensaver',
     'סיסמת נעילה (אם הוגדרה)': 'Lock password (if set)',
+    'כשהנעילה כבויה אפשר לשמור (וגם לכבות את שומר המסך) בלי סיסמה': 'When the lock is off you can save (and turn off the screensaver) without a password',
     'פעיל': 'On',
     'לא פעיל': 'Off',
     'שמע': 'Sound',
