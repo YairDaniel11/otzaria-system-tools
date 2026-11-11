@@ -344,5 +344,5 @@ kbd { font: 0.75em var(--font-mono); padding: 0.1em 0.45em; border-radius: 0.35e
 .ro-banner .ro-ic .ic { width: 1.6em; height: 1.6em; }
 .ro-banner .ro-text { flex: 1 1 18em; display: flex; flex-direction: column; gap: 0.125em; }
 .ro-banner .ro-text span { font-size: 0.9em; opacity: 0.9; }
-.app-content.ro { opacity: 0.72; filter: saturate(0.6); cursor: not-allowed; user-select: text; }
-.app-content.ro * { cursor: not-allowed !important; }
+/* 11.2026: בלי "אחת שאלתי" התוסף נראה ומתנהג כרגיל (ניווט, לשוניות, גלילה) — רק שינוי ערכים נחסם (ר' guardReadOnly ב-app.js) */
+.app-content.ro { user-select: text; }

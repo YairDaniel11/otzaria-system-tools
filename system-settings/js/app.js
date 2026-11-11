@@ -334,8 +334,8 @@
     if (!b) {
       b = ui.el('<div class="ro-banner" id="ro-banner" role="status">' +
         '<span class="ro-ic">' + ui.icon('bridge') + '</span>' +
-        '<div class="ro-text"><b>תצוגה בלבד — התוכנה "אחת שאלתי" אינה פועלת</b>' +
-        '<span>אפשר לעיין בהגדרות, אבל הערכים כאן לדוגמה ואי אפשר לשנות דבר עד שהתוכנה תופעל.</span></div>' +
+        '<div class="ro-text"><b>התוכנה "אחת שאלתי" אינה פועלת</b>' +
+        '<span>אפשר לעבור בין כל המסכים כרגיל. הערכים לדוגמה, ושינוי הגדרות יתאפשר כשהתוכנה תפעל.</span></div>' +
         '<button class="btn btn-tonal" id="ro-help">' + ui.icon('download') + 'איך מפעילים?</button></div>');
       var sb = document.getElementById('shell-body');
       sb.parentNode.insertBefore(b, sb);
@@ -343,11 +343,29 @@
     }
     b.hidden = false;
   }
+  /* 11.2026: במקום inert (שהקפיא את כל המסך) — חוסמים רק פעולות ששונות ערך: שינוי שדות, מתגים, מחוונים וכפתורי פעולה.
+     ניווט נשאר פעיל: לשוניות, הרחבה/כיווץ, קישורי עזרה וגלילה. */
+  var NAV_SEL = '[role="tab"], .k-tab, summary, a[href], [data-nav], [data-section], .seg-nav, .help-link';
+  var roToastAt = 0;
+  function roBlocked(e) {
+    var main = document.getElementById('content');
+    if (!main || !main.classList.contains('ro')) return;
+    var t = e.target;
+    if (!t || !t.closest || t.closest(NAV_SEL)) return;
+    var ctl = t.closest('input, select, textarea, button, [role="switch"], [role="slider"], [role="button"], .switch, .slider, .chip, .btn');
+    if (!ctl || !main.contains(ctl)) return;
+    if (e.type === 'keydown' && !/^(Enter| |ArrowLeft|ArrowRight|ArrowUp|ArrowDown|Home|End|PageUp|PageDown)$/.test(e.key)) {
+      if (!/^(INPUT|TEXTAREA)$/.test(ctl.tagName)) return;
+    }
+    e.preventDefault(); e.stopPropagation();
+    if (Date.now() - roToastAt > 2500) { roToastAt = Date.now(); try { ui.toast('כדי לשנות הגדרות צריך שהתוכנה "אחת שאלתי" תפעל', 'info'); } catch (x) { /* בלי טוסט */ } }
+  }
+  ['click', 'pointerdown', 'keydown', 'beforeinput', 'change', 'input'].forEach(function (ev) { document.addEventListener(ev, roBlocked, true); });
   function setReadOnly(on) {
     var main = document.getElementById('content');
     main.classList.toggle('ro', on);
-    if (on) main.setAttribute('inert', ''); else main.removeAttribute('inert');
-    main.setAttribute('aria-disabled', on ? 'true' : 'false');
+    main.removeAttribute('inert');
+    main.setAttribute('aria-readonly', on ? 'true' : 'false');
   }
   function resetViews() {
     views = {};

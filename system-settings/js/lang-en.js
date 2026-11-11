@@ -4,6 +4,9 @@
   var I = window.I18N;
   var t = function (s) { return I.t(s); };
   I.add({
+    'התוכנה "אחת שאלתי" אינה פועלת': 'The "Achat Shaalti" program is not running',
+    'אפשר לעבור בין כל המסכים כרגיל. הערכים לדוגמה, ושינוי הגדרות יתאפשר כשהתוכנה תפעל.': 'You can browse all screens as usual. Values are examples; changing settings will be possible once the program runs.',
+    'כדי לשנות הגדרות צריך שהתוכנה "אחת שאלתי" תפעל': 'Changing settings requires the "Achat Shaalti" program to be running',
     'דיווחים': 'Reports',
     'דיווח קריסות אוטומטי (פעם אחת בהפעלה, באישורכם)': 'Automatic crash reports (once per run, with your approval)',
     'לוודא שהדיווח יגיע': 'Make sure the report arrives',
