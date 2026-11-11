@@ -17,6 +17,34 @@ public static class Installer
 
     public static string InstalledExe => Path.Combine(Config.Dir, "OtzariaBridge.exe");
     public static string PluginsDir => Path.Combine(Config.Dir, "plugins");
+    /// <summary>תוספים מוצעים שאינם חלק מהגשר (11.2026: "שומר מסך" של חד בדרא) — מותקנים רק בבחירת המשתמש</summary>
+    public static string OptionalPluginsDir => Path.Combine(PluginsDir, "optional");
+
+    /// <summary>מציע/מתקין את התוספים המוצעים. ask=true: שאלה כן/לא (התקנה ידנית); אחרת מתקין רק אם נבחר במתקין (--with-screensaver)</summary>
+    public static void InstallOptionalPlugins(bool ask, bool chosen)
+    {
+        try
+        {
+            var files = Directory.Exists(OptionalPluginsDir) ? Directory.GetFiles(OptionalPluginsDir, "*.otzplugin") : Array.Empty<string>();
+            if (files.Length == 0 || !OtzariaProtocolRegistered()) return;
+            if (ask)
+            {
+                string q = Lang.T("להתקין גם את התוסף \"שומר מסך\" (של חד בדרא)?\nשומר מסך ללימוד בצבעי אוצריא: ספר וסלוגן, ספר נפתח, בועות וציטוטים. לא חובה.",
+                    "Also install the \"Screensaver\" plugin (by Chad Bedara)?\nA study screensaver in Otzaria's colors. Optional.");
+                var r = Lang.En
+                    ? MessageBox.Show(q, Program.AppNameEn, MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+                    : MessageBox.Show(q, Program.AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1, MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign);
+                chosen = r == DialogResult.Yes;
+            }
+            if (!chosen) return;
+            foreach (var f in files)
+            {
+                Process.Start(new ProcessStartInfo("otzaria://plugin/install-local?path=" + Uri.EscapeDataString(Path.GetFullPath(f))) { UseShellExecute = true });
+                Thread.Sleep(6000);
+            }
+        }
+        catch (Exception ex) { Config.Log("optional plugins: " + ex.Message); }
+    }
     private static string ShortcutPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), ShortcutName);
 
@@ -147,6 +175,8 @@ public static class Installer
         // גם בהתקנה שקטה (מתקין Inno): מבקשים מאוצריא להתקין את התוספים, ומחכים עד שכולם נשלחו —
         // אחרת התהליך יוצא והחוט ברקע נהרג לפני התוסף השני
         if (canInstall) InstallPluginsInOtzaria(wait: true);
+        // תוסף מוצע: בהתקנה ידנית — שאלה; במתקין — לפי תיבת הסימון (--with-screensaver)
+        if (canInstall) InstallOptionalPlugins(ask: showMessage, chosen: Environment.GetCommandLineArgs().Contains("--with-screensaver"));
     }
 
     private static void WatchUpdateHealth()
@@ -205,12 +235,15 @@ public static class Installer
         var asm = Assembly.GetExecutingAssembly();
         foreach (string res in asm.GetManifestResourceNames().Where(n => n.EndsWith(".otzplugin", StringComparison.OrdinalIgnoreCase)))
         {
-            Directory.CreateDirectory(PluginsDir);
-            string name = res.StartsWith("plugins.") ? res["plugins.".Length..] : res;
+            // תוסף מוצע (optional.*) נפרס לתת-תיקייה, כדי ש-InstallPluginsInOtzaria לא יתקין אותו בלי בחירת המשתמש
+            bool optional = res.StartsWith("optional.");
+            string dir = optional ? OptionalPluginsDir : PluginsDir;
+            Directory.CreateDirectory(dir);
+            string name = optional ? res["optional.".Length..] : res.StartsWith("plugins.") ? res["plugins.".Length..] : res;
             using var s = asm.GetManifestResourceStream(res)!;
-            using var f = File.Create(Path.Combine(PluginsDir, name));
+            using var f = File.Create(Path.Combine(dir, name));
             s.CopyTo(f);
-            count++;
+            if (!optional) count++;
         }
         return count;
     }

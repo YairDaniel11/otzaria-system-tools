@@ -45,6 +45,8 @@
   <!-- התוספים נארזים ב-CI לתיקייה plugins ומוטמעים כמשאב -->
   <ItemGroup>
     <EmbeddedResource Include="plugins\*.otzplugin" LogicalName="plugins.%(Filename)%(Extension)" />
+    <!-- תוספים מוצעים (לא חובה): נפרסים ל-plugins\optional ומותקנים רק אם המשתמש בחר (ר' Installer.InstallOptionalPlugins) -->
+    <EmbeddedResource Include="..\optional-plugins\*.otzplugin" LogicalName="optional.%(Filename)%(Extension)" />
     <!-- יומן השינויים מוטמע, כדי שיהיה זמין במגש בלי רשת -->
     <EmbeddedResource Include="..\CHANGELOG.md" LogicalName="CHANGELOG.md" />
     <EmbeddedResource Include="..\assets\icon-source.png" LogicalName="brand-1024.png" />

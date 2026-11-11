@@ -45,8 +45,12 @@ Source: "{#ExePath}"; DestDir: "{app}"; DestName: "OtzariaBridge.exe"; Flags: ig
 ; את %ProgramData%\OtzariaBridge (SYSTEM+Admins) ואת השירות מקימה ההתקנה המוקשחת (--install-service, HardLock.SecureDir, עם UAC).
 ; תיקיית העדכון {localappdata}\OtzariaBridge\update נוצרת ומוגנת ב-ACL ללא ירושה ע"י UpdateApi.ProtectedDir בכל עדכון;
 ; ה-installer לא יוצר אותה מראש כדי לא להשאיר אותה עם ACL יורש.
+[Tasks]
+Name: "screensaver"; Description: "להתקין גם את התוסף ""שומר מסך"" של חד בדרא (לא חובה) — שומר מסך ללימוד בצבעי אוצריא"
+
 [Run]
-Filename: "{app}\OtzariaBridge.exe"; Parameters: "--install --quiet"; StatusMsg: "מגדיר הפעלה אוטומטית ומתקין את התוספים באוצריא..."; Flags: waituntilterminated runhidden
+Filename: "{app}\OtzariaBridge.exe"; Parameters: "--install --quiet --with-screensaver"; Tasks: screensaver; StatusMsg: "מגדיר הפעלה אוטומטית ומתקין את התוספים באוצריא..."; Flags: waituntilterminated runhidden
+Filename: "{app}\OtzariaBridge.exe"; Parameters: "--install --quiet"; Tasks: not screensaver; StatusMsg: "מגדיר הפעלה אוטומטית ומתקין את התוספים באוצריא..."; Flags: waituntilterminated runhidden
 
 [Code]
 // ---- אישור בפועל שהתוספים הותקנו באוצריא (לא רק שהזרימה הופעלה) ----
