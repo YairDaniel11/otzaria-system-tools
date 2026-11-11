@@ -288,7 +288,7 @@
       return { ok: true };
     },
     '/sys/power': function (b) {
-      if (M.kiosk.active && b.action !== 'lock') throw mockErr('locked', 'הפעולה חסומה במצב נעילה');
+      if (M.kiosk.active && (b.action === 'restart' || b.action === 'shutdown' || b.action === 'signout') && !b.password) throw mockErr('wrong_password', 'הסיסמה שגויה');
       return { ok: true };
     },
     '/kiosk/status': function () { tempSync(); return Object.assign(clone(M.kiosk), { hard: clone(M.hard) }); },

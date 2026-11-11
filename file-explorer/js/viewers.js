@@ -46,11 +46,25 @@
       '<div class="fx-viewer" role="dialog" aria-modal="true" aria-label="' + FX.esc(entry.name) + '">' +
       '<div class="fx-vbar">' +
       '<button class="icon-btn" data-v="close" title="' + FX.t('סגירה') + ' (Esc)" aria-label="' + FX.t('סגירה') + '">' + ic('close') + '</button>' +
+      '<button class="icon-btn" data-v="prev" title="' + FX.t('הקובץ הקודם') + ' (Alt+→)" aria-label="' + FX.t('הקובץ הקודם') + '" hidden>' + ic('chevron') + '</button>' +
+      '<button class="icon-btn" data-v="next" title="' + FX.t('הקובץ הבא') + ' (Alt+←)" aria-label="' + FX.t('הקובץ הבא') + '" hidden><span style="display:inline-flex;transform:scaleX(-1)">' + ic('chevron') + '</span></button>' +
       '<b class="fx-vtitle" title="' + FX.esc(entry.name) + '">' + FX.esc(entry.name) + '</b>' +
       '<span class="fx-vtools">' + (opts.tools || '') + '</span>' +
       (opts.canOpen ? '<button class="btn btn-text" data-v="ext">' + ic('open') + FX.t('פתיחה ביישום') + '</button>' : '') +
       '</div><div class="fx-vbody" tabindex="0">' + FX.ui.loading(FX.t('טוען…')) + '</div></div>');
     document.body.appendChild(el);
+    /* מעבר בין קבצים באותה תיקייה */
+    function sibling(dir) {
+      if (!FX.app || !FX.app.siblings) return null;
+      var l = FX.app.siblings(entry), i = l.findIndex(function (x) { return x.path === entry.path; });
+      return i < 0 ? null : (l[i + dir] || null);
+    }
+    function go(dir) { var n = sibling(dir); if (n) { closeViewer(); FX.app.open(n); } }
+    var bp = el.querySelector('[data-v=prev]'), bn = el.querySelector('[data-v=next]');
+    if (sibling(-1)) bp.hidden = false;
+    if (sibling(1)) bn.hidden = false;
+    bp.addEventListener('click', function () { go(-1); });
+    bn.addEventListener('click', function () { go(1); });
     var state = {
       el: el, body: el.querySelector('.fx-vbody'), cleanup: null, prevFocus: prevFocus,
       onKey: function (e) {
@@ -58,6 +72,9 @@
         /* לכידת פוקוס: Tab/Shift+Tab מסתובבים רק בתוך שכבת הצופה, לא חוזרים אל הסייר שמאחוריה.
            כשיש דיאלוג פתוח מעל הצופה (למשל מאפיינים/אישור) — הוא זה שלוכד את הפוקוס, לא הצופה. */
         if (!document.querySelector('#dialogs .dlg-scrim')) FX.ui.trapTab(el, e);
+        if (e.altKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && !document.querySelector('#dialogs .dlg-scrim')) {
+          e.preventDefault(); e.stopPropagation(); go(e.key === 'ArrowRight' ? -1 : 1); return;
+        }
         if (opts.onKey) opts.onKey(e);
       }
     };

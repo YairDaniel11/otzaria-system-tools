@@ -234,7 +234,7 @@ public static class SysApi
     private static object Power(JsonElement b)
     {
         string action = b.Req("action");
-        // שינה/שנת-חורף/נעילת מסך מותרים בנעילה (הנעילה חוזרת בהפעלה הבאה של הגשר). הפעלה מחדש וכיבוי: רק בסיסמת
+        // שינה/שנת-חורף/נעילת מסך מותרים בנעילה (הנעילה חוזרת בהפעלה הבאה של הגשר). הפעלה מחדש, כיבוי והתנתקות: רק בסיסמת
         // הנעילה, או אם המנהל פתח במפורש את "power" ברשימת ההגדרות הפתוחות (kiosk.openSections).
         // WHY: אתחול מחדש בלחיצה היה פתוח תמיד, ומשם הדרך ל-Safe Mode / WinRE / שינוי אתחול קצרה.
         if (FsGuard.PowerNeedsAuth(action, Kiosk.IsActive, Kiosk.OpenSections))
@@ -249,7 +249,6 @@ public static class SysApi
                 SafeTask.Run(async () => { await Task.Delay(500); Application.SetSuspendState(PowerState.Hibernate, false, false); });
                 break;
             case "signout":
-                if (Kiosk.IsActive) throw BridgeException.Locked();
                 Process.Start(new ProcessStartInfo("shutdown", "/l") { CreateNoWindow = true, UseShellExecute = false });
                 break;
             case "restart":

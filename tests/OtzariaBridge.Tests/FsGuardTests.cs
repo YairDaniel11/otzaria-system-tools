@@ -202,6 +202,9 @@ public class FsGuardTests
     [Theory]
     [InlineData("restart", true, false, true)]
     [InlineData("shutdown", true, false, true)]
+    [InlineData("signout", true, false, true)]
+    [InlineData("signout", true, true, false)]
+    [InlineData("signout", false, false, false)]
     [InlineData("restart", true, true, false)]    // power נפתח במפורש
     [InlineData("restart", false, false, false)]  // אין נעילה
     [InlineData("sleep", true, false, false)]
