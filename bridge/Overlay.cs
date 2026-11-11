@@ -570,7 +570,8 @@ internal sealed class RestScreen : Form
         // טקסט אחד לשני הסגנונות: הנוסח המותאם (kiosk.restDedicationText); אם ריק — ההקדשה האישית של יאיר (kiosk.dedicationText); אחרת הקבועה
         string dedication = Config.Get("kiosk.restDedicationText", "").Trim();
         if (dedication.Length == 0) dedication = Config.Get("kiosk.dedicationText", "").Trim();
-        if (dedication.Length == 0) dedication = "לעילוי נשמת הנערה הצדקנית\nאסתר גיטה דינר ע\"ה\nבת רבי מיכאל שלום הלוי שיבדלט\"א\nתנצב\"ה";
+        // 11.2026: אין עוד הקדשה קבועה — רק מה שהמשתמש כתב (ריק = לא מוצג)
+        if (dedication.Length == 0) shDed = false;
         bool hasDedication = dedColumn && shDed;
         bool hasSideColumn = zmItems.Count > 0 || hasDedication;
         float colW = hasSideColumn ? Math.Min(380 * s, r.Width * 0.26f) : 0;
@@ -693,11 +694,10 @@ internal sealed class RestScreen : Form
         }
         else if (shDed)
         {
-            // נוסח מותאם (kiosk.restDedicationText): שורה 1 קטנה, שורה 2 מודגשת, השאר קטן. ריק = הקבוע
+            // נוסח מותאם (kiosk.restDedicationText): שורה 1 קטנה, שורה 2 מודגשת, השאר קטן. ריק = ההקדשה האישית, ואם גם היא ריקה — לא מוצג
             string custom = Config.Get("kiosk.restDedicationText", "").Trim();
-            string[] dl = custom.Length > 0
-                ? custom.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Take(4).ToArray()
-                : new[] { "לעילוי נשמת הנערה הצדקנית", "אסתר גיטה דינר ע\"ה", "בת רבי מיכאל שלום הלוי שיבדלט\"א", "תנצב\"ה" };
+            if (custom.Length == 0) custom = dedication; // ההקדשה האישית (kiosk.dedicationText); אין עוד ברירת מחדל קבועה
+            string[] dl = custom.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Take(4).ToArray();
             // שורת "· תנצב"ה" / "· ת.נ.צ.ב.ה" שבסוף שורה — יורדת לשורה משלה; כל שורה ממורכזת ומוקטנת אם רחבה מהמסגרת (לא נחתכת)
             var split = new List<string>();
             foreach (var line in dl)

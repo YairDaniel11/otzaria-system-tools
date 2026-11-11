@@ -821,7 +821,7 @@ public static class HardLock
                 Sc($"create {ServiceName} binPath= \"{bin.Replace("\"", "\\\"")}\" start= auto DisplayName= \"{Program.AppFullName}\"");
             else
                 Sc($"config {ServiceName} binPath= \"{bin.Replace("\"", "\\\"")}\" start= auto DisplayName= \"{Program.AppFullName}\"");
-            Sc($"description {ServiceName} \"{Program.AppFullName} — רכיב הנעילה המוקשחת, לעילוי נשמת אסתר גיטה דינר ע״ה\"");
+            Sc($"description {ServiceName} \"{Program.AppFullName} — רכיב הנעילה המוקשחת\"");
             foreach (string a in ServiceRecovery.FailureArgs(ServiceName)) Sc(a);
 
             PrepareBundleDir();

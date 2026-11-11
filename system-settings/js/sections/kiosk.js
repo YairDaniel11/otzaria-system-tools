@@ -1107,7 +1107,7 @@
     fields.push({ name: 'lockImg', type: 'checkbox', label: 'להציג גם במסך הנעילה של Windows', value: !!st.lockScreenImage,
       hint: 'תמונת מסך הנעילה של המחשב תהיה כמו שומר המסך (פסוק, סמל, זמני היום, הקדשה), ומתעדכנת כל חצי שעה. "זרקור Windows" (תמונות מתחלפות של מיקרוסופט) מכובה אוטומטית' });
     fields.push({ name: 'dedText', type: 'textarea', rows: 3, label: 'נוסח ההקדשה בשומר המסך', value: st.restDedicationText || '',
-      placeholder: 'ריק = ההקדשה הקבועה. שורה ראשונה קטנה, שורה שנייה מודגשת (שם), השאר קטן',
+      placeholder: 'ריק = בלי הקדשה. שורה ראשונה קטנה, שורה שנייה מודגשת (שם), השאר קטן',
       hint: 'אפשר לכתוב הקדשה אחרת או לעילוי נשמת יקיריכם. עד 4 שורות' });
     /* d992415 (יאיר) — "גם וגם": סגנון ההקדשה ונר מרצד לבחירת המשתמש. ברירת מחדל לפי 15.10: קבועה, בלי תזוזה */
     fields.push({ name: 'dedStyle', type: 'select', label: 'סגנון ההקדשה', value: st.restDedicationStyle || 'fixed',

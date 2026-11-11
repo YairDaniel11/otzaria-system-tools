@@ -225,8 +225,7 @@ internal sealed class AboutForm : Form
         var logo = new PictureBox { Image = new Icon(Overlay.AppIcon(), 64, 64).ToBitmap(), SizeMode = PictureBoxSizeMode.CenterImage, Height = 76, Dock = DockStyle.Top };
         var title = new Label { Text = Lang.T(Program.AppName, Program.AppNameEn), Font = new Font("Segoe UI Semibold", 16f), Height = 38, Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter };
         var ver = new Label { Text = Lang.T("גרסה ", "Version ") + Program.Version + " · " + Lang.T(Program.GemachName, Program.GemachNameEn), Height = 26, Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.DimGray };
-        var ded = new Label { Text = "לעילוי נשמת הנערה הצדקנית\nאסתר גיטה דינר בת רבי מיכאל שלום הלוי שיבדלט\"א\nתהא נשמתה צרורה בצרור החיים. תנצב\"ה", Height = 84, Font = new Font("Segoe UI", 10.5f), Dock = DockStyle.Top, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.FromArgb(90, 70, 40) };
-        // קרדיט נפרד מההקדשה: ספריית חישוב הזמנים של הגיבוי (לא קשור להקדשה למעלה)
+        // קרדיט: ספריית חישוב הזמנים של הגיבוי (לא קשור להקדשה למעלה)
         var zmanimCredit = new Label { Text = Lang.T(
                 "חישוב זמני היום (גיבוי): פרויקט Zmanim/KosherJava מאת Eliyahu Hershfeld (kosherjava.com), ברישיון LGPL",
                 "Fallback daily zmanim: the Zmanim/KosherJava project by Eliyahu Hershfeld (kosherjava.com), LGPL license"),
@@ -260,10 +259,10 @@ internal sealed class AboutForm : Form
         row.Controls.AddRange(new Control[] { _check, _install });
 
         if (OfflineMode.IsOn()) // #9: אוצריא במצב מנותק — מסתירים את אזור העדכונים
-            Controls.AddRange(new Control[] { lic, zmanimLink, zmanimCredit, ded, ver, title, logo });
+            Controls.AddRange(new Control[] { lic, zmanimLink, zmanimCredit, ver, title, logo });
         else
         {
-            Controls.AddRange(new Control[] { row, _state, link, lic, zmanimLink, zmanimCredit, ded, ver, title, logo });
+            Controls.AddRange(new Control[] { row, _state, link, lic, zmanimLink, zmanimCredit, ver, title, logo });
             Shown += async (_, _) => await DoCheck(false);
         }
     }

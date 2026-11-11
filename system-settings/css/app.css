@@ -2,9 +2,6 @@
    הבסיס המשותף (טוקנים, מעטפת, כפתורים, דיאלוגים וכו') עבר ל-css/base.css (ראו issue #22).
    כאן נשאר רק מה שספציפי לתוסף הגדרות המערכת. */
 
-.about-memorial { text-align: center; background: var(--color-surface-container); color: var(--color-on-surface); }
-.about-memorial h3 { font-size: 1.15em; margin: 0.25em 0; }
-.about-memorial p { color: var(--color-on-surface-variant); }
 
 /* ---------- הפעלה וכיבוי: רשת כפתורי הספק (ייחודי להגדרות מערכת; סייר הקבצים אינו משתמש בה) ---------- */
 .power-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75em; }

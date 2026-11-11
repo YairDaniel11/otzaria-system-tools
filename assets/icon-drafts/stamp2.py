@@ -27,7 +27,7 @@ def arc(text, r, fsize, top, font=FB, gap=1.0):
         a = a-step if top else a+step
 
 arc("שבתי בבית ה' כל ימי חיי לחזות בנועם ה' ולבקר בהיכלו", 400, 52, True, gap=1.04)
-arc('לע"נ הנערה הצדקת אסתר גיטה דינר ע"ה ב"ר מיכאל שלום שיבדלחט"א', 398, 38, False)
+arc("אחת שאלתי מאת ה' אותה אבקש", 398, 46, False, gap=1.04)
 
 def star(cx, cy, R, r, n=6):
     pts = []

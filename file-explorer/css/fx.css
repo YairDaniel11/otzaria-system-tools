@@ -436,8 +436,6 @@ a.btn { text-decoration: none; display: inline-flex; }
   border-radius: 1em; background: var(--color-primary-container); color: var(--color-on-primary-container);
 }
 .fx-set-logo .ic { width: 2em; height: 2em; }
-.fx-set-memorial { text-align: center; font-family: var(--font-main); background: var(--color-surface-container-low); }
-.fx-set-memorial b { display: block; font-size: 1.125em; margin: 0.25em 0; }
 .fx-set-actions { display: flex; gap: 0.5em; flex-wrap: wrap; margin-top: 0.5em; }
 .fx-upd:empty { display: none; }
 @media (max-width: 40em) {

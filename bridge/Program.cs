@@ -20,7 +20,6 @@ public static class Program
     // סלוגן מדויק לפי בעלת הריפו (14.10.2026)
     public const string Slogan = "תוכנת חסימת מחשב לתוכנות תורניות בלבד";
     public const string SloganEn = "Computer lock for Torah software only";
-    public const string Dedication = "לע\"נ אסתר גיטה דינר ע\"ה";
     public const string AppFullName = AppName + " - " + Slogan;
     public const string AppFullNameEn = AppNameEn + " — " + SloganEn;
 

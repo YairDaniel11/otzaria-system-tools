@@ -23,7 +23,7 @@ def arc(text,r,fsize,top,font=FB,gap=1.0):
         im.alpha_composite(t,(int(x-fsize),int(y-fsize)))
         a = a-step if top else a+step
 arc("שבתי בבית ה' כל ימי חיי לחזות בנועם ה' ולבקר בהיכלו",400,50,True,gap=1.04)
-arc('לע"נ הנערה הצדקת אסתר גיטה דינר ע"ה ב"ר מיכאל שלום שיבדלחט"א',398,38,False)
+arc("אחת שאלתי מאת ה' אותה אבקש",398,46,False)
 # small separators (stars) at the sides
 for ang in (0,math.pi):
     x=C+400*math.cos(ang); y=C+400*math.sin(ang); d.ellipse([x-9,y-9,x+9,y+9],fill=G)
