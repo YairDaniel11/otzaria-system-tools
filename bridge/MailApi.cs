@@ -31,6 +31,14 @@ internal static class MailApi
         Server.Route("/mail/read", b => Run(c => Read(c, b)));
         Server.Route("/mail/flag", b => Run(c => Flag(c, b)));
         Server.Route("/mail/attachment", b => Run(c => SaveAttachment(c, b)));
+        Server.Route("/mail/attachment-data", b => Run(c => AttachmentData(c, b)));
+        // שליחה ותור יוצא (11.2026): התוסף מעביר הודעות לגשר; הגשר שולח מיד, בזמן מתוזמן, או כשתחזור הרשת — גם כשהתוסף סגור
+        Server.Route("/mail/send", b => { Guard(); return QueueAdd(b, immediate: true); });
+        Server.Route("/mail/outbox/add", b => { Guard(); return QueueAdd(b, immediate: false); });
+        Server.Route("/mail/outbox/list", _ => QueueList());
+        Server.Route("/mail/outbox/cancel", b => QueueCancel(b.Req("id")));
+        _outboxTimer = new System.Threading.Timer(_ => { try { FlushOutbox().Wait(); } catch { } }, null, TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(60));
+        try { System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged += (_, e) => { if (e.IsAvailable) _ = Task.Run(FlushOutbox); }; } catch { }
     }
 
     private static void Guard()
@@ -50,6 +58,9 @@ internal static class MailApi
             host = a["host"]?.ToString() ?? "",
             port = (int?)a["port"] ?? 993,
             user = a["user"]?.ToString() ?? "",
+            name = a["name"]?.ToString() ?? "",
+            smtpHost = a["smtpHost"]?.ToString() ?? "",
+            smtpPort = (int?)a["smtpPort"] ?? 465,
             locked = Kiosk.IsActive && !Config.Get("kiosk.allowMail", false)
         };
     }
@@ -57,8 +68,19 @@ internal static class MailApi
     private static async Task<object> SetAccount(JsonElement b)
     {
         Guard();
-        string email = b.Req("email").Trim(), host = b.Req("host").Trim(), user = b.Str("user", email).Trim(), pw = b.Req("password");
+        string email = b.Req("email").Trim(), host = b.Req("host").Trim(), user = b.Str("user", email).Trim(), pw = b.Str("password", "");
         int port = (int)Math.Clamp(b.Long("port", 993), 1, 65535);
+        string smtpHost = (b.Str("smtpHost", "") ?? "").Trim();
+        int smtpPort = (int)Math.Clamp(b.Long("smtpPort", 0), 0, 65535);
+        if (smtpHost.Length == 0) (smtpHost, smtpPort) = GuessSmtp(host, smtpPort);
+        if (smtpPort == 0) smtpPort = 465;
+        // עדכון פרטים בלי להקליד שוב סיסמה: נשארת הסיסמה השמורה
+        if (pw.Length == 0)
+        {
+            string enc0 = Config.Get(Cfg + ".pw", "");
+            if (enc0.Length == 0) throw BridgeException.BadRequest("חסרה סיסמה");
+            try { pw = Encoding.UTF8.GetString(Unprotect(Convert.FromBase64String(enc0))); } catch { throw BridgeException.BadRequest("יש להקליד את הסיסמה מחדש"); }
+        }
         if (user.Length == 0) user = email;
         // בדיקת חיבור לפני שמירה — כך המשתמש מקבל מיד "סיסמה שגויה" ולא חשבון שבור
         using (var test = new ImapClient())
@@ -80,7 +102,7 @@ internal static class MailApi
             }
         }
         Disconnect();
-        Config.Set(Cfg, new System.Text.Json.Nodes.JsonObject { ["email"] = email, ["host"] = host, ["port"] = port, ["user"] = user });
+        Config.Set(Cfg, new System.Text.Json.Nodes.JsonObject { ["email"] = email, ["host"] = host, ["port"] = port, ["user"] = user, ["smtpHost"] = smtpHost, ["smtpPort"] = smtpPort, ["name"] = b.Str("name", "") });
         Config.Set(Cfg + ".pw", Convert.ToBase64String(Protect(Encoding.UTF8.GetBytes(pw))));
         Config.Save();
         return AccountInfo();
@@ -247,6 +269,9 @@ internal static class MailApi
             to = Addr(m.To),
             cc = Addr(m.Cc),
             subject = m.Subject ?? "",
+            messageId = m.MessageId ?? "",
+            references = string.Join(" ", m.References.Select(r => "<" + r + ">")),
+            replyTo = m.ReplyTo.Mailboxes.FirstOrDefault()?.Address ?? "",
             date = m.Date.ToString("o"),
             html = m.HtmlBody ?? "",
             text = m.TextBody ?? "",
@@ -283,6 +308,174 @@ internal static class MailApi
             else if (a is MessagePart mp) await mp.Message.WriteToAsync(fs);
         }
         return new { path };
+    }
+
+    /// <summary>תוכן קובץ מצורף כ-base64 — לשמירה במטמון המקומי של התוסף (קריאה בלי חיבור). max = תקרה בבתים</summary>
+    private static async Task<object> AttachmentData(ImapClient c, JsonElement b)
+    {
+        var f = await Folder(c, b.Str("folder", "INBOX"), FolderAccess.ReadOnly);
+        var m = await f.GetMessageAsync(new UniqueId((uint)b.Long("uid", 0)));
+        var a = m.Attachments.ElementAtOrDefault((int)b.Long("index", -1)) ?? throw BridgeException.NotFound("הקובץ המצורף לא נמצא");
+        long max = Math.Clamp(b.Long("max", 10L << 20), 1, 40L << 20);
+        using var ms = new MemoryStream();
+        if (a is MimePart part) await part.Content.DecodeToAsync(ms); else if (a is MessagePart mp) await mp.Message.WriteToAsync(ms);
+        if (ms.Length > max) return new { tooBig = true, size = ms.Length };
+        return new { name = a is MimePart p ? (p.FileName ?? "attachment") : "message.eml", type = a.ContentType?.MimeType ?? "application/octet-stream", size = ms.Length, data = Convert.ToBase64String(ms.ToArray()) };
+    }
+
+    // ================= שליחה ותור יוצא =================
+    private static System.Threading.Timer _outboxTimer;
+    private static readonly SemaphoreSlim SendGate = new(1, 1);
+    private static string OutboxDir => Path.Combine(Config.Dir, "mail-outbox");
+
+    private static (string, int) GuessSmtp(string imapHost, int port)
+    {
+        string h = imapHost.ToLowerInvariant();
+        if (h.Contains("gmail")) return ("smtp.gmail.com", port == 0 ? 465 : port);
+        if (h.Contains("office365") || h.Contains("outlook") || h.Contains("hotmail")) return ("smtp.office365.com", port == 0 ? 587 : port);
+        if (h.Contains("yahoo")) return ("smtp.mail.yahoo.com", port == 0 ? 465 : port);
+        if (h.Contains("me.com") || h.Contains("icloud")) return ("smtp.mail.me.com", port == 0 ? 587 : port);
+        return (h.StartsWith("imap.") ? "smtp." + h[5..] : h, port == 0 ? 465 : port);
+    }
+
+    private static object QueueAdd(JsonElement b, bool immediate)
+    {
+        if (Config.Raw(Cfg) == null) throw new BridgeException("no_account", "עדיין לא הוגדר חשבון דואר", 409);
+        if (b.Str("to", "").Trim().Length == 0) throw BridgeException.BadRequest("חסר נמען");
+        string id = b.Str("id", "");
+        if (id.Length == 0 || id.Any(ch => !char.IsLetterOrDigit(ch) && ch != '-')) id = Guid.NewGuid().ToString("N");
+        var node = System.Text.Json.Nodes.JsonNode.Parse(b.GetRawText())!.AsObject();
+        node["id"] = id;
+        node["queuedAt"] = DateTimeOffset.Now.ToString("o");
+        if (immediate) node.Remove("sendAt");
+        node["attempts"] = 0;
+        Directory.CreateDirectory(OutboxDir);
+        File.WriteAllText(Path.Combine(OutboxDir, id + ".json"), node.ToJsonString());
+        _ = Task.Run(FlushOutbox);
+        return new { id, queued = true };
+    }
+
+    private static object QueueList()
+    {
+        var list = new List<object>();
+        if (Directory.Exists(OutboxDir))
+            foreach (var f in Directory.GetFiles(OutboxDir, "*.json"))
+            {
+                try
+                {
+                    var n = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(f))!.AsObject();
+                    list.Add(new { id = n["id"]?.ToString(), to = n["to"]?.ToString(), subject = n["subject"]?.ToString(), sendAt = n["sendAt"]?.ToString() ?? "", attempts = (int?)n["attempts"] ?? 0, lastError = n["lastError"]?.ToString() ?? "" });
+                }
+                catch { }
+            }
+        var sent = Config.Raw("mail.sentLog") as System.Text.Json.Nodes.JsonArray;
+        return new { items = list, sent = sent?.Select(x => x?.ToString()).Take(50).ToArray() ?? Array.Empty<string>() };
+    }
+
+    private static object QueueCancel(string id)
+    {
+        if (id.Any(ch => !char.IsLetterOrDigit(ch) && ch != '-')) throw BridgeException.BadRequest("מזהה לא תקין");
+        string p = Path.Combine(OutboxDir, id + ".json");
+        bool had = File.Exists(p);
+        if (had) File.Delete(p);
+        return new { cancelled = had };
+    }
+
+    private static async Task FlushOutbox()
+    {
+        if (!Directory.Exists(OutboxDir)) return;
+        if (!System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable()) return;
+        if (Kiosk.IsActive && !Config.Get("kiosk.allowMail", false)) return;
+        if (!await SendGate.WaitAsync(0)) return;
+        try
+        {
+            foreach (var f in Directory.GetFiles(OutboxDir, "*.json"))
+            {
+                System.Text.Json.Nodes.JsonObject n;
+                try { n = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(f))!.AsObject(); } catch { continue; }
+                if (DateTimeOffset.TryParse(n["sendAt"]?.ToString(), out var at) && at > DateTimeOffset.Now) continue;
+                int attempts = (int?)n["attempts"] ?? 0;
+                // השהיה הולכת וגדלה בין ניסיונות כושלים (עד שעה)
+                if (attempts > 0 && DateTimeOffset.TryParse(n["lastTry"]?.ToString(), out var last)
+                    && DateTimeOffset.Now - last < TimeSpan.FromMinutes(Math.Min(60, attempts * attempts))) continue;
+                try
+                {
+                    await SendNow(n);
+                    File.Delete(f);
+                    var log = Config.Raw("mail.sentLog") as System.Text.Json.Nodes.JsonArray ?? new System.Text.Json.Nodes.JsonArray();
+                    log.Insert(0, n["id"]?.ToString());
+                    while (log.Count > 100) log.RemoveAt(log.Count - 1);
+                    Config.Set("mail.sentLog", log); Config.Save();
+                }
+                catch (Exception ex)
+                {
+                    n["attempts"] = attempts + 1; n["lastTry"] = DateTimeOffset.Now.ToString("o"); n["lastError"] = ex.Message;
+                    try { File.WriteAllText(f, n.ToJsonString()); } catch { }
+                    Config.Log("mail outbox: " + ex.Message);
+                }
+            }
+        }
+        finally { SendGate.Release(); }
+    }
+
+    private static InternetAddressList Parse(string s)
+    {
+        var l = new InternetAddressList();
+        foreach (var part in (s ?? "").Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            if (MailboxAddress.TryParse(part, out var mb)) l.Add(mb);
+            else throw BridgeException.BadRequest("כתובת לא תקינה: " + part);
+        return l;
+    }
+
+    private static async Task SendNow(System.Text.Json.Nodes.JsonObject n)
+    {
+        var a = Config.Raw(Cfg) as System.Text.Json.Nodes.JsonObject ?? throw new InvalidOperationException("אין חשבון דואר");
+        string pw = Encoding.UTF8.GetString(Unprotect(Convert.FromBase64String(Config.Get(Cfg + ".pw", ""))));
+        string email = a["email"]?.ToString() ?? "", user = a["user"]?.ToString() ?? email, name = a["name"]?.ToString() ?? "";
+        var (sh, sp0) = GuessSmtp(a["host"]?.ToString() ?? "", 0);
+        string smtpHost = a["smtpHost"]?.ToString() is { Length: > 0 } h ? h : sh;
+        int smtpPort = (int?)a["smtpPort"] is int sp and > 0 ? sp : sp0;
+
+        var msg = new MimeMessage();
+        msg.From.Add(new MailboxAddress(name, email));
+        msg.To.AddRange(Parse(n["to"]?.ToString()));
+        msg.Cc.AddRange(Parse(n["cc"]?.ToString()));
+        msg.Bcc.AddRange(Parse(n["bcc"]?.ToString()));
+        msg.Subject = n["subject"]?.ToString() ?? "";
+        if (n["inReplyTo"]?.ToString() is { Length: > 0 } irt) msg.InReplyTo = irt.Trim('<', '>');
+        if (n["references"]?.ToString() is { Length: > 0 } refs)
+            foreach (var r in refs.Split(' ', StringSplitOptions.RemoveEmptyEntries)) msg.References.Add(r.Trim('<', '>'));
+        var body = new BodyBuilder { TextBody = n["text"]?.ToString() ?? "" };
+        if (n["html"]?.ToString() is { Length: > 0 } html) body.HtmlBody = html;
+        if (n["attachments"] is System.Text.Json.Nodes.JsonArray atts)
+            foreach (var x in atts.OfType<System.Text.Json.Nodes.JsonObject>())
+            {
+                var bytes = Convert.FromBase64String(x["data"]?.ToString() ?? "");
+                body.Attachments.Add(x["name"]?.ToString() ?? "file", bytes, ContentType.Parse(x["type"]?.ToString() is { Length: > 0 } t ? t : "application/octet-stream"));
+            }
+        msg.Body = body.ToMessageBody();
+
+        using (var smtp = new MailKit.Net.Smtp.SmtpClient { Timeout = 60000 })
+        {
+            await smtp.ConnectAsync(smtpHost, smtpPort, smtpPort == 465 ? MailKit.Security.SecureSocketOptions.SslOnConnect : MailKit.Security.SecureSocketOptions.StartTls);
+            await smtp.AuthenticateAsync(user, pw);
+            await smtp.SendAsync(msg);
+            await smtp.DisconnectAsync(true);
+        }
+        // Gmail שומר בעצמו ב"דואר יוצא"; בשאר הספקים — מוסיפים עותק לתיקיית Sent (לא קריטי אם נכשל)
+        if (!smtpHost.Contains("gmail", StringComparison.OrdinalIgnoreCase))
+        {
+            await Gate.WaitAsync();
+            try
+            {
+                var c = await Client();
+                IMailFolder sent = null;
+                try { sent = c.GetFolder(SpecialFolder.Sent); } catch { }
+                if (sent != null) await sent.AppendAsync(msg, MessageFlags.Seen);
+            }
+            catch { }
+            finally { Gate.Release(); }
+        }
     }
 
     // ---- DPAPI (CurrentUser), כמו ב-PipeMac ----
