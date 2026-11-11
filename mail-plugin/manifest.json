@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "com.chadbedera.mail",
+  "name": "דואר",
+  "version": "0.9.0",
+  "stability": "beta",
+  "description": "קבלת דואר אלקטרוני בתוך אוצריא דרך אחת שאלתי (IMAP, קריאה בלבד): תיבת דואר בסגנון Gmail בצבעי אוצריא. דורש את אחת שאלתי.",
+  "author": "חד בדרא",
+  "entrypoint": "index.html",
+  "icon": "icon/icon.png",
+  "minAppVersion": "0.9.98",
+  "sdkVersion": "1.x",
+  "permissions": [
+    "network.localhost",
+    "app.open_url",
+    "plugin.open_other",
+    "events.subscribe:theme.changed"
+  ],
+  "network": {
+    "enabled": true,
+    "allowlist": ["127.0.0.1", "localhost"]
+  },
+  "contributes": {
+    "toolTab": {
+      "title": "דואר",
+      "order": 920,
+      "defaultPinned": false,
+      "iconName": "mail_24_regular"
+    }
+  }
+}

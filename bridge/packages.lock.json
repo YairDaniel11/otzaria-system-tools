@@ -8,6 +8,16 @@
         "resolved": "10.19041.0",
         "contentHash": "Me5vKNZ1JSg6txTsPQXaWx7fVNh+fmcUPPwtDKJtqvbMM0N8aoa/l/QPolkJIRnasCabCNt4v2zG4p1Q9HU98A=="
       },
+      "MailKit": {
+        "type": "Direct",
+        "requested": "[4.8.0, )",
+        "resolved": "4.8.0",
+        "contentHash": "zZ1UoM4FUnSFUJ9fTl5CEEaejR0DNP6+FDt1OfXnjg4igZntcir1tg/8Ufd6WY5vrpmvToAjluYqjVM24A+5lA==",
+        "dependencies": {
+          "MimeKit": "4.8.0",
+          "System.Formats.Asn1": "8.0.1"
+        }
+      },
       "Microsoft.NET.ILLink.Tasks": {
         "type": "Direct",
         "requested": "[8.0.31, )",
@@ -38,6 +48,21 @@
         "resolved": "1.5.0",
         "contentHash": "dFBZ2bPx9IXvBGsXTEtHeSXYVJT5hDXSc3y6vWFi66Fa3GnGdOa8JN1OtdDcbNMENkoTWi+mRywEUuHi7NQO/A=="
       },
+      "BouncyCastle.Cryptography": {
+        "type": "Transitive",
+        "resolved": "2.4.0",
+        "contentHash": "SwXsAV3sMvAU/Nn31pbjhWurYSjJ+/giI/0n6tCrYoupEK34iIHCuk3STAd9fx8yudM85KkLSVdn951vTng/vQ=="
+      },
+      "MimeKit": {
+        "type": "Transitive",
+        "resolved": "4.8.0",
+        "contentHash": "U24wp4LKED+sBRzyrWICE+3bSwptsTrPOcCIXbW5zfeThCNzQx5NCo8Wus+Rmi+EUkQrCwlI/3sVfejeq9tuxQ==",
+        "dependencies": {
+          "BouncyCastle.Cryptography": "2.4.0",
+          "System.Formats.Asn1": "8.0.1",
+          "System.Security.Cryptography.Pkcs": "8.0.0"
+        }
+      },
       "System.CodeDom": {
         "type": "Transitive",
         "resolved": "8.0.0",
@@ -47,6 +72,19 @@
         "type": "Transitive",
         "resolved": "8.0.0",
         "contentHash": "fdYxcRjQqTTacKId/2IECojlDSFvp7LP5N78+0z/xH7v/Tuw5ZAxu23Y6PTCRinqyu2ePx+Gn1098NC6jM6d+A=="
+      },
+      "System.Formats.Asn1": {
+        "type": "Transitive",
+        "resolved": "8.0.1",
+        "contentHash": "XqKba7Mm/koKSjKMfW82olQdmfbI5yqeoLV/tidRp7fbh5rmHAQ5raDI/7SU0swTzv+jgqtUGkzmFxuUg0it1A=="
+      },
+      "System.Security.Cryptography.Pkcs": {
+        "type": "Transitive",
+        "resolved": "8.0.0",
+        "contentHash": "ULmp3xoOwNYjOYp4JZ2NK/6NdTgiN1GQXzVVN1njQ7LOZ0d0B9vyMnhyqbIi9Qw4JXj1JgCsitkTShboHRx7Eg==",
+        "dependencies": {
+          "System.Formats.Asn1": "8.0.0"
+        }
       }
     },
     "net8.0-windows10.0.19041/win-x64": {
@@ -72,6 +110,14 @@
         "type": "Transitive",
         "resolved": "8.0.0",
         "contentHash": "fdYxcRjQqTTacKId/2IECojlDSFvp7LP5N78+0z/xH7v/Tuw5ZAxu23Y6PTCRinqyu2ePx+Gn1098NC6jM6d+A=="
+      },
+      "System.Security.Cryptography.Pkcs": {
+        "type": "Transitive",
+        "resolved": "8.0.0",
+        "contentHash": "ULmp3xoOwNYjOYp4JZ2NK/6NdTgiN1GQXzVVN1njQ7LOZ0d0B9vyMnhyqbIi9Qw4JXj1JgCsitkTShboHRx7Eg==",
+        "dependencies": {
+          "System.Formats.Asn1": "8.0.0"
+        }
       }
     }
   }

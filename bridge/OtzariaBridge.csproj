@@ -37,6 +37,8 @@
          מאת Eliyahu Hershfeld (kosherjava.com), רישיון LGPL-2.1. PackageReference רגיל
          (קישור דינמי, לא קוד מועתק) — ראו README.md וחלון "אודות" לקרדיט המלא -->
     <PackageReference Include="Zmanim" Version="1.5.0" />
+    <!-- ענף mail-plugin: קבלת דואר (IMAP) לתוסף "דואר" — bridge/MailApi.cs. MailKit/MimeKit, רישיון MIT -->
+    <PackageReference Include="MailKit" Version="4.8.0" />
     <PackageReference Include="Interop.UIAutomationClient" Version="10.19041.0" />
     <!-- נעוץ במפורש: אחרת ה-SDK מוסיף גרסה לפי ה-SDK המותקן (שונה בין מחשב ל-runner) וקובץ הנעילה נכשל ב-CI -->
     <PackageReference Include="Microsoft.NET.ILLink.Tasks" Version="8.0.31" PrivateAssets="all" />
