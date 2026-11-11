@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>דואר</title>
+  <link rel="stylesheet" href="css/mail.css">
+</head>
+<body>
+  <header class="mx-top">
+    <button class="mx-ib" id="mx-menu" title="תפריט" aria-label="תפריט"></button>
+    <div class="mx-brand"><img src="icon/icon.png" alt=""><span>דואר</span></div>
+    <label class="mx-search"><span class="mx-sic"></span><input id="mx-q" type="search" placeholder="חיפוש בדואר" autocomplete="off"></label>
+    <div class="mx-top-acts">
+      <button class="mx-ib" id="mx-refresh" title="רענון" aria-label="רענון"></button>
+      <button class="mx-ib" id="mx-settings" title="חשבון" aria-label="חשבון"></button>
+    </div>
+  </header>
+  <div class="mx-body">
+    <nav class="mx-side" id="mx-side">
+      <div class="mx-acct" id="mx-acct"></div>
+      <ul class="mx-folders" id="mx-folders"></ul>
+    </nav>
+    <main class="mx-main" id="mx-main">
+      <div class="mx-state" id="mx-state"></div>
+    </main>
+  </div>
+  <div class="mx-toast" id="mx-toast" role="status" aria-live="polite"></div>
+  <script src="js/bridge.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
