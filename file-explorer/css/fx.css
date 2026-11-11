@@ -582,3 +582,4 @@ mark.fx-hit.cur { background: var(--color-tertiary-container); color: var(--colo
 /* אודות: הטקסט התיאורי גדול ומודגש יותר */
 .fx-set-hero p:not(.muted) { font-size: 1.2em; font-weight: 600; line-height: 1.7; text-align: center; }
 .fx-set-hero p.muted { font-size: 1.05em; }
+.fx-vbar [hidden] { display: none; }

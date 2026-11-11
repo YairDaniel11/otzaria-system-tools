@@ -556,13 +556,13 @@ public static class FsGuard
     // ---------- הפעלה (/sys/power) ----------
 
     /// <summary>
-    /// האם פעולת הפעלה בנעילה פעילה דורשת סיסמה: הפעלה מחדש וכיבוי תמיד (אלא אם המנהל פתח במפורש "power"
-    /// ברשימת ההגדרות הפתוחות); התנתקות אסורה לגמרי בנעילה (נבדק בנפרד). שינה/נעילה אינן פוגעות.
+    /// האם פעולת הפעלה בנעילה פעילה דורשת סיסמה: הפעלה מחדש, כיבוי והתנתקות תמיד (אלא אם המנהל פתח במפורש "power"
+    /// ברשימת ההגדרות הפתוחות); שינה/נעילה אינן פוגעות.
     /// </summary>
     public static bool PowerNeedsAuth(string action, bool kioskActive, IEnumerable<string> openSections)
     {
         if (!kioskActive) return false;
-        if (action is not ("restart" or "shutdown")) return false;
+        if (action is not ("restart" or "shutdown" or "signout")) return false;
         return !openSections.Contains("power", StringComparer.OrdinalIgnoreCase);
     }
 }

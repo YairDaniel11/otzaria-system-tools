@@ -29,7 +29,20 @@
           var ok = await ui.confirm(p.title, '<p>' + p.text + '</p>', p.ok, p.danger ? 'danger' : '');
           if (!ok) return;
           try {
-            await SS.bridge.call('/sys/power', { action: p.action });
+            /* בנעילה: התנתקות/הפעלה מחדש/כיבוי דורשים את סיסמת הנעילה (אותו כלל כמו בשרת) */
+            var needPw = SS.bridge.health && SS.bridge.health.kioskActive && /^(signout|restart|shutdown)$/.test(p.action);
+            if (needPw) {
+              var r = await ui.dialog({
+                title: p.label, icon: 'lock',
+                fields: [{ name: 'pw', label: 'סיסמת נעילה', type: 'password', dir: 'ltr' }],
+                actions: [{ label: 'ביטול', value: false }, { label: p.ok, value: true, kind: 'danger' }],
+                validate: function (x) { return x.pw ? '' : 'יש להקליד סיסמה'; },
+                onSubmit: async function (x) { return await SS.bridge.call('/sys/power', { action: p.action, password: x.pw }); }
+              });
+              if (!r) return;
+            } else {
+              await SS.bridge.call('/sys/power', { action: p.action });
+            }
             ui.toast(p.label + ' — הפקודה נשלחה', 'success');
           } catch (e) { ui.error(e, p.label); }
         });

@@ -1943,7 +1943,13 @@
     }
   }
 
-  FX.app = { go: go, refresh: refresh, connect: connect, afterPolicy: afterPolicy, selected: function () { return S.prov ? selected() : []; }, prov: function () { return S.prov; } };
+  /* אחים של קובץ בצופה: קבצים באותה תיקייה מתוך הרשימה המוצגת (לא תיקיות/כוננים/ספרי אוצריא) */
+  function viewerSiblings(entry) {
+    function dir(p) { var i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\')); return i < 0 ? '' : p.slice(0, i); }
+    var d = dir(entry.path || '');
+    return (S.view || []).filter(function (e) { return e.type !== 'dir' && e.type !== 'drive' && !e.otzBook && dir(e.path || '') === d; });
+  }
+  FX.app = { siblings: viewerSiblings, open: function (e) { return openEntry(e); }, go: go, refresh: refresh, connect: connect, afterPolicy: afterPolicy, selected: function () { return S.prov ? selected() : []; }, prov: function () { return S.prov; } };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
