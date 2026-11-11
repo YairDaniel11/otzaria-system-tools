@@ -24,7 +24,7 @@
 
 - מורידים את התוכנה מהקישור הבא (הורדה ישירה)
 
-##### **[אחת שאלתי - חסימת המחשב ללימוד בלבד](https://github.com/e0548433917-gif/achat-shaalti/releases/download/v1.0.0/OtzariaBridge-Setup-1.0.0.exe)**
+##### **[אחת שאלתי - חסימת המחשב ללימוד בלבד](https://github.com/achat-shaalti/achat-shaalti/releases/download/v1.0.0/OtzariaBridge-Setup-1.0.0.exe)**
 
 - מפעילים = המתקין מתקין את הגשר, מגדיר הפעלה אוטומטית עם Windows, ופותח באוצריא את התקנת שני התוספים.
 
@@ -128,7 +128,7 @@
 
 - ממשק בעברית ובאנגלית.
 
-**[מאגר הגיטאב של התוסף](https://github.com/e0548433917-gif/achat-shaalti)**
+**[מאגר הגיטאב של התוסף](https://github.com/achat-shaalti/achat-shaalti)**
 
 ---
 
@@ -150,7 +150,7 @@
 
 **פרטים נוספים בספויילר:**
 
-**רישיון:** [PolyForm Noncommercial 1.0.0](https://github.com/e0548433917-gif/achat-shaalti/blob/main/LICENSE) — קוד פתוח לשימוש אישי ולא-מסחרי (גרסאות עד 3.7.0 תחת MIT).
+**רישיון:** [PolyForm Noncommercial 1.0.0](https://github.com/achat-shaalti/achat-shaalti/blob/main/LICENSE) — קוד פתוח לשימוש אישי ולא-מסחרי (גרסאות עד 3.7.0 תחת MIT).
 
 **קרדיטים:** חישוב זמני היום בשומר המסך משתמש בספריית [Zmanim](https://www.nuget.org/packages/Zmanim) (פורט של KosherJava) ברישיון LGPL-2.1.
 

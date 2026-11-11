@@ -19,6 +19,11 @@
         '<div class="card"><div class="card-title">אחת שאלתי</div><div data-slot="bridge">' + ui.loading() + '</div>' +
         '</div>' +
         '<div class="card"><div class="card-title">יומן שינויים</div>' + (window.renderChangelog ? window.renderChangelog(ui.esc) : '') + '</div>' +
+        '<div class="card"><div class="card-title">עדכון מקומי (בלי גיטהאב)</div>' +
+        '<p class="muted">למי שגיטהאב חסום ואין לו רשת: מורידים בדרך אחרת (ממחשב אחר, דוא״ל וכדומה) ארבעה קבצים מהוצאה אחת: <b dir="ltr">OtzariaBridge.exe</b>, <b dir="ltr">SHA256SUMS.txt</b>, <b dir="ltr">SHA256SUMS.txt.sig</b>, <b dir="ltr">BRIDGE_VERSION.txt</b>. בוחרים את כולם יחד. הגשר מאמת את החתימה ואת ה-SHA256 לפני ההתקנה, ודוחה כל חבילה בלי חתימה תקפה או בגרסה שאינה חדשה יותר.</p>' +
+        '<div class="row-actions full"><button class="btn btn-tonal" data-act="local-pick">' + ui.icon('download') + 'בחירת קבצי עדכון</button>' +
+        '<button class="btn btn-primary" data-act="local-install" disabled>' + ui.icon('shield') + 'אימות והתקנה</button></div>' +
+        '<div data-slot="local-files" class="muted small"></div></div>' +
         '<div class="card"><div class="card-title">התקנת הגשר</div><ol class="steps">' +
         '<li>מורידים את <b dir="ltr">OtzariaBridge.exe</b> מהקישור.</li>' +
         '<li>מפעילים פעם אחת. הגשר מעתיק את עצמו ל-<span dir="ltr">%LOCALAPPDATA%\\OtzariaBridge</span>, נרשם להפעלה אוטומטית ומופיע כאייקון ליד השעון.</li>' +
@@ -31,6 +36,28 @@
         SS.copyText(SS.BRIDGE_URL).then(function (ok) { ui.toast(ok ? 'הקישור הועתק' : 'ההעתקה נכשלה: ' + SS.BRIDGE_URL, ok ? 'success' : 'error'); });
       });
       body.querySelector('[data-act=dl]').addEventListener('click', function () { SS.openUrl(SS.BRIDGE_URL); });
+      /* עדכון מקומי: הגשר פותח חלון בחירה, מאמת חתימה ומתקין */
+      var picked = null;
+      var pickBtn = body.querySelector('[data-act=local-pick]');
+      var instBtn = body.querySelector('[data-act=local-install]');
+      var filesSlot = body.querySelector('[data-slot=local-files]');
+      function nm(p) { return p ? ui.esc(String(p).split(/[\/]/).pop()) : '<b>חסר</b>'; }
+      pickBtn.addEventListener('click', function () {
+        SS.bridge.call('/sys/update-local-pick', {}, { timeoutMs: 310000 }).then(function (r) {
+          if (!r || r.cancelled) return;
+          picked = r;
+          filesSlot.innerHTML = '<ul dir="ltr"><li>exe: ' + nm(r.exe) + '</li><li>sums: ' + nm(r.sums) + '</li><li>sig: ' + nm(r.sig) + '</li><li>version: ' + nm(r.bridgeVer) + '</li></ul>' +
+            (r.complete ? '' : '<p>חסרים קבצים - בחרו את כל ארבעת הקבצים יחד.</p>');
+          instBtn.disabled = !r.complete;
+        }).catch(function (e) { ui.toast(ui.errText(e), 'error'); });
+      });
+      instBtn.addEventListener('click', function () {
+        if (!picked || !picked.complete) return;
+        instBtn.disabled = true;
+        SS.bridge.call('/sys/update-local-install', { paths: picked.paths }, { timeoutMs: 180000 }).then(function (r) {
+          ui.toast(r && r.started ? 'החתימה אומתה. מתקין גרסה ' + r.version + ' והגשר יופעל מחדש...' : ((r && r.message) || 'לא הותקן'), r && r.started ? 'success' : 'info');
+        }).catch(function (e) { ui.toast(ui.errText(e), 'error'); instBtn.disabled = false; });
+      });
     },
     load: async function (body) {
       var slot = body.querySelector('[data-slot=bridge]');

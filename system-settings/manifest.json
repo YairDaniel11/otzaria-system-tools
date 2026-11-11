@@ -4,7 +4,7 @@
   "version": "4.0.0",
   "description": "כל הגדרות המחשב מתוך אוצריא: מסך, שמע, חשמל, שעה, רשת ומדפסות, ומצב נעילה ללימוד. פועל בלי אינטרנט. דורש את אחת שאלתי.",
   "author": "חד בדרא, יאיר דניאל",
-  "homepage": "https://github.com/Hadabadra/achat-shaalti",
+  "homepage": "https://github.com/achat-shaalti/achat-shaalti",
   "schemaVersion": 1,
   "sdkVersion": "1.x",
   "stability": "stable",
