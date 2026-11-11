@@ -2,7 +2,7 @@
 
 ## 15.10.2026 (ערב) — השיחה הבאה: אריזת 3.9.0
 ```
-המשך "אחת שאלתי" — ריפו e0548433917-gif/achat-shaalti, ענף next. קרא רק docs/CONTINUE_PROMPT.md (הסעיף הזה) ו-docs/RELEASE.md.
+המשך "אחת שאלתי" — ריפו achat-shaalti/achat-shaalti, ענף next. קרא רק docs/CONTINUE_PROMPT.md (הסעיף הזה) ו-docs/RELEASE.md.
 ארוז 3.9.0 לפי docs/RELEASE.md ("סדר מומלץ"): check-prerelease; לוודא שאין PR פתוחים; bump ל-bridge/OtzariaBridge.csproj ולשני המניפסטים (תיאור קצר ≤150); 
 CHANGELOG: לשנות "בעבודה (הגרסה הבאה)" ל-"3.9.0 (תאריך)" ולהוסיף בראשו את מה שנכנס היום (git log --no-merges origin/main..next);
 build לגשר (/opt/dn8/dotnet, ר' KNOWLEDGE); commit+push ל-next; fast-forward ל-main (ה-CI יוצר תג+Release). בלי חנות. לסמן בהערות שלא נבדק ב-Windows (#69).
@@ -13,7 +13,7 @@ build לגשר (/opt/dn8/dotnet, ר' KNOWLEDGE); commit+push ל-next; fast-forwa
 
 ## 15.10.2026 — (בוצע, חוץ מאריזה) לפני אריזת 3.9.0
 ```
-המשך "אחת שאלתי" — ריפו e0548433917-gif/achat-shaalti, ענף next. קרא רק docs/CONTINUE_PROMPT.md (הסעיף הזה).
+המשך "אחת שאלתי" — ריפו achat-shaalti/achat-shaalti, ענף next. קרא רק docs/CONTINUE_PROMPT.md (הסעיף הזה).
 בצע לפי הסדר, כל אחד ב-commit משלו ל-next:
 1. #65 — דיווח תקלות אוטומטי גם ל-GitHub דרך מתווך (פרטים ב-issue וב-A7 ב-docs/ROUNDS-3.7.1.md). להציע איפה ירוץ המתווך (למשל Cloudflare Worker שמחזיק את הטוקן), לממש את צד הגשר, ולהשאיר למשתמשת רק את הקמת המתווך עם הוראות מדויקות. בלי פרטים אישיים (שם משתמש בנתיבים, שמות קבצים).
 2. #67 — לנסות לממש בכל זאת: app.close_requested (לבדוק בקוד אוצריא ענף dev אם כבר קיים) ושיתוף סדרים עם "שמירת סדרים" (publishedData/storage אם יש). מה שעדיין חסום — לתעד ב-issue.
@@ -34,7 +34,7 @@ build לגשר (/opt/dn8/dotnet, ר' KNOWLEDGE); commit+push ל-next; fast-forwa
 
 ```
 המשך כלי מערכת לאוצריא — ענף next (לא main), בלי להוציא גרסה.
-ריפו: e0548433917-gif/achat-shaalti.
+ריפו: achat-shaalti/achat-shaalti.
 
 התחלה:
 - שכפל עם --depth 1 -b next וקרא רק docs/ROADMAP.md, הסעיף "ממתין לגרסה הבאה" ו"המשימות הבאות".

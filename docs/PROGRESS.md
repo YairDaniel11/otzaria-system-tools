@@ -46,7 +46,7 @@
 - שלב 4א: בצופה PDF נוסף `js/bridge.js` (לקוח לגשר דרך `network.fetchStream`), בחירת מנוע בהגדרות OCR, כרטיס הסבר הורדה (הורדת הגשר, בדיקת חיבור), הרשאת `network.localhost`. חזרה שקטה ל-Tesseract בכל כשל.
 - ⚠️ ב-pdf-viewer, דחיפה ל-main שנוגעת ב-manifest/index/CHANGELOG מפעילה workflow שמפרסם **לחנות** אוטומטית. אסור לדחוף כך בלי אישור. הריצה של 3.1.0 בוטלה ידנית; לבדוק בחנות אם 3.1.0 הופיעה.
 - שלב 5: גרסאות הגשר והתוספים 1.5.0.
-- שחרורים: https://github.com/e0548433917-gif/achat-shaalti/releases/tag/v1.5.0 · https://github.com/e0548433917-gif/pdf-viewer/releases/tag/v3.2.0
+- שחרורים: https://github.com/achat-shaalti/achat-shaalti/releases/tag/v1.5.0 · https://github.com/e0548433917-gif/pdf-viewer/releases/tag/v3.2.0
 - ב-pdf-viewer הפרסום לחנות אוטומטי בכל שינוי גרסה ב-main (באישור המשתמש מ-11.10.2026). 3.2.0 פורסמה כך.
 - התיקון ל-3.2.0: `standardFontDataUrl` + גופני Foxit/Liberation מתוך התוסף "ספריית PDF" (רישיונות כלולים). לא נבדק על Windows אמיתי מול הקובץ שהציג את הבעיה.
 - פתוח: מבחן השוואת OCR של Windows מול Tesseract; חתימת קוד ל-SmartScreen; "וורד לאוצריא".

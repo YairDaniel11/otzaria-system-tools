@@ -7,6 +7,9 @@ const ipHits = new Map();
 const fpHits = new Map();
 const FP_MAX = 1; // דיווח אחד לכל fingerprint ביממה
 const DAILY_MAX = 30;
+// WHY: הריפו עבר לארגון achat-shaalti. ברירת מחדל אם GH_REPO/GH_REPOS לא הוגדרו (לא ריפו ישן), ושם קצר של ריפו מקבל את הארגון הזה.
+const DEFAULT_ORG = 'achat-shaalti';
+const DEFAULT_REPO = DEFAULT_ORG + '/achat-shaalti';
 
 export default {
   async fetch(req, env) {
@@ -15,8 +18,8 @@ export default {
     try { d = await req.json(); } catch { return new Response('bad json', { status: 400 }); }
     const { title, body, fingerprint, version, kind, plugin } = d || {};
     // #70: repo לפי רשימה סגורה (GH_REPOS, מופרד בפסיקים); ברירת מחדל GH_REPO
-    const allowed = String(env.GH_REPOS || env.GH_REPO).split(',').map(x => x.trim()).filter(Boolean);
-    const want = typeof d.repo === 'string' && d.repo ? (d.repo.includes('/') ? d.repo : 'achat-shaalti/' + d.repo) : env.GH_REPO;
+    const allowed = String(env.GH_REPOS || env.GH_REPO || DEFAULT_REPO).split(',').map(x => x.trim()).filter(Boolean);
+    const want = typeof d.repo === 'string' && d.repo ? (d.repo.includes('/') ? d.repo : DEFAULT_ORG + '/' + d.repo) : (env.GH_REPO || DEFAULT_REPO);
     if (!allowed.includes(want)) return new Response('repo not allowed', { status: 400 });
     const manual = kind === 'manual';
     if (typeof title !== 'string' || typeof body !== 'string' || !/^[0-9a-f]{16}$/.test(fingerprint || '') ||

@@ -66,7 +66,7 @@
 
 ## תבנית לשיחה חדשה
 ```
-בצע את סבב X מתוך docs/ROUNDS-3.7.1.md בריפו e0548433917-gif/achat-shaalti (ענף next).
+בצע את סבב X מתוך docs/ROUNDS-3.7.1.md בריפו achat-shaalti/achat-shaalti (ענף next).
 clone --depth 1 -b next; לקרוא רק את הקובץ הזה ואת docs/KNOWLEDGE.md לפי הצורך (grep, לא קריאה מלאה).
 לעבוד על ענף next-x שנחתך מ-next; בגשר עדיף קובץ .cs חדש על עריכה.
 לסמן ✅ כל סעיף שבוצע, לעדכן docs/STATUS.md, rebase על origin/next, dotnet build, push ל-next.
