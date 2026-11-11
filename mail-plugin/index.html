@@ -18,15 +18,22 @@
   </header>
   <div class="mx-body">
     <nav class="mx-side" id="mx-side">
+      <button class="mx-compose-btn" id="mx-compose-btn"></button>
       <div class="mx-acct" id="mx-acct"></div>
       <ul class="mx-folders" id="mx-folders"></ul>
     </nav>
+    <div class="mx-col">
+    <div class="mx-status" id="mx-status" role="status" hidden></div>
     <main class="mx-main" id="mx-main">
       <div class="mx-state" id="mx-state"></div>
     </main>
+    </div>
   </div>
+  <section class="mx-compose" id="mx-compose" hidden aria-label="כתיבת הודעה"></section>
   <div class="mx-toast" id="mx-toast" role="status" aria-live="polite"></div>
   <script src="js/bridge.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/contacts.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
