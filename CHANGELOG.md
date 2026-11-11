@@ -29,7 +29,7 @@
 
 
 ## תוספים 1.0.6 (21.10.2026) — משוב #136, תוספים בלבד (הגשר ללא שינוי)
-- שוחרר ב-GitHub: [plugins-v1.0.6](https://github.com/Hadabadra/achat-shaalti/releases/tag/plugins-v1.0.6) — שני קובצי ה-.otzplugin ו-SHA256SUMS, לא מסומן latest.
+- שוחרר ב-GitHub: [plugins-v1.0.6](https://github.com/achat-shaalti/achat-shaalti/releases/tag/plugins-v1.0.6) — שני קובצי ה-.otzplugin ו-SHA256SUMS, לא מסומן latest.
 - ריבוע „סיסמה והגדרות” בעיצוב של „הגדרות נעילה”: הסבר וקבוצות מתקפלות (סיסמה וקודי שחזור · כלי ניהול · מצב נוכחי).
 - הגדרות מערכת ← נעילה: „נעילה והגבלה של סייר הקבצים” עבר לשורה בריבוע „סיסמה והגדרות”, עם כפתור לטאב „נעילת סייר הקבצים” כאן (במקום הפניה לתוסף השני).
 - כל ההסברים המתקפלים (מה עושה מצב נעילה, כיבוי וחשבון אחר, קיצור חירום, אזהרת מנהל, נעילה רכה) בריבוע אחד.
@@ -53,7 +53,7 @@
 ## 1.0.3 — 20.10.2026
 - גשר: רשימת "פתח באמצעות" ל-PDF מגיעה מ-Windows (SHAssocEnumHandlers) וכוללת את כל התוכנות הרשומות, גם אפליקציות Store.
 - הגדרות מערכת: מתג ראשי "שומר מסך" (`kiosk.saverEnabled`) שמכבה/מדליק את שומר המסך כולו.
-- **גשר מינימלי לצופה PDF+OCR** (תיקייה `bridge-min/`, קוד של arye000001-boop, MIT): גשר קטן רק ל-OCR, קבצים וצימוד. הורדה קבועה: https://github.com/Hadabadra/achat-shaalti/releases/download/bridge-min/OtzariaBridgeMin.exe (וגרסה קלה `OtzariaBridgeMin-light.exe`).
+- **גשר מינימלי לצופה PDF+OCR** (תיקייה `bridge-min/`, קוד של arye000001-boop, MIT): גשר קטן רק ל-OCR, קבצים וצימוד. הורדה קבועה: https://github.com/achat-shaalti/achat-shaalti/releases/download/bridge-min/OtzariaBridgeMin.exe (וגרסה קלה `OtzariaBridgeMin-light.exe`).
 - גשר: `/sys/location` מחזיר גם `altitude`, `heading`, `speed` כשיש GPS במחשב (אחרת `null`) — #105.
 - כולל את כל מה ששוחרר ב-1.0.2 (מוזג ל-next). טרם נבדק ב-Windows.
 
@@ -61,7 +61,7 @@
 - **"פתח באמצעות" ← צופה PDF+OCR:** הגשר נרשם ב-Windows (HKCU, בלי הרשאות מנהל) כאפשרות פתיחה לקובצי PDF, וגם ב"אפליקציות ברירת מחדל". בחירה בו פותחת את אוצריא ישירות בתוסף "צופה PDF+OCR" עם הקובץ, עם כל יכולות התוסף. נקודות קצה: `/pdf/assoc/status|register|unregister|open-settings`, `/pdf/inbox/list|ack`; שורת פקודה `--open-pdf "<path>"`. הרישום מוסר בהסרת הגשר.
 - **תיקון: חלון "בחירת תוכנה" נעלם מאחור ונסגר אחרי כמה שניות** — נפתח עכשיו בחזית (SHOpenWithDialog מחוט STA עם חלון בעלים) ונשאר עד שבוחרים. גם בסייר הקבצים.
 - **פעולות PDF בכל תוכנה מותקנת (שלב ג):** `/pdf/engines` מזהה את תוכנות ה-PDF שבמחשב ואת הפעולות של כל אחת — Ghostscript (גם זה של PDF24), qpdf, MuPDF, PDFtk, Poppler, LibreOffice, Word. `/pdf/op/begin|chunk|run|read|end` עם `engine` לבחירה: דחיסה, גווני אפור, PDF/A, תיקון, הגנה/הסרת סיסמה, אופטימיזציה לרשת, PDF לתמונות (ZIP), PDF לטקסט, מסמך משרדי ל-PDF. ב"פתיחה בתוכנה אחרת" נוספו PDF-XChange, Nitro, PDF24, PDFsam, Edge ו-WPS. הקובץ עובר בחתיכות, בלי צורך בנתיב בדיסק. משמש את "כלי PDF" בצופה PDF+OCR 5.8.0.
-- **תוספי הגדרות מערכת וסייר קבצים 1.0.2:** "אודות" הציג גרסה 3.4.0 — עכשיו 1.0.2; הוסר "מגרסה 3.0" מהסבר הצימוד; קישורי עדכון ל-Hadabadra/achat-shaalti.
+- **תוספי הגדרות מערכת וסייר קבצים 1.0.2:** "אודות" הציג גרסה 3.4.0 — עכשיו 1.0.2; הוסר "מגרסה 3.0" מהסבר הצימוד; קישורי עדכון ל-achat-shaalti/achat-shaalti.
 - **מצפן:** `POST /sys/compass` מחזיר את כיוון הצפון מחיישן המכשיר (טאבלטים), עבור "כיוון תפילה".
 - **דיווחים אוטומטיים מיותרים (#81–#92):** קריסת הבדיקה העצמית לא נמסרת יותר לשליחה דרך התוסף; קריאה מצינור רכיב ההקשחה אחרי פסק זמן לא מדווחת יותר כ-task-error.
 - טרם נבדק ב-Windows.

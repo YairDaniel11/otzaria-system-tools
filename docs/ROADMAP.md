@@ -15,7 +15,7 @@
 - פתוח מ-#105: הצגת מקור המיקום (`source`) ושימוש בכתובת בתוסף כיוון תפילה — במאגר נפרד, לא נגעתי.
 
 ## שוחרר: תוספים 1.0.6 (21.10.2026, #136) — תוספים בלבד
-- ✅ Release ב-GitHub: [plugins-v1.0.6](https://github.com/Hadabadra/achat-shaalti/releases/tag/plugins-v1.0.6) (21.10.2026), על 690bb07 ב-next, לא latest, עם שני קובצי ה-.otzplugin ו-SHA256SUMS. נוצר ע"י `.github/workflows/plugins-release.yml`. הגשר נשאר בגרסתו.
+- ✅ Release ב-GitHub: [plugins-v1.0.6](https://github.com/achat-shaalti/achat-shaalti/releases/tag/plugins-v1.0.6) (21.10.2026), על 690bb07 ב-next, לא latest, עם שני קובצי ה-.otzplugin ו-SHA256SUMS. נוצר ע"י `.github/workflows/plugins-release.yml`. הגשר נשאר בגרסתו.
 - איך משחררים תוספים בלבד בעתיד: מעדכנים את `version` בשני המניפסטים, ודוחפים תג `plugins-v<גרסה>`. אם דחיפת תגים חסומה (כמו בסשן Claude) — דוחפים ענף `release/plugins-v<גרסה>` והוורקפלואו יוצר את התג בעצמו. workflow_dispatch יעבוד רק אחרי שהקובץ יגיע ל-main.
 - בוצע: איחוד ריבועי טאב הנעילה, „סיסמה והגדרות” בעיצוב „הגדרות נעילה”, הפניה לטאב נעילת הסייר בתוך התוסף, סמל אודות בסרגל.
 - פתוח: #134–#135 (AggregateException בגשר) — לשיחה נפרדת על הגשר; #132–#133 לסגור ידנית (קריסה מכוונת של בדיקה עצמית); #126 סימון Releases ישנים כ-Pre-release (ידני).

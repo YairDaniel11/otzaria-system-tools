@@ -566,7 +566,7 @@ internal sealed class EmergencyForm : Form
 /// </summary>
 internal static class Diagnostics_
 {
-    public const string IssuesUrl = "https://github.com/Hadabadra/achat-shaalti/issues/new";
+    public const string IssuesUrl = "https://github.com/achat-shaalti/achat-shaalti/issues/new";
     private static readonly Regex Secret = new("(hash|salt|key|secret|password|token|recovery|client|auth)", RegexOptions.IgnoreCase);
 
     public static void Report()

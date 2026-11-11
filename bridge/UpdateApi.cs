@@ -18,7 +18,7 @@ namespace OtzariaBridge;
 /// </summary>
 public static class UpdateApi
 {
-    public const string Repo = "Hadabadra/achat-shaalti";
+    public const string Repo = "achat-shaalti/achat-shaalti";
     public const string ReleasesUrl = "https://github.com/" + Repo + "/releases/latest";
     public const string AllReleasesUrl = "https://github.com/" + Repo + "/releases";
     private const string ApiUrl = "https://api.github.com/repos/" + Repo + "/releases?per_page=20";
@@ -58,6 +58,100 @@ public static class UpdateApi
     {
         Server.Route("/sys/update-check", async b => Shape(await Check(b.Bool("force"))));
         Server.Route("/sys/update-install", async _ => await Install());
+        // עדכון מקומי (בלי גיטהאב): בחירת קבצים בחלון מערכת, ואז אימות מלא והתקנה
+        Server.Route("/sys/update-local-pick", async _ => await Task.Run(PickLocalFiles));
+        Server.Route("/sys/update-local-install", async b => await InstallLocal(b.StrArray("paths")));
+    }
+
+    // ===== עדכון מקומי =====
+    public const string ExeAssetName = "OtzariaBridge.exe";
+
+    public record LocalFiles(string Exe, string Sums, string Sig, string BridgeVer);
+
+    /// <summary>
+    /// מסווג קבצים שהמשתמש הוריד (גם אם הדפדפן שינה שם, למשל "SHA256SUMS (1).txt") לארבעת חלקי החבילה.
+    /// קובץ ההתקנה של Setup אינו OtzariaBridge.exe ולכן לא נתפס כקובץ העדכון. כפילות/חסר = null בשדה.
+    /// </summary>
+    public static LocalFiles ClassifyLocalFiles(IEnumerable<string> paths)
+    {
+        string exe = null, sums = null, sig = null, bv = null;
+        foreach (var p in paths ?? Array.Empty<string>())
+        {
+            string n = Path.GetFileName(p ?? "");
+            if (Regex.IsMatch(n, @"^SHA256SUMS(\s*\(\d+\))?\.txt\.sig(\s*\(\d+\))?$", RegexOptions.IgnoreCase)) sig ??= p;
+            else if (Regex.IsMatch(n, @"^SHA256SUMS(\s*\(\d+\))?\.txt$", RegexOptions.IgnoreCase)) sums ??= p;
+            else if (Regex.IsMatch(n, @"^BRIDGE_VERSION(\s*\(\d+\))?\.txt$", RegexOptions.IgnoreCase)) bv ??= p;
+            else if (Regex.IsMatch(n, @"^OtzariaBridge(\s*\(\d+\))?\.exe$", RegexOptions.IgnoreCase)) exe ??= p;
+        }
+        return new LocalFiles(exe, sums, sig, bv);
+    }
+
+    private static object PickLocalFiles()
+    {
+        if (Kiosk.IsActive) throw BridgeException.Locked("עדכון הגשר אינו זמין בזמן נעילה. בטלו את הנעילה, עדכנו, והפעילו אותה שוב.");
+        string[] result = null; Exception error = null;
+        var t = new Thread(() =>
+        {
+            try
+            {
+                using var owner = new System.Windows.Forms.Form { TopMost = true, ShowInTaskbar = false, Opacity = 0, StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen, Size = new System.Drawing.Size(1, 1) };
+                owner.Show();
+                using var dlg = new System.Windows.Forms.OpenFileDialog
+                {
+                    Title = "בחרו יחד: OtzariaBridge.exe, SHA256SUMS.txt, SHA256SUMS.txt.sig, BRIDGE_VERSION.txt",
+                    Multiselect = true, CheckFileExists = true, RestoreDirectory = true,
+                    Filter = "קבצי עדכון|OtzariaBridge*.exe;SHA256SUMS*;BRIDGE_VERSION*.txt|כל הקבצים|*.*",
+                };
+                if (dlg.ShowDialog(owner) == System.Windows.Forms.DialogResult.OK) result = dlg.FileNames;
+                owner.Close();
+            }
+            catch (Exception ex) { error = ex; }
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.IsBackground = true;
+        t.Start();
+        if (!t.Join(300000)) throw new BridgeException("timeout", "חלון בחירת הקבצים לא נסגר בזמן", 408);
+        if (error != null) throw error;
+        if (result == null) return new { cancelled = true };
+        var f = ClassifyLocalFiles(result);
+        return new { cancelled = false, paths = result, exe = f.Exe, sums = f.Sums, sig = f.Sig, bridgeVer = f.BridgeVer,
+                     complete = f.Exe != null && f.Sums != null && f.Sig != null && f.BridgeVer != null };
+    }
+
+    private static byte[] ReadCapped(string path, long max)
+    {
+        var fi = new FileInfo(path);
+        if (!fi.Exists) throw BridgeException.NotFound("הקובץ לא נמצא: " + path);
+        if (fi.Length > max) throw new BridgeException("failed", "הקובץ גדול מהמותר: " + fi.Name, 500);
+        return File.ReadAllBytes(path);
+    }
+
+    /// <summary>
+    /// התקנת עדכון מקומי: אותה שרשרת אימות בדיוק כמו עדכון מהרשת (חתימת ECDSA, תגית חתומה, keyver, hash, PE, אי-downgrade, rollback).
+    /// התגית נלקחת מהקובץ החתום עצמו (אחרי שהחתימה אומתה); בלי חתימה תקפה: נדחה. חובה בנעילה ובשירות: כמו Install.
+    /// </summary>
+    public static async Task<object> InstallLocal(string[] paths)
+    {
+        if (Kiosk.IsActive) throw BridgeException.Locked("עדכון הגשר אינו זמין בזמן נעילה. בטלו את הנעילה, עדכנו, והפעילו אותה שוב.");
+        if (Installer.ServiceOwnsRunningExe())
+            throw new BridgeException("failed", "הגשר מותקן כשירות (Program Files). עדכון אוטומטי אינו נתמך במצב זה: הריצו את קובץ ההתקנה העדכני כמנהל (או הסירו והתקינו מחדש את רכיב ההקשחה).", 409);
+        var f = ClassifyLocalFiles(paths);
+        if (f.Exe == null || f.Sums == null || f.Sig == null || f.BridgeVer == null)
+            throw BridgeException.BadRequest("חסרים קבצים. יש לבחור ארבעה: OtzariaBridge.exe, SHA256SUMS.txt, SHA256SUMS.txt.sig, BRIDGE_VERSION.txt.");
+        byte[] sums, bv, data; string sig;
+        try
+        {
+            sums = ReadCapped(f.Sums, MaxSmallDownload);
+            sig = System.Text.Encoding.ASCII.GetString(ReadCapped(f.Sig, MaxSmallDownload));
+            bv = ReadCapped(f.BridgeVer, MaxSmallDownload);
+            data = ReadCapped(f.Exe, MaxExeDownload);
+        }
+        catch (BridgeException) { throw; }
+        catch (Exception ex) { throw new BridgeException("internal", "קריאת הקבצים נכשלה: " + ex.Message, 500); }
+        // התגית: רק מתוך הקובץ שחתימתו תאומת ב-VerifyPackage (שם נבדקת גם התאמה והחתימה עצמה)
+        string tag = SignedTag(System.Text.Encoding.UTF8.GetString(sums));
+        if (tag == null) throw new BridgeException("failed", "בקובץ SHA256SUMS.txt אין תגית חתומה. העדכון בוטל.", 500);
+        return await InstallPackage(sums, sig, tag, bv, data, Program.Version);
     }
 
     private static object Shape(Info i) => new
@@ -440,7 +534,13 @@ public static class UpdateApi
         }
         catch (Exception ex) { throw new BridgeException("internal", "ההורדה נכשלה: " + ex.Message, 502); }
 
-        var (ver, hash) = VerifyPackage(sums, sig, info.Tag, bv, data, Program.Version, PublicKeySpkiBase64);
+        return await InstallPackage(sums, sig, info.Tag, bv, data, info.Current);
+    }
+
+    /// <summary>משותף לעדכון מהרשת ולעדכון מקומי: אימות מלא, כתיבה לתיקייה מוגנת, בדיקה חוזרת, גיבוי להחזרה, והפעלת המתקין</summary>
+    private static async Task<object> InstallPackage(byte[] sums, string sig, string tagForLog, byte[] bv, byte[] data, string current)
+    {
+        var (ver, hash) = VerifyPackage(sums, sig, tagForLog, bv, data, Program.Version, PublicKeySpkiBase64);
 
         string dir = ProtectedDir();
         string exe = Path.Combine(dir, "OtzariaBridge.exe");
@@ -455,7 +555,7 @@ public static class UpdateApi
                 throw new BridgeException("failed", "הקובץ שנכתב לדיסק שונה מהמאומת. העדכון בוטל.", 500);
             if (!FileVersionMatches(exe, ver))
                 throw new BridgeException("failed", "גרסת הקובץ אינה הגרסה החתומה. העדכון בוטל.", 500);
-            Config.Log("update: " + info.Current + " -> " + ver.ToString(3) + " tag=" + info.Tag + " sha256=" + hash);
+            Config.Log("update: " + current + " -> " + ver.ToString(3) + " tag=" + tagForLog + " sha256=" + hash);
 
             // X3: גיבוי הגרסה המותקנת + מצב ממתין לפני שהמתקין מחליף; המתקין ישחזר אם הגרסה החדשה לא מדווחת תקינות.
             // WHY: HandleLock משוחרר כדי שההחלפה לא תיחסם; Kiosk.IsActive כבר נבדק לעיל (נעילה פעילה = אין עדכון).

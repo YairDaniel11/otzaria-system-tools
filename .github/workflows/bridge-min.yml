@@ -1,8 +1,8 @@
 # גשר מינימלי לצופה PDF+OCR (קוד: arye000001-boop/-PDF, רישיון MIT)
 # כל דחיפה ל-main שנוגעת ב-bridge-min/ בונה מחדש ומעדכנת את המהדורה הקבועה "bridge-min",
 # כך שקישורי ההורדה נשארים קבועים:
-#   https://github.com/Hadabadra/achat-shaalti/releases/download/bridge-min/OtzariaBridgeMin.exe
-#   https://github.com/Hadabadra/achat-shaalti/releases/download/bridge-min/OtzariaBridgeMin-light.exe
+#   https://github.com/achat-shaalti/achat-shaalti/releases/download/bridge-min/OtzariaBridgeMin.exe
+#   https://github.com/achat-shaalti/achat-shaalti/releases/download/bridge-min/OtzariaBridgeMin-light.exe
 name: bridge-min
 on:
   push:

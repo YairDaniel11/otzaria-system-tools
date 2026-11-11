@@ -5,7 +5,7 @@
   var ui = SS.ui;
   SS.sections = SS.sections || [];
   SS.VERSION = '1.0.6';
-  SS.BRIDGE_URL = 'https://github.com/Hadabadra/achat-shaalti/releases/latest';
+  SS.BRIDGE_URL = 'https://github.com/achat-shaalti/achat-shaalti/releases/latest';
 
   var state = { current: null, connected: false, probeTimer: null, suspended: false, booted: false };
 

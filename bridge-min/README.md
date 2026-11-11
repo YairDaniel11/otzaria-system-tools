@@ -38,7 +38,7 @@
 * ללא נעילה, הקשחה, עדכונים והגדרות מערכת.
 
 ## הורדה (מהמאגר achat-shaalti)
-- נייד מלא: https://github.com/Hadabadra/achat-shaalti/releases/download/bridge-min/OtzariaBridgeMin.exe
-- קל (דורש .NET 10 Desktop Runtime): https://github.com/Hadabadra/achat-shaalti/releases/download/bridge-min/OtzariaBridgeMin-light.exe
+- נייד מלא: https://github.com/achat-shaalti/achat-shaalti/releases/download/bridge-min/OtzariaBridgeMin.exe
+- קל (דורש .NET 10 Desktop Runtime): https://github.com/achat-shaalti/achat-shaalti/releases/download/bridge-min/OtzariaBridgeMin-light.exe
 
 המקור: arye000001-boop/-PDF (רישיון MIT). ה-workflow `bridge-min.yml` בונה ומעדכן את המהדורה `bridge-min` בכל דחיפה ל-main שנוגעת בתיקייה.

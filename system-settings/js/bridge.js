@@ -586,8 +586,10 @@
     return { vendor: M.bios.vendor, manufacturer: M.bios.manufacturer, model: M.bios.model, steps: steps };
   };
   mockRoutes['/sys/update-check'] = function () {
-    return { current: '1.0.5', latest: '1.0.5', newer: false, canInstall: false, url: 'https://github.com/Hadabadra/achat-shaalti/releases/latest' };
+    return { current: '1.0.5', latest: '1.0.5', newer: false, canInstall: false, url: 'https://github.com/achat-shaalti/achat-shaalti/releases/latest' };
   };
+  mockRoutes['/sys/update-local-pick'] = function () { return { cancelled: true }; };
+  mockRoutes['/sys/update-local-install'] = function () { return { started: false, message: 'תצוגה מקדימה: אין התקנה' }; };
   mockRoutes['/sys/update-install'] = function () { return { started: false, message: 'הגשר מעודכן (1.0.3)' }; };
 
   var mock = {
