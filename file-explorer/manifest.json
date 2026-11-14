@@ -7,7 +7,7 @@
   "schemaVersion": 1,
   "sdkVersion": "1.x",
   "stability": "stable",
-  "minAppVersion": "0.9.98",
+  "minAppVersion": "0.9.98.1",
   "entrypoint": "index.html",
   "icon": "icon/icon.png",
   "permissions": [

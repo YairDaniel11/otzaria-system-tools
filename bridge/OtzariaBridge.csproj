@@ -10,7 +10,7 @@
     <Nullable>disable</Nullable>
     <AssemblyName>OtzariaBridge</AssemblyName>
     <RootNamespace>OtzariaBridge</RootNamespace>
-    <Version>1.0.7</Version>
+    <Version>1.0.8</Version>
     <Product>אחת שאלתי</Product>
     <AssemblyTitle>אחת שאלתי - תוכנת חסימת מחשב לתוכנות תורניות בלבד</AssemblyTitle>
     <Company>גמח תורת אסתר</Company>
